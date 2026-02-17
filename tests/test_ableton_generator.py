@@ -4,7 +4,7 @@ from pathlib import Path
 
 from logic2ableton.ableton_generator import generate_als, _pick_best_clip
 from logic2ableton.logic_parser import parse_logic_project
-from logic2ableton.models import AudioFileRef
+from logic2ableton.models import AudioFileRef, TrackMixerState
 
 TEST_PROJECT = Path("Might Last Forever.logicx")
 
@@ -310,3 +310,27 @@ def test_generate_als_liveset_metadata(tmp_path):
     assert live_set.find("OverwriteProtectionNumber") is not None
     assert live_set.find("LomId") is not None
     assert live_set.find("LomIdView") is not None
+
+
+def test_generate_als_custom_mixer_state(tmp_path):
+    project = parse_logic_project(TEST_PROJECT)
+    project.mixer_state = {
+        "KICK IN": TrackMixerState(volume_db=-6.0, pan=0.3),
+    }
+
+    als_path = generate_als(project, tmp_path / "output", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    for track in root.iter("AudioTrack"):
+        name = track.find(".//Name/EffectiveName")
+        if name is None or name.get("Value") != "KICK IN":
+            continue
+        mixer = track.find(".//DeviceChain/Mixer")
+        vol = float(mixer.find("Volume/Manual").get("Value"))
+        pan = float(mixer.find("Pan/Manual").get("Value"))
+        assert abs(vol - 0.5012) < 0.01
+        assert abs(pan - 0.3) < 0.01
+        return
+
+    raise AssertionError("KICK IN track not found")

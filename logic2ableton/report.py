@@ -51,8 +51,25 @@ def generate_report(project: LogicProject, plugin_matches: list[PluginMatch]) ->
             parts.append(f"comp: {comp_names}")
         if plain and not takes:
             parts.append(f"{len(plain)} file(s)")
-        detail = " — " + ", ".join(parts) if parts else ""
+        detail = " - " + ", ".join(parts) if parts else ""
         lines.append(f"  {i}. {track_name}{detail}")
+    lines.append("")
+
+    if project.mixer_state:
+        lines.append(f"MIXER STATE APPLIED ({len(project.mixer_state)} tracks):")
+        for name, state in project.mixer_state.items():
+            parts = [f"{state.volume_db:+.1f} dB"]
+            if state.pan != 0:
+                direction = "L" if state.pan < 0 else "R"
+                parts.append(f"pan {abs(state.pan):.0%}{direction}")
+            if state.is_muted:
+                parts.append("MUTED")
+            if state.is_soloed:
+                parts.append("SOLO")
+            lines.append(f"  {name} - {', '.join(parts)}")
+    else:
+        lines.append("MIXER STATE: defaults (0 dB, center pan)")
+        lines.append("  Tip: use --mixer mixer_overrides.json to set per-track levels")
     lines.append("")
 
     lines.append(f"PLUGINS FOUND ({len(plugin_matches)}):")

@@ -1,10 +1,11 @@
 """CLI entry point for the Logic Pro to Ableton Live converter."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-from logic2ableton.logic_parser import parse_logic_project
+from logic2ableton.logic_parser import load_mixer_overrides, parse_logic_project
 from logic2ableton.plugin_matcher import match_plugins
 from logic2ableton.ableton_generator import generate_als
 from logic2ableton.report import generate_report
@@ -42,6 +43,16 @@ def main(argv: list[str] | None = None) -> int:
         default="C:/Program Files/Common Files/VST3",
         help="VST3 directory",
     )
+    parser.add_argument(
+        "--mixer",
+        default=None,
+        help="Path to mixer_overrides.json with per-track volume/pan/mute/solo values",
+    )
+    parser.add_argument(
+        "--generate-mixer-template",
+        action="store_true",
+        help="Generate a mixer_overrides.json template with all track names",
+    )
 
     args = parser.parse_args(argv)
     logicx_path = Path(args.input)
@@ -52,6 +63,26 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Parsing {logicx_path.name}...")
     project = parse_logic_project(logicx_path, alternative=args.alternative)
+
+    if args.mixer:
+        project.mixer_state = load_mixer_overrides(Path(args.mixer))
+        print(f"  Loaded mixer overrides for {len(project.mixer_state)} track(s)")
+
+    if args.generate_mixer_template:
+        template = {
+            track_name: {
+                "volume_db": 0.0,
+                "pan": 0.0,
+                "is_muted": False,
+                "is_soloed": False,
+            }
+            for track_name in project.track_names
+        }
+        mixer_path = Path(args.output) / "mixer_overrides.json"
+        mixer_path.parent.mkdir(parents=True, exist_ok=True)
+        mixer_path.write_text(json.dumps(template, indent=2), encoding="utf-8")
+        print(f"  Mixer template: {mixer_path}")
+
     print(
         f"  Found {len(project.track_names)} tracks, "
         f"{len(project.audio_files)} audio files, "

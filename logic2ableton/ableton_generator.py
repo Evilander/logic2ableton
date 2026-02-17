@@ -17,7 +17,7 @@ import wave
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from logic2ableton.models import AudioFileRef, LogicProject
+from logic2ableton.models import AudioFileRef, LogicProject, TrackMixerState
 
 
 # Paths to the Ableton default template (installed with Live 12)
@@ -140,6 +140,33 @@ def _clone_track(template_track: ET.Element, allocator: _IdAllocator, name: str,
     return track
 
 
+def _set_mixer_state(track: ET.Element, mixer_state: TrackMixerState | None) -> None:
+    """Set volume, pan, mute, and solo on an AudioTrack mixer."""
+    if mixer_state is None:
+        return
+
+    mixer = track.find(".//DeviceChain/Mixer")
+    if mixer is None:
+        return
+
+    vol_elem = mixer.find("Volume/Manual")
+    if vol_elem is not None:
+        vol_elem.set("Value", str(mixer_state.volume_linear))
+
+    pan_elem = mixer.find("Pan/Manual")
+    if pan_elem is not None:
+        pan_elem.set("Value", str(max(-1.0, min(1.0, mixer_state.pan))))
+
+    # Speaker/Manual is true when unmuted.
+    speaker_elem = mixer.find("Speaker/Manual")
+    if speaker_elem is not None:
+        speaker_elem.set("Value", "false" if mixer_state.is_muted else "true")
+
+    solo_elem = mixer.find("SoloSink")
+    if solo_elem is not None:
+        solo_elem.set("Value", "true" if mixer_state.is_soloed else "false")
+
+
 def _make_audio_clip_xml(
     allocator: _IdAllocator,
     ref: AudioFileRef,
@@ -155,11 +182,12 @@ def _make_audio_clip_xml(
     """
     # Get duration and sample rate from WAV header
     duration_samples, file_sample_rate = _get_audio_info(ref.file_path)
-    duration_beats = (duration_samples * tempo / (sample_rate * 60)) if duration_samples > 0 else 4.0
+    timeline_sample_rate = file_sample_rate if file_sample_rate > 0 else sample_rate
+    duration_beats = (duration_samples * tempo / (timeline_sample_rate * 60)) if duration_samples > 0 else 4.0
     duration_secs = duration_samples / file_sample_rate if duration_samples > 0 else 2.0
 
     # Calculate timeline position from BWF timestamp
-    start_beats = ref.start_position_samples * tempo / (sample_rate * 60)
+    start_beats = ref.start_position_samples * tempo / (timeline_sample_rate * 60)
 
     clip = ET.Element("AudioClip")
     clip.set("Id", str(allocator.next()))
@@ -444,6 +472,10 @@ def generate_als(
         _inject_clips_into_track(
             track, track_clips, allocator, project.tempo, project.sample_rate, project_folder
         )
+
+        # Apply mixer values when present.
+        if project.mixer_state:
+            _set_mixer_state(track, project.mixer_state.get(track_name))
 
         tracks_elem.append(track)
 

@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from logic2ableton.models import AudioFileRef, LogicProject, PluginInstance, parse_audio_filename, samples_to_beats
+from logic2ableton.models import (
+    AudioFileRef,
+    LogicProject,
+    PluginInstance,
+    TrackMixerState,
+    parse_audio_filename,
+    samples_to_beats,
+)
 
 
 def test_audio_file_ref_creation():
@@ -130,3 +137,28 @@ def test_samples_to_beats_kick_in_01():
 def test_samples_to_beats_kick_in_02():
     # 11,554,200 samples at 120 BPM / 44100 = 524 beats (131 bars * 4)
     assert samples_to_beats(11_554_200, 120, 44100) == 524.0
+
+
+def test_track_mixer_state_defaults():
+    m = TrackMixerState()
+    assert m.volume_db == 0.0
+    assert m.pan == 0.0
+    assert m.is_muted is False
+    assert m.is_soloed is False
+
+
+def test_track_mixer_state_custom():
+    m = TrackMixerState(volume_db=-6.0, pan=-0.5, is_muted=True, is_soloed=False)
+    assert m.volume_db == -6.0
+    assert m.pan == -0.5
+    assert m.is_muted is True
+    assert m.is_soloed is False
+
+
+def test_track_mixer_state_volume_linear():
+    m = TrackMixerState(volume_db=0.0)
+    assert abs(m.volume_linear - 1.0) < 0.001
+    m2 = TrackMixerState(volume_db=-6.0)
+    assert abs(m2.volume_linear - 0.5012) < 0.001
+    m3 = TrackMixerState(volume_db=-70.0)
+    assert m3.volume_linear < 0.001

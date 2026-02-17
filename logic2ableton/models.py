@@ -15,6 +15,21 @@ class AudioFileRef:
 
 
 @dataclass
+class TrackMixerState:
+    """Per-track mixer state: volume, pan, mute, solo."""
+    volume_db: float = 0.0
+    pan: float = 0.0
+    is_muted: bool = False
+    is_soloed: bool = False
+
+    @property
+    def volume_linear(self) -> float:
+        """Convert dB to Ableton's linear fader scale."""
+        linear = 10 ** (self.volume_db / 20)
+        return max(0.0003162277571, min(1.99526238, linear))
+
+
+@dataclass
 class PluginInstance:
     name: str               # Preset name
     au_type: str            # 4CC type (aufx, aumu, etc.)
@@ -35,6 +50,7 @@ class LogicProject:
     plugins: list[PluginInstance]
     track_names: list[str]  # Ordered list of unique track names
     alternative: int        # Which alternative was parsed
+    mixer_state: dict[str, TrackMixerState] | None = None
 
 
 def parse_audio_filename(filename: str) -> tuple[str, int, bool, str]:

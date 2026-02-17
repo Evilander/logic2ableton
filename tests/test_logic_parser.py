@@ -1,9 +1,13 @@
+import json
+import struct
 from pathlib import Path
 
 from logic2ableton.logic_parser import (
+    _get_aiff_timestamp,
     discover_audio_files,
     extract_plugins,
     extract_regions,
+    load_mixer_overrides,
     parse_logic_project,
     parse_metadata,
     parse_project_info,
@@ -132,3 +136,49 @@ def test_parse_logic_project_has_start_positions():
     kick_02 = [r for r in project.audio_files if r.filename == "KICK IN#02.wav"]
     assert len(kick_02) == 1
     assert kick_02[0].start_position_samples == 28_135_800  # bar 320
+
+
+def test_get_aiff_timestamp_handles_odd_chunk_without_pad(tmp_path):
+    def marker_bytes(marker_id: int, position: int, name: str) -> bytes:
+        raw_name = name.encode("ascii")
+        payload = struct.pack(">HI", marker_id, position) + bytes([len(raw_name)]) + raw_name
+        if len(raw_name) % 2 == 0:
+            payload += b"\x00"
+        return payload
+
+    ssnd_chunk = b"SSND" + struct.pack(">I", 1) + b"\x00"  # odd-sized chunk with no pad byte
+    mark_payload = (
+        struct.pack(">H", 2)
+        + marker_bytes(1, 400, "Start")
+        + marker_bytes(2, 0, "Timestamp: 158760500")
+    )
+    mark_chunk = b"MARK" + struct.pack(">I", len(mark_payload)) + mark_payload
+    body = b"AIFF" + ssnd_chunk + mark_chunk
+    form = b"FORM" + struct.pack(">I", len(body)) + body
+
+    aiff_path = tmp_path / "odd_mark.aif"
+    aiff_path.write_bytes(form)
+
+    timestamp, start_offset = _get_aiff_timestamp(aiff_path)
+    assert timestamp == 158_760_500
+    assert start_offset == 400
+
+
+def test_load_mixer_overrides(tmp_path):
+    data = {
+        "KICK IN": {"volume_db": -3.0, "pan": 0.0},
+        "SNARE": {"volume_db": -6.0, "pan": 0.2, "is_muted": True},
+    }
+    json_path = tmp_path / "mixer_overrides.json"
+    json_path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = load_mixer_overrides(json_path)
+    assert "KICK IN" in result
+    assert result["KICK IN"].volume_db == -3.0
+    assert result["SNARE"].is_muted is True
+    assert result["SNARE"].pan == 0.2
+
+
+def test_load_mixer_overrides_missing_file():
+    result = load_mixer_overrides(Path("nonexistent.json"))
+    assert result == {}
