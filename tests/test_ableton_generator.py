@@ -376,6 +376,16 @@ def test_find_template_custom_path_missing():
     assert result is None
 
 
+@pytest.mark.skipif(
+    not any(
+        Path(p).exists()
+        for p in [
+            "C:/ProgramData/Ableton",
+            "/Library/Application Support/Ableton",
+        ]
+    ),
+    reason="Ableton Live not installed",
+)
 def test_find_template_auto_discovery():
     """Auto-discovery should find a template on this machine."""
     result = _find_template()
