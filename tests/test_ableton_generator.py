@@ -1,8 +1,9 @@
 import gzip
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
-from logic2ableton.ableton_generator import generate_als, _pick_best_clip
+from logic2ableton.ableton_generator import generate_als, _pick_best_clip, _find_template
 from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.models import AudioFileRef, TrackMixerState
 
@@ -334,3 +335,34 @@ def test_generate_als_custom_mixer_state(tmp_path):
         return
 
     raise AssertionError("KICK IN track not found")
+
+
+def test_find_template_custom_path(tmp_path):
+    """--template flag should override auto-discovery."""
+    fake_template = tmp_path / "custom.als"
+    fake_template.write_bytes(b"fake")
+    result = _find_template(custom_path=fake_template)
+    assert result == fake_template
+
+
+def test_find_template_custom_path_missing():
+    """Missing custom template returns None."""
+    result = _find_template(custom_path=Path("/nonexistent/template.als"))
+    assert result is None
+
+
+def test_find_template_auto_discovery():
+    """Auto-discovery should find a template on this machine."""
+    result = _find_template()
+    assert result is not None
+    assert result.name == "DefaultLiveSet.als"
+
+
+def test_generate_als_with_custom_template(tmp_path):
+    """generate_als should accept template_path parameter."""
+    # Use the real template found by auto-discovery
+    real_template = _find_template()
+    assert real_template is not None
+    project = parse_logic_project(TEST_PROJECT)
+    als_path = generate_als(project, tmp_path / "output", copy_audio=False, template_path=real_template)
+    assert als_path.exists()

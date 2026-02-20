@@ -41,19 +41,31 @@ It does not yet transfer automation, MIDI, or full routing topology.
 
 ## Requirements
 
-- Python 3.11+
-- Windows (current template discovery paths are Windows-specific)
+- Windows or macOS
 - Ableton Live 12 installed locally (for `DefaultLiveSet.als` template)
 - Optional: VST3 plugins in `C:/Program Files/Common Files/VST3`
 
 ## Installation
 
+### Standalone executable (no Python required)
+
+Download the latest release from [GitHub Releases](https://github.com/Evilander/logic2ableton/releases):
+
+- **Windows**: `logic2ableton-windows-x64.exe`
+- **macOS**: `logic2ableton-macos-x64`
+
+### Via pip
+
+```bash
+pip install logic2ableton
+```
+
+### From source
+
 ```bash
 git clone https://github.com/Evilander/logic2ableton.git
 cd logic2ableton
-python -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip
+pip install -e .
 ```
 
 No third-party Python dependencies are required.
@@ -63,36 +75,39 @@ No third-party Python dependencies are required.
 ### Convert a project
 
 ```bash
-python -m logic2ableton "A:\path\to\MySong.logicx" --output .\output
+logic2ableton "path/to/MySong.logicx" --output ./output
 ```
 
 ### Generate report only
 
 ```bash
-python -m logic2ableton "A:\path\to\MySong.logicx" --report-only
+logic2ableton "path/to/MySong.logicx" --report-only
 ```
 
 ### Convert without copying audio
 
 ```bash
-python -m logic2ableton "A:\path\to\MySong.logicx" --output .\output --no-copy
+logic2ableton "path/to/MySong.logicx" --output ./output --no-copy
 ```
 
 ## CLI Reference
 
 ```text
-python -m logic2ableton <input.logicx> [options]
+logic2ableton <input.logicx> [options]
 ```
 
 Options:
 
+- `--version`, `-V`: show version
 - `--output`, `-o`: output directory (default `.`)
 - `--alternative`, `-a`: Logic alternative index (default `0`)
 - `--no-copy`: do not copy audio into Ableton project
 - `--report-only`: print conversion report only
+- `--template`: path to Ableton `DefaultLiveSet.als` template (auto-detected if omitted)
 - `--vst3-path`: VST3 directory for suggestion scanning
 - `--mixer`: path to `mixer_overrides.json`
 - `--generate-mixer-template`: emit template mixer JSON for all discovered tracks
+- `--json-progress`: output machine-readable JSON progress lines (for GUI integration)
 
 ## Mixer Override Workflow
 

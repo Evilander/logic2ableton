@@ -13,6 +13,7 @@ import gzip
 import io
 import shutil
 import struct
+import sys
 import wave
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -20,18 +21,32 @@ from pathlib import Path
 from logic2ableton.models import AudioFileRef, LogicProject, TrackMixerState
 
 
-# Paths to the Ableton default template (installed with Live 12)
-_TEMPLATE_PATHS = [
-    Path("C:/ProgramData/Ableton/Live 12 Suite/Resources/Builtin/Templates/DefaultLiveSet.als"),
-    Path("C:/ProgramData/Ableton/Live 12 Trial/Resources/Builtin/Templates/DefaultLiveSet.als"),
-    Path("C:/ProgramData/Ableton/Live 12 Standard/Resources/Builtin/Templates/DefaultLiveSet.als"),
-    Path("C:/ProgramData/Ableton/Live 12 Intro/Resources/Builtin/Templates/DefaultLiveSet.als"),
+_EDITIONS = ["Suite", "Trial", "Standard", "Intro", "Lite"]
+
+_WIN_TEMPLATE_PATHS = [
+    Path(f"C:/ProgramData/Ableton/Live 12 {ed}/Resources/Builtin/Templates/DefaultLiveSet.als")
+    for ed in _EDITIONS
+]
+
+_MAC_TEMPLATE_PATHS = [
+    Path(f"/Applications/Ableton Live 12 {ed}.app/Contents/App-Resources/Builtin/Templates/DefaultLiveSet.als")
+    for ed in _EDITIONS
 ]
 
 
-def _find_template() -> Path | None:
-    """Find the Ableton default template on disk."""
-    for p in _TEMPLATE_PATHS:
+def _find_template(custom_path: Path | None = None) -> Path | None:
+    """Find the Ableton default template on disk.
+
+    Args:
+        custom_path: Explicit template path (--template CLI flag). Checked first.
+    """
+    if custom_path is not None:
+        if custom_path.exists():
+            return custom_path
+        return None
+
+    paths = _MAC_TEMPLATE_PATHS if sys.platform == "darwin" else _WIN_TEMPLATE_PATHS
+    for p in paths:
         if p.exists():
             return p
     return None
@@ -404,6 +419,7 @@ def generate_als(
     project: LogicProject,
     output_dir: Path,
     copy_audio: bool = True,
+    template_path: Path | None = None,
 ) -> Path:
     """Generate a gzipped XML Ableton Live Set (.als) file.
 
@@ -414,6 +430,7 @@ def generate_als(
         project: Parsed Logic Pro project.
         output_dir: Directory to write the Ableton project into.
         copy_audio: If True, copy audio files to the project's Samples/Imported folder.
+        template_path: Explicit path to DefaultLiveSet.als. Auto-detected if None.
 
     Returns:
         Path to the created .als file.
@@ -423,14 +440,14 @@ def generate_als(
     project_folder.mkdir(parents=True, exist_ok=True)
 
     # Load the real Ableton template
-    template_path = _find_template()
-    if template_path is None:
+    resolved_template = _find_template(template_path)
+    if resolved_template is None:
         raise FileNotFoundError(
             "Ableton Live 12 DefaultLiveSet.als template not found. "
             "Ensure Ableton Live 12 is installed."
         )
 
-    tree = ET.parse(gzip.open(template_path))
+    tree = ET.parse(gzip.open(resolved_template))
     root = tree.getroot()
     live_set = root.find("LiveSet")
 

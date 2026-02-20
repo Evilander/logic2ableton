@@ -1,0 +1,80 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+        python-version: ['3.11', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pytest tests/ -q
+
+  build-exe:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: logic2ableton-windows.exe
+            exe_path: dist/logic2ableton.exe
+          - os: macos-latest
+            artifact: logic2ableton-macos
+            exe_path: dist/logic2ableton
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install pyinstaller
+      - run: pyinstaller logic2ableton.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.exe_path }}
+
+  release:
+    needs: build-exe
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: logic2ableton-windows.exe
+          path: artifacts/windows/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: logic2ableton-macos
+          path: artifacts/macos/
+
+      - name: Rename artifacts
+        run: |
+          mv artifacts/windows/logic2ableton.exe artifacts/logic2ableton-windows-x64.exe
+          mv artifacts/macos/logic2ableton artifacts/logic2ableton-macos-x64
+          chmod +x artifacts/logic2ableton-macos-x64
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/logic2ableton-windows-x64.exe
+            artifacts/logic2ableton-macos-x64

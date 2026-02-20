@@ -11,3 +11,10 @@ test_output/
 *.als
 *.asd
 .env
+.mcp.json
+CLAUDE.local.md
+Logic Pro X.app/
+ableton-mcp/
+app/
+node_modules/
+*.spec.bak

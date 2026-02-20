@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logic2ableton"
+version = "1.0.0"
+description = "Convert Logic Pro .logicx projects to Ableton Live .als files"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Tyler Eveland", email = "j.tyler.eveland@gmail.com" }]
+keywords = ["logic-pro", "ableton", "daw", "converter", "music-production"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+[project.scripts]
+logic2ableton = "logic2ableton.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Evilander/logic2ableton"
+Repository = "https://github.com/Evilander/logic2ableton"
+Issues = "https://github.com/Evilander/logic2ableton/issues"
+
+[tool.setuptools.packages.find]
+include = ["logic2ableton*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
