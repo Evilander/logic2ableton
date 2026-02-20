@@ -1,16 +1,20 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from logic2ableton.vst3_scanner import scan_vst3_plugins, default_vst3_path
 
 VST3_PATH = Path("C:/Program Files/Common Files/VST3")
 
 
+@pytest.mark.needs_vst3
 def test_scan_finds_plugins():
     plugins = scan_vst3_plugins(VST3_PATH)
     assert len(plugins) > 50
 
 
+@pytest.mark.needs_vst3
 def test_scan_categorizes_fabfilter():
     plugins = scan_vst3_plugins(VST3_PATH)
     fabfilter = [p for p in plugins if "FabFilter" in p.name]

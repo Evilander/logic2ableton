@@ -2,6 +2,8 @@ import json
 import struct
 from pathlib import Path
 
+import pytest
+
 from logic2ableton.logic_parser import (
     _get_aiff_timestamp,
     discover_audio_files,
@@ -17,6 +19,7 @@ TEST_PROJECT = Path("Might Last Forever.logicx")
 
 
 # Task 3 tests
+@pytest.mark.needs_test_project
 def test_parse_project_info():
     info = parse_project_info(TEST_PROJECT)
     assert info["name"] == "Might Last Forever"
@@ -24,6 +27,7 @@ def test_parse_project_info():
     assert info["variant_names"]["0"] == "Might Last Forever"
 
 
+@pytest.mark.needs_test_project
 def test_parse_metadata():
     meta = parse_metadata(TEST_PROJECT, alternative=0)
     assert meta["tempo"] == 120.0
@@ -38,6 +42,7 @@ def test_parse_metadata():
 
 
 # Task 4 tests
+@pytest.mark.needs_test_project
 def test_extract_plugins_from_project_data():
     plugins = extract_plugins(TEST_PROJECT, alternative=0)
     assert len(plugins) == 24
@@ -47,6 +52,7 @@ def test_extract_plugins_from_project_data():
     assert "L1CM" in subtypes
 
 
+@pytest.mark.needs_test_project
 def test_extract_plugins_vintage_vocal():
     plugins = extract_plugins(TEST_PROJECT, alternative=0)
     vintage = [p for p in plugins if p.name == "Vintage Vocal"]
@@ -55,6 +61,7 @@ def test_extract_plugins_vintage_vocal():
 
 
 # Task 5 tests
+@pytest.mark.needs_test_project
 def test_discover_audio_files():
     refs = discover_audio_files(TEST_PROJECT)
     assert len(refs) == 38
@@ -64,6 +71,7 @@ def test_discover_audio_files():
     assert "scratch vox 2" in track_names
 
 
+@pytest.mark.needs_test_project
 def test_discover_audio_files_takes():
     refs = discover_audio_files(TEST_PROJECT)
     kick_refs = [r for r in refs if r.track_name == "KICK IN"]
@@ -72,6 +80,7 @@ def test_discover_audio_files_takes():
     assert take_numbers == [1, 2, 3]
 
 
+@pytest.mark.needs_test_project
 def test_discover_audio_files_comps():
     refs = discover_audio_files(TEST_PROJECT)
     comp_refs = [r for r in refs if r.is_comp]
@@ -80,6 +89,7 @@ def test_discover_audio_files_comps():
 
 
 # Task 6 tests
+@pytest.mark.needs_test_project
 def test_parse_logic_project():
     project = parse_logic_project(TEST_PROJECT, alternative=0)
     assert project.name == "Might Last Forever"
@@ -91,6 +101,7 @@ def test_parse_logic_project():
     assert project.alternative == 0
 
 
+@pytest.mark.needs_test_project
 def test_parse_logic_project_track_names():
     project = parse_logic_project(TEST_PROJECT, alternative=0)
     assert "KICK IN" in project.track_names
@@ -104,18 +115,21 @@ def test_parse_logic_project_track_names():
 
 # Phase 2: Region timing tests
 
+@pytest.mark.needs_test_project
 def test_extract_regions_count():
     regions = extract_regions(TEST_PROJECT, alternative=0)
     # BWF timestamps exist for all recorded WAV files (not imported MP3s etc.)
     assert len(regions) >= 35
 
 
+@pytest.mark.needs_test_project
 def test_extract_regions_kick_in_01():
     """KICK IN#01 starts at bar 2 (beat 4) = 88,200 samples after SMPTE offset."""
     regions = extract_regions(TEST_PROJECT, alternative=0)
     assert regions["KICK IN#01.wav"] == 88_200
 
 
+@pytest.mark.needs_test_project
 def test_extract_regions_kick_in_02():
     """KICK IN#02 starts at bar 320 (beat 1276) = 28,135,800 samples after SMPTE offset."""
     regions = extract_regions(TEST_PROJECT, alternative=0)
@@ -127,6 +141,7 @@ def test_extract_regions_missing_project():
     assert regions == {}
 
 
+@pytest.mark.needs_test_project
 def test_parse_logic_project_has_start_positions():
     project = parse_logic_project(TEST_PROJECT, alternative=0)
     kick_01 = [r for r in project.audio_files if r.filename == "KICK IN#01.wav"]

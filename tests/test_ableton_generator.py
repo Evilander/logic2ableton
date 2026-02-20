@@ -3,6 +3,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from logic2ableton.ableton_generator import generate_als, _pick_best_clip, _find_template
 from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.models import AudioFileRef, TrackMixerState
@@ -10,6 +12,7 @@ from logic2ableton.models import AudioFileRef, TrackMixerState
 TEST_PROJECT = Path("Might Last Forever.logicx")
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_creates_file(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -18,6 +21,7 @@ def test_generate_als_creates_file(tmp_path):
     assert als_path.name == "Might Last Forever.als"
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_is_valid_gzipped_xml(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -27,6 +31,7 @@ def test_generate_als_is_valid_gzipped_xml(tmp_path):
     assert root.tag == "Ableton"
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_has_correct_tracks(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -39,6 +44,7 @@ def test_generate_als_has_correct_tracks(tmp_path):
         assert tn in names
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_has_correct_tempo(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -48,6 +54,7 @@ def test_generate_als_has_correct_tempo(tmp_path):
     assert tempo.get("Value") == "120"
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_copies_audio(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     output_dir = tmp_path / "output"
@@ -60,6 +67,7 @@ def test_generate_als_copies_audio(tmp_path):
 
 # Clip placement tests
 
+@pytest.mark.needs_test_project
 def test_generate_als_has_arrangement_clips(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -69,6 +77,7 @@ def test_generate_als_has_arrangement_clips(tmp_path):
     assert len(clips) > 0
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_at_least_one_clip_per_track(tmp_path):
     """Each track should have at least one clip."""
     project = parse_logic_project(TEST_PROJECT)
@@ -80,6 +89,7 @@ def test_generate_als_at_least_one_clip_per_track(tmp_path):
     assert len(clips) >= len(tracks)
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_clips_at_bwf_positions(tmp_path):
     """Clips should be placed at BWF-derived timeline positions."""
     project = parse_logic_project(TEST_PROJECT)
@@ -92,6 +102,7 @@ def test_generate_als_clips_at_bwf_positions(tmp_path):
     assert any(t > 0 for t in times), "Expected some clips at non-zero positions"
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_kick_in_positions(tmp_path):
     """KICK IN clips should be at their correct BWF positions."""
     project = parse_logic_project(TEST_PROJECT)
@@ -109,6 +120,7 @@ def test_generate_als_kick_in_positions(tmp_path):
     assert 2000 < kick_times[2] < 2100  # session 3
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_clip_has_sample_ref(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -158,6 +170,7 @@ def test_generate_als_prefers_latest_take():
     assert best.take_number == 3
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_bass_guitar_has_bip(tmp_path):
     """BASS GUITAR track should include the _bip file (preferred over overlapping takes)."""
     project = parse_logic_project(TEST_PROJECT)
@@ -170,6 +183,7 @@ def test_generate_als_bass_guitar_has_bip(tmp_path):
     assert any("bip" in n for n in bass_names), f"Expected _bip clip, got: {bass_names}"
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_scratch_vox_2_has_comp(tmp_path):
     """scratch vox 2 track should include the Comp A file (preferred over overlapping takes)."""
     project = parse_logic_project(TEST_PROJECT)
@@ -184,6 +198,7 @@ def test_generate_als_scratch_vox_2_has_comp(tmp_path):
 
 # Template-based structural tests
 
+@pytest.mark.needs_test_project
 def test_generate_als_schema_version(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -194,6 +209,7 @@ def test_generate_als_schema_version(tmp_path):
     assert root.get("SchemaChangeCount") is not None
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_has_main_track_mixer(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -208,6 +224,7 @@ def test_generate_als_has_main_track_mixer(tmp_path):
     assert mixer.find("Tempo/Manual").get("Value") == "120"
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_track_has_main_sequencer(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -222,6 +239,7 @@ def test_generate_als_track_has_main_sequencer(tmp_path):
         assert main_seq.find("Sample/ArrangerAutomation/Events") is not None
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_has_return_tracks(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -231,6 +249,7 @@ def test_generate_als_has_return_tracks(tmp_path):
     assert len(returns) >= 2
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_clip_has_warp_markers(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -245,6 +264,7 @@ def test_generate_als_clip_has_warp_markers(tmp_path):
         assert len(markers) == 2
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_clip_has_fades(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -256,6 +276,7 @@ def test_generate_als_clip_has_fades(tmp_path):
     assert fades.find("FadeInLength") is not None
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_file_ref_complete(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -273,6 +294,7 @@ def test_generate_als_file_ref_complete(tmp_path):
     assert file_ref.find("OriginalFileSize") is not None
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_sample_ref_complete(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -287,6 +309,7 @@ def test_generate_als_sample_ref_complete(tmp_path):
     assert sample_ref.find("DefaultSampleRate") is not None
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_unique_critical_ids(tmp_path):
     """AutomationTarget, ModulationTarget, Pointee IDs must be globally unique."""
     project = parse_logic_project(TEST_PROJECT)
@@ -302,6 +325,7 @@ def test_generate_als_unique_critical_ids(tmp_path):
                 critical_ids[id_val] = elem.tag
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_liveset_metadata(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
@@ -313,6 +337,7 @@ def test_generate_als_liveset_metadata(tmp_path):
     assert live_set.find("LomIdView") is not None
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_custom_mixer_state(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     project.mixer_state = {
@@ -358,6 +383,7 @@ def test_find_template_auto_discovery():
     assert result.name == "DefaultLiveSet.als"
 
 
+@pytest.mark.needs_test_project
 def test_generate_als_with_custom_template(tmp_path):
     """generate_als should accept template_path parameter."""
     # Use the real template found by auto-discovery

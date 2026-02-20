@@ -3,9 +3,12 @@ import sys
 import json
 from pathlib import Path
 
+import pytest
+
 TEST_PROJECT = Path("Might Last Forever.logicx")
 
 
+@pytest.mark.needs_test_project
 def test_cli_report_only():
     result = subprocess.run(
         [sys.executable, "-m", "logic2ableton.cli", str(TEST_PROJECT), "--report-only"],
@@ -17,6 +20,7 @@ def test_cli_report_only():
     assert "TRACKS TRANSFERRED" in result.stdout
 
 
+@pytest.mark.needs_test_project
 def test_cli_full_conversion(tmp_path):
     output_dir = str(tmp_path / "output")
     result = subprocess.run(
@@ -46,6 +50,7 @@ def test_cli_no_args():
     assert result.returncode != 0
 
 
+@pytest.mark.needs_test_project
 def test_cli_template_flag(tmp_path):
     """--template flag should be accepted."""
     from logic2ableton.ableton_generator import _find_template
@@ -71,6 +76,7 @@ def test_cli_template_flag(tmp_path):
     assert als_path.exists()
 
 
+@pytest.mark.needs_test_project
 def test_cli_generate_mixer_template(tmp_path):
     output_dir = str(tmp_path / "output")
     result = subprocess.run(
@@ -97,6 +103,7 @@ def test_cli_generate_mixer_template(tmp_path):
     assert data["KICK IN"]["pan"] == 0.0
 
 
+@pytest.mark.needs_test_project
 def test_cli_json_progress(tmp_path):
     output_dir = str(tmp_path / "output")
     result = subprocess.run(
@@ -125,6 +132,7 @@ def test_cli_json_progress(tmp_path):
     assert complete["tracks"] > 0
 
 
+@pytest.mark.needs_test_project
 def test_cli_json_progress_report_only():
     result = subprocess.run(
         [

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from logic2ableton.report import generate_report
 from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.plugin_matcher import match_plugins
@@ -9,6 +11,8 @@ TEST_PROJECT = Path("Might Last Forever.logicx")
 VST3_PATH = Path("C:/Program Files/Common Files/VST3")
 
 
+@pytest.mark.needs_test_project
+@pytest.mark.needs_vst3
 def test_generate_report():
     project = parse_logic_project(TEST_PROJECT)
     matches = match_plugins(project.plugins, VST3_PATH)
@@ -20,6 +24,8 @@ def test_generate_report():
     assert "NOT TRANSFERRED" in report
 
 
+@pytest.mark.needs_test_project
+@pytest.mark.needs_vst3
 def test_report_contains_track_count():
     project = parse_logic_project(TEST_PROJECT)
     matches = match_plugins(project.plugins, VST3_PATH)
@@ -27,6 +33,7 @@ def test_report_contains_track_count():
     assert "TRACKS TRANSFERRED" in report
 
 
+@pytest.mark.needs_test_project
 def test_report_contains_mixer_state():
     project = parse_logic_project(TEST_PROJECT)
     project.mixer_state = {

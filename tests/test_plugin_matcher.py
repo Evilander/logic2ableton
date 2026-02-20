@@ -1,11 +1,14 @@
 from pathlib import Path
 
+import pytest
+
 from logic2ableton.plugin_matcher import match_plugins, _name_similarity, _tokenize
 from logic2ableton.models import PluginInstance
 
 VST3_PATH = Path("C:/Program Files/Common Files/VST3")
 
 
+@pytest.mark.needs_vst3
 def test_match_known_compressor():
     plugins = [PluginInstance("Guitar", "aufx", "76CM", "ksWV", True, {})]
     matches = match_plugins(plugins, VST3_PATH)
@@ -16,6 +19,7 @@ def test_match_known_compressor():
     assert len(matches[0].suggested_vst3s) > 0
 
 
+@pytest.mark.needs_vst3
 def test_match_unknown_plugin():
     plugins = [PluginInstance("Mystery", "aufx", "XXXX", "YYYY", False, {})]
     matches = match_plugins(plugins, VST3_PATH)
@@ -24,6 +28,7 @@ def test_match_unknown_plugin():
     assert matches[0].category == "unknown"
 
 
+@pytest.mark.needs_vst3
 def test_match_returns_all_plugins():
     plugins = [
         PluginInstance("Big Guitar", "aufx", "TG5M", "ksWV", True, {}),
@@ -67,6 +72,7 @@ def test_name_similarity_empty():
     assert _name_similarity("anything", "") == 0.0
 
 
+@pytest.mark.needs_vst3
 def test_match_suggests_at_most_5():
     plugins = [PluginInstance("Guitar", "aufx", "76CM", "ksWV", True, {})]
     matches = match_plugins(plugins, VST3_PATH)
