@@ -19,6 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - run: pip install pytest
       - run: python -m pytest tests/ -q
 
   build:
@@ -72,15 +73,6 @@ jobs:
             npx electron-builder --mac --config electron-builder.yml
           fi
 
-      # Upload standalone CLI exe
-      - name: Upload CLI exe
-        uses: actions/upload-artifact@v4
-        with:
-          name: cli-${{ matrix.platform }}
-          path: |
-            dist/logic2ableton.exe
-            dist/logic2ableton
-
       # Upload Electron installer
       - name: Upload installer (Windows)
         if: matrix.platform == 'win'
@@ -109,16 +101,6 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: cli-win
-          path: artifacts/cli-win/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: cli-mac
-          path: artifacts/cli-mac/
-
-      - uses: actions/download-artifact@v4
-        with:
           name: installer-win
           path: artifacts/installer-win/
 
@@ -131,11 +113,6 @@ jobs:
       - name: Prepare release artifacts
         run: |
           mkdir -p release
-          # CLI standalone binaries
-          cp artifacts/cli-win/logic2ableton.exe release/logic2ableton-cli-windows-x64.exe || true
-          cp artifacts/cli-mac/logic2ableton release/logic2ableton-cli-macos-x64 || true
-          chmod +x release/logic2ableton-cli-macos-x64 || true
-          # Electron installers
           cp artifacts/installer-win/*Setup*.exe release/ || true
           cp artifacts/installer-win/*portable*.exe release/ || true
           cp artifacts/installer-mac/*.dmg release/ || true
