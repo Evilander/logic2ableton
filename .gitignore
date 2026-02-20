@@ -15,6 +15,10 @@ test_output/
 CLAUDE.local.md
 Logic Pro X.app/
 ableton-mcp/
-app/
 node_modules/
 *.spec.bak
+app/out/
+app/node_modules/
+app/dist/
+app/resources/logic2ableton*
+!app/resources/logic2ableton*.keep

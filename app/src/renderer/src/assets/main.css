@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #1A1820;
+  --color-surface: #252330;
+  --color-surface-hover: #2E2C3A;
+  --color-border: #353340;
+  --color-rose: #C4868E;
+  --color-rose-hover: #D4969E;
+  --color-gold: #C4A86E;
+  --color-stone: #B8A99A;
+  --color-denim: #7E96AA;
+  --color-cream: #E8DDD0;
+  --color-error: #D06060;
+  --color-text-primary: #E8E8E8;
+  --color-text-secondary: #888888;
+  --color-text-tertiary: #555555;
+}
+
+@font-face {
+  font-family: "Geist Sans";
+  src: url("geist/font/sans") format("woff2");
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: "Geist Sans", system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+  user-select: none;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}

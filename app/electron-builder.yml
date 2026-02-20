@@ -1,0 +1,45 @@
+appId: com.evilander.logic2ableton
+productName: Logic to Ableton Converter
+copyright: Copyright (c) 2025 Tyler Eveland
+publish: null
+
+directories:
+  buildResources: resources
+  output: dist
+
+files:
+  - out/**/*
+
+extraResources:
+  - from: resources/
+    to: .
+    filter:
+      - logic2ableton*
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  icon: resources/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: resources/icon.ico
+  uninstallerIcon: resources/icon.ico
+  license: ../LICENSE
+
+portable:
+  artifactName: ${productName}-${version}-portable.exe
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  icon: resources/icon.icns
+  category: public.app-category.music
+
+dmg:
+  title: ${productName} ${version}

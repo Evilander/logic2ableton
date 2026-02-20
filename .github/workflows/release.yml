@@ -21,33 +21,85 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pytest tests/ -q
 
-  build-exe:
+  build:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     strategy:
       matrix:
         include:
           - os: windows-latest
-            artifact: logic2ableton-windows.exe
-            exe_path: dist/logic2ableton.exe
+            platform: win
           - os: macos-latest
-            artifact: logic2ableton-macos
-            exe_path: dist/logic2ableton
+            platform: mac
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Build standalone CLI exe with PyInstaller
       - run: pip install pyinstaller
       - run: pyinstaller logic2ableton.spec
-      - uses: actions/upload-artifact@v4
+
+      # Copy Python exe to Electron resources
+      - name: Copy converter binary to app resources
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "win" ]; then
+            cp dist/logic2ableton.exe app/resources/logic2ableton.exe
+          else
+            cp dist/logic2ableton app/resources/logic2ableton
+          fi
+
+      # Build Electron app
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci || npm install
+
+      - name: Build Electron installer
+        working-directory: app
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "win" ]; then
+            npx electron-builder --win --config electron-builder.yml
+          else
+            npx electron-builder --mac --config electron-builder.yml
+          fi
+
+      # Upload standalone CLI exe
+      - name: Upload CLI exe
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.exe_path }}
+          name: cli-${{ matrix.platform }}
+          path: |
+            dist/logic2ableton.exe
+            dist/logic2ableton
+
+      # Upload Electron installer
+      - name: Upload installer (Windows)
+        if: matrix.platform == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-win
+          path: |
+            app/dist/*Setup*.exe
+            app/dist/*portable*.exe
+
+      - name: Upload installer (macOS)
+        if: matrix.platform == 'mac'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-mac
+          path: app/dist/*.dmg
 
   release:
-    needs: build-exe
+    needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -57,24 +109,40 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: logic2ableton-windows.exe
-          path: artifacts/windows/
+          name: cli-win
+          path: artifacts/cli-win/
 
       - uses: actions/download-artifact@v4
         with:
-          name: logic2ableton-macos
-          path: artifacts/macos/
+          name: cli-mac
+          path: artifacts/cli-mac/
 
-      - name: Rename artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-win
+          path: artifacts/installer-win/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-mac
+          path: artifacts/installer-mac/
+        continue-on-error: true
+
+      - name: Prepare release artifacts
         run: |
-          mv artifacts/windows/logic2ableton.exe artifacts/logic2ableton-windows-x64.exe
-          mv artifacts/macos/logic2ableton artifacts/logic2ableton-macos-x64
-          chmod +x artifacts/logic2ableton-macos-x64
+          mkdir -p release
+          # CLI standalone binaries
+          cp artifacts/cli-win/logic2ableton.exe release/logic2ableton-cli-windows-x64.exe || true
+          cp artifacts/cli-mac/logic2ableton release/logic2ableton-cli-macos-x64 || true
+          chmod +x release/logic2ableton-cli-macos-x64 || true
+          # Electron installers
+          cp artifacts/installer-win/*Setup*.exe release/ || true
+          cp artifacts/installer-win/*portable*.exe release/ || true
+          cp artifacts/installer-mac/*.dmg release/ || true
+          ls -lh release/
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            artifacts/logic2ableton-windows-x64.exe
-            artifacts/logic2ableton-macos-x64
+          files: release/*
