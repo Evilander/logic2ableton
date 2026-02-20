@@ -34,6 +34,9 @@ _MAC_TEMPLATE_PATHS = [
 ]
 
 
+_BUNDLED_TEMPLATE = Path(__file__).parent / "data" / "DefaultLiveSet.als"
+
+
 def _find_template(custom_path: Path | None = None) -> Path | None:
     """Find the Ableton default template on disk.
 
@@ -49,6 +52,9 @@ def _find_template(custom_path: Path | None = None) -> Path | None:
     for p in paths:
         if p.exists():
             return p
+
+    if _BUNDLED_TEMPLATE.exists():
+        return _BUNDLED_TEMPLATE
     return None
 
 

@@ -35,6 +35,9 @@ Issues = "https://github.com/Evilander/logic2ableton/issues"
 [tool.setuptools.packages.find]
 include = ["logic2ableton*"]
 
+[tool.setuptools.package-data]
+logic2ableton = ["data/*.als"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

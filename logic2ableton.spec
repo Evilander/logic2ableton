@@ -5,7 +5,7 @@ a = Analysis(
     ['logic2ableton/__main__.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('logic2ableton/data/DefaultLiveSet.als', 'logic2ableton/data')],
     hiddenimports=[
         'logic2ableton',
         'logic2ableton.cli',

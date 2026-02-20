@@ -9,6 +9,7 @@ output/
 test_output/
 *.logicx/
 *.als
+!logic2ableton/data/DefaultLiveSet.als
 *.asd
 .env
 .mcp.json
