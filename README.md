@@ -21,10 +21,12 @@ The desktop app provides drag-and-drop project selection, a project preview with
 
 ### CLI
 
-Also installable via pip for command-line use:
+Also available as a command-line tool when installed from source:
 
 ```bash
-pip install logic2ableton
+git clone https://github.com/Evilander/logic2ableton.git
+cd logic2ableton
+pip install -e .
 logic2ableton "path/to/MySong.logicx" --output ./output
 ```
 
