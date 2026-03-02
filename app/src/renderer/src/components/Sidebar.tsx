@@ -22,8 +22,11 @@ function timeAgo(dateStr: string): string {
 export default function Sidebar({ history, onNewConversion, onSelectRecord, selectedId }: SidebarProps) {
   return (
     <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-surface shrink-0">
+      {/* Drag region for macOS traffic lights */}
+      <div className="h-10 shrink-0" style={{ WebkitAppRegion: "drag" } as React.CSSProperties} />
+
       {/* Header */}
-      <div className="px-4 pt-5 pb-3 flex items-center gap-2 -webkit-app-region-drag">
+      <div className="px-4 pb-3 flex items-center gap-2">
         <Waveform size={20} weight="duotone" className="text-rose" />
         <span className="text-sm font-semibold tracking-tight">logic2ableton</span>
       </div>

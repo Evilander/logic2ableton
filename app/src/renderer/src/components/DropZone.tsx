@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useRef } from "react"
 import { motion } from "motion/react"
 import { CloudArrowUp, FolderOpen } from "@phosphor-icons/react"
 
@@ -8,14 +8,38 @@ interface DropZoneProps {
 
 export default function DropZone({ onProjectSelected }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false)
+  const dragCounter = useRef(0)
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current++
+    setIsDragging(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current--
+    if (dragCounter.current === 0) setIsDragging(false)
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault()
+      e.stopPropagation()
+      dragCounter.current = 0
       setIsDragging(false)
+
       const files = e.dataTransfer.files
       if (files.length > 0) {
-        const path = (files[0] as File & { path?: string }).path
+        const file = files[0] as File & { path?: string }
+        const path = file.path
         if (path && path.endsWith(".logicx")) {
           onProjectSelected(path)
         }
@@ -30,11 +54,14 @@ export default function DropZone({ onProjectSelected }: DropZoneProps) {
   }
 
   return (
-    <div className="flex-1 flex items-center justify-center p-8">
+    <div
+      className="flex-1 flex items-center justify-center p-8"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
       <motion.div
-        onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
-        onDragLeave={() => setIsDragging(false)}
-        onDrop={handleDrop}
         animate={{
           borderColor: isDragging ? "#C4868E" : "#353340",
           scale: isDragging ? 1.005 : 1,

@@ -12,6 +12,7 @@ function createWindow(): void {
     minHeight: 500,
     backgroundColor: "#1A1820",
     titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 16, y: 16 },
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       sandbox: false,
@@ -40,9 +41,16 @@ app.on("window-all-closed", () => {
 // IPC Handlers
 
 ipcMain.handle("select-logicx", async () => {
+  // On macOS, .logicx files are packages (directory bundles that appear as files).
+  // openDirectory mode can't select them — need openFile with a filter.
+  // On other platforms, .logicx is a plain directory.
+  const isMac = process.platform === "darwin"
   const result = await dialog.showOpenDialog({
-    properties: ["openDirectory"],
+    properties: isMac ? ["openFile"] : ["openDirectory"],
     title: "Select a Logic Pro project",
+    ...(isMac && {
+      filters: [{ name: "Logic Pro Project", extensions: ["logicx"] }],
+    }),
   })
   if (result.canceled || result.filePaths.length === 0) return null
   const selected = result.filePaths[0]
