@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "logic2ableton"
-version = "1.0.1"
+version = "1.0.2"
 description = "Convert Logic Pro .logicx projects to Ableton Live .als files"
 readme = "README.md"
 license = "MIT"

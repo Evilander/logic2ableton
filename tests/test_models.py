@@ -51,6 +51,7 @@ def test_logic_project_creation():
     )
     assert project.tempo == 120.0
     assert len(project.track_names) == 2
+    assert project.compatibility_warnings == []
 
 
 def test_parse_take_filename():

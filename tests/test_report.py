@@ -5,7 +5,7 @@ import pytest
 from logic2ableton.report import generate_report
 from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.plugin_matcher import match_plugins
-from logic2ableton.models import TrackMixerState
+from logic2ableton.models import LogicProject, TrackMixerState
 
 TEST_PROJECT = Path("Might Last Forever.logicx")
 VST3_PATH = Path("C:/Program Files/Common Files/VST3")
@@ -44,3 +44,22 @@ def test_report_contains_mixer_state():
     assert "-6.0 dB" in report
     assert "pan 30%R" in report
     assert "MUTED" in report
+
+
+def test_report_contains_compatibility_warnings():
+    project = LogicProject(
+        name="Warnings Demo",
+        tempo=123.5,
+        time_sig_numerator=7,
+        time_sig_denominator=8,
+        sample_rate=48000,
+        audio_files=[],
+        plugins=[],
+        track_names=[],
+        alternative=0,
+        compatibility_warnings=["2 audio file(s) had no embedded timeline timestamp and will default to bar 1"],
+    )
+
+    report = generate_report(project, [])
+    assert "COMPATIBILITY WARNINGS" in report
+    assert "default to bar 1" in report

@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -51,6 +51,9 @@ class LogicProject:
     track_names: list[str]  # Ordered list of unique track names
     alternative: int        # Which alternative was parsed
     mixer_state: dict[str, TrackMixerState] | None = None
+    metadata_track_count: int = 0
+    metadata_audio_files: list[str] = field(default_factory=list)
+    compatibility_warnings: list[str] = field(default_factory=list)
 
 
 def parse_audio_filename(filename: str) -> tuple[str, int, bool, str]:

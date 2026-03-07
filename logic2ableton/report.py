@@ -88,6 +88,14 @@ def generate_report(project: LogicProject, plugin_matches: list[PluginMatch]) ->
         lines.append(f"    -> Suggested: {suggestions}")
     lines.append("")
 
+    lines.append("COMPATIBILITY WARNINGS:")
+    if project.compatibility_warnings:
+        for warning in project.compatibility_warnings:
+            lines.append(f"  - {warning}")
+    else:
+        lines.append("  - No obvious compatibility issues detected from project bundle metadata.")
+    lines.append("")
+
     lines.append("NOT TRANSFERRED:")
     lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
     lines.append("  - Automation data (requires deeper binary parsing)")

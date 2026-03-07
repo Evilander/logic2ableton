@@ -18,6 +18,12 @@ def _emit(stage: str, progress: float, message: str, **extra):
     print(json.dumps({"stage": stage, "progress": progress, "message": message, **extra}), flush=True)
 
 
+def _write_report(report_path: Path, report: str) -> None:
+    """Persist the human-readable conversion report."""
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report, encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main CLI entry point.
 
@@ -88,7 +94,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"Parsing {logicx_path.name}...")
 
-    project = parse_logic_project(logicx_path, alternative=args.alternative)
+    try:
+        project = parse_logic_project(logicx_path, alternative=args.alternative)
+    except Exception as exc:
+        message = f"Failed to parse {logicx_path.name}: {exc}"
+        if jp:
+            _emit("error", 0.0, message)
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+        return 1
 
     if args.mixer:
         project.mixer_state = load_mixer_overrides(Path(args.mixer))
@@ -126,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         _emit("plugins", 0.4, "Matching plugins...")
     plugin_matches = match_plugins(project.plugins, vst3_path)
     report = generate_report(project, plugin_matches)
+    report_path = Path(args.output) / f"{project.name}_conversion_report.txt"
 
     if not jp:
         print(report)
@@ -136,7 +151,8 @@ def main(argv: list[str] | None = None) -> int:
                   report=report,
                   tracks=len(project.track_names),
                   audio_files=len(project.audio_files),
-                  plugins=len(project.plugins))
+                  plugins=len(project.plugins),
+                  compatibility_warnings=project.compatibility_warnings)
         return 0
 
     output_dir = Path(args.output)
@@ -147,7 +163,24 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"\nGenerating Ableton project in {output_dir}...")
 
-    als_path = generate_als(project, output_dir, copy_audio=not args.no_copy, template_path=template_path)
+    try:
+        als_path = generate_als(
+            project,
+            output_dir,
+            copy_audio=not args.no_copy,
+            template_path=template_path,
+        )
+    except Exception as exc:
+        _write_report(report_path, report)
+        message = (
+            f"Conversion failed while generating Ableton session: {exc}. "
+            f"Report saved to {report_path}"
+        )
+        if jp:
+            _emit("error", 0.5, message, report=report, compatibility_warnings=project.compatibility_warnings)
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+        return 1
 
     if jp:
         _emit("complete", 1.0, "Conversion complete",
@@ -155,13 +188,12 @@ def main(argv: list[str] | None = None) -> int:
               report=report,
               tracks=len(project.track_names),
               clips=len(project.audio_files),
-              audio_files=len(project.audio_files))
+              audio_files=len(project.audio_files),
+              compatibility_warnings=project.compatibility_warnings)
     else:
         print(f"  Created: {als_path}")
 
-    report_path = output_dir / f"{project.name}_conversion_report.txt"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(report, encoding="utf-8")
+    _write_report(report_path, report)
 
     if not jp:
         print(f"  Report: {report_path}")

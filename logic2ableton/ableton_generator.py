@@ -65,6 +65,13 @@ def _val(parent: ET.Element, tag: str, value) -> ET.Element:
     return elem
 
 
+def _format_ableton_number(value: float) -> str:
+    """Format numbers without dropping meaningful fractional precision."""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
 def _get_audio_info(file_path: Path) -> tuple[int, int]:
     """Read audio file header. Returns (nframes, sample_rate).
 
@@ -193,6 +200,8 @@ def _make_audio_clip_xml(
     ref: AudioFileRef,
     tempo: float,
     sample_rate: int,
+    time_sig_numerator: int,
+    time_sig_denominator: int,
     project_folder: Path | None = None,
 ) -> ET.Element:
     """Create an AudioClip element for arrangement view.
@@ -245,8 +254,8 @@ def _make_audio_clip_xml(
     ts_list = ET.SubElement(ts_outer, "TimeSignatures")
     ts_remote = ET.SubElement(ts_list, "RemoteableTimeSignature")
     ts_remote.set("Id", str(allocator.next()))
-    _val(ts_remote, "Numerator", "4")
-    _val(ts_remote, "Denominator", "4")
+    _val(ts_remote, "Numerator", str(time_sig_numerator))
+    _val(ts_remote, "Denominator", str(time_sig_denominator))
     _val(ts_remote, "Time", "0")
 
     # WarpMarkers — two markers: start and end
@@ -375,6 +384,8 @@ def _inject_clips_into_track(
     allocator: _IdAllocator,
     tempo: float,
     sample_rate: int,
+    time_sig_numerator: int,
+    time_sig_denominator: int,
     project_folder: Path | None = None,
 ) -> None:
     """Inject AudioClip elements into a track's arrangement view.
@@ -416,6 +427,8 @@ def _inject_clips_into_track(
             ref=ref,
             tempo=tempo,
             sample_rate=sample_rate,
+            time_sig_numerator=time_sig_numerator,
+            time_sig_denominator=time_sig_denominator,
             project_folder=project_folder,
         )
         events.append(clip_elem)
@@ -493,7 +506,14 @@ def generate_als(
         # Inject clips into the track's arrangement view
         track_clips = clips_by_track.get(track_name, [])
         _inject_clips_into_track(
-            track, track_clips, allocator, project.tempo, project.sample_rate, project_folder
+            track,
+            track_clips,
+            allocator,
+            project.tempo,
+            project.sample_rate,
+            project.time_sig_numerator,
+            project.time_sig_denominator,
+            project_folder,
         )
 
         # Apply mixer values when present.
@@ -515,14 +535,14 @@ def generate_als(
     if main_track is not None:
         tempo_elem = main_track.find(".//Tempo/Manual")
         if tempo_elem is not None:
-            tempo_elem.set("Value", str(int(project.tempo)))
+            tempo_elem.set("Value", _format_ableton_number(project.tempo))
 
     # Set tempo in Transport
     transport = live_set.find("Transport")
     if transport is not None:
         tempo_manual = transport.find(".//Tempo/Manual")
         if tempo_manual is not None:
-            tempo_manual.set("Value", str(int(project.tempo)))
+            tempo_manual.set("Value", _format_ableton_number(project.tempo))
 
         # Set time signature
         ts = transport.find(".//TimeSignatures/RemoteableTimeSignature")

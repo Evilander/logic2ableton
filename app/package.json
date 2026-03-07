@@ -1,6 +1,6 @@
 {
   "name": "logic2ableton",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Convert Logic Pro projects to Ableton Live sets",
   "main": "./out/main/index.js",
   "author": {

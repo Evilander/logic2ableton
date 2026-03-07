@@ -370,6 +370,53 @@ def discover_audio_files(logicx_path: Path) -> list[AudioFileRef]:
     return refs
 
 
+def _build_compatibility_warnings(
+    meta: dict,
+    audio_files: list[AudioFileRef],
+    regions: dict[str, int],
+) -> list[str]:
+    """Summarize bundle conditions that are likely to produce incomplete conversions."""
+    warnings: list[str] = []
+
+    discovered_names = {ref.filename for ref in audio_files}
+    metadata_names = meta.get("audio_files", [])
+    missing_bundle_files = [name for name in metadata_names if name not in discovered_names]
+    if missing_bundle_files:
+        examples = ", ".join(missing_bundle_files[:5])
+        if len(missing_bundle_files) > 5:
+            examples += ", ..."
+        warnings.append(
+            f"{len(missing_bundle_files)} audio file(s) listed by Logic were not found inside "
+            f"Media/Audio Files and cannot be copied yet: {examples}"
+        )
+
+    unpositioned_files = [ref.filename for ref in audio_files if ref.filename not in regions]
+    if unpositioned_files:
+        examples = ", ".join(unpositioned_files[:5])
+        if len(unpositioned_files) > 5:
+            examples += ", ..."
+        warnings.append(
+            f"{len(unpositioned_files)} audio file(s) had no embedded timeline timestamp and "
+            f"will default to bar 1: {examples}"
+        )
+
+    metadata_track_count = meta.get("num_tracks", 0)
+    recovered_track_count = len({ref.track_name for ref in audio_files})
+    if metadata_track_count and recovered_track_count != metadata_track_count:
+        warnings.append(
+            f"Logic metadata reports {metadata_track_count} track(s), but only "
+            f"{recovered_track_count} track(s) were recoverable from bundled audio filenames"
+        )
+
+    if not audio_files:
+        warnings.append(
+            "No bundled audio files were discovered under Media/Audio Files; this project may "
+            "depend on external media, aliases, or unsupported content types"
+        )
+
+    return warnings
+
+
 def parse_logic_project(logicx_path: Path, alternative: int = 0) -> LogicProject:
     """Parse a complete Logic Pro project into a LogicProject dataclass."""
     logicx_path = Path(logicx_path)
@@ -391,6 +438,8 @@ def parse_logic_project(logicx_path: Path, alternative: int = 0) -> LogicProject
             seen.add(ref.track_name)
             track_names.append(ref.track_name)
 
+    compatibility_warnings = _build_compatibility_warnings(meta, audio_files, regions)
+
     return LogicProject(
         name=info["name"],
         tempo=meta["tempo"],
@@ -401,4 +450,7 @@ def parse_logic_project(logicx_path: Path, alternative: int = 0) -> LogicProject
         plugins=plugins,
         track_names=track_names,
         alternative=alternative,
+        metadata_track_count=meta["num_tracks"],
+        metadata_audio_files=meta["audio_files"],
+        compatibility_warnings=compatibility_warnings,
     )

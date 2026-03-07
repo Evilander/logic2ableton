@@ -1,4 +1,5 @@
 import gzip
+import wave
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
@@ -7,7 +8,7 @@ import pytest
 
 from logic2ableton.ableton_generator import generate_als, _pick_best_clip, _find_template
 from logic2ableton.logic_parser import parse_logic_project
-from logic2ableton.models import AudioFileRef, TrackMixerState
+from logic2ableton.models import AudioFileRef, LogicProject, TrackMixerState
 
 TEST_PROJECT = Path("Might Last Forever.logicx")
 
@@ -374,6 +375,49 @@ def test_find_template_custom_path_missing():
     """Missing custom template returns None."""
     result = _find_template(custom_path=Path("/nonexistent/template.als"))
     assert result is None
+
+
+def test_generate_als_preserves_fractional_tempo_and_project_time_signature(tmp_path):
+    sample_path = tmp_path / "clip.wav"
+    with wave.open(str(sample_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(48_000)
+        wav_file.writeframes(b"\x00\x00" * 48_000)
+
+    project = LogicProject(
+        name="Fractional Tempo",
+        tempo=123.5,
+        time_sig_numerator=7,
+        time_sig_denominator=8,
+        sample_rate=48_000,
+        audio_files=[
+            AudioFileRef(
+                filename="clip.wav",
+                track_name="Track 1",
+                take_number=0,
+                is_comp=False,
+                comp_name="",
+                file_path=sample_path,
+            )
+        ],
+        plugins=[],
+        track_names=["Track 1"],
+        alternative=0,
+    )
+
+    als_path = generate_als(project, tmp_path / "output", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    tempo = root.find(".//Tempo/Manual")
+    assert tempo is not None
+    assert tempo.get("Value") == "123.5"
+
+    clip_ts = root.find(".//Events/AudioClip/TimeSignature/TimeSignatures/RemoteableTimeSignature")
+    assert clip_ts is not None
+    assert clip_ts.find("Numerator").get("Value") == "7"
+    assert clip_ts.find("Denominator").get("Value") == "8"
 
 
 @pytest.mark.skipif(

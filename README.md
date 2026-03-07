@@ -1,85 +1,86 @@
 # logic2ableton
 
-Convert Logic Pro `.logicx` projects into Ableton Live `.als` sets — preserving audio arrangement, timeline positions, track structure, tempo, and time signature. Includes a desktop GUI and command-line interface.
+Convert Logic Pro `.logicx` projects into Ableton Live `.als` sets.
 
-**[Download the latest release](https://github.com/Evilander/logic2ableton/releases/latest)** — available for Windows and macOS. No Python or Ableton installation required.
+The converter is aimed at audio-first Logic sessions: recorded stems, bounced comps, clip placement, project tempo, time signature, and plugin identification. It ships as a desktop app for Windows and macOS, and it can also be run from source as a CLI.
 
-> This is a v1.0 release. If you try it out, please [open an issue](https://github.com/Evilander/logic2ableton/issues) with feedback, bug reports, or feature requests. Especially interested in hearing from people converting real-world sessions.
+**[Download the latest release](https://github.com/Evilander/logic2ableton/releases/latest)**
 
-## Download
+## What Works Well
 
-| Platform | File | Description |
-|----------|------|-------------|
-| Windows | [Installer](https://github.com/Evilander/logic2ableton/releases/latest) | Standard Windows installer |
-| Windows | [Portable](https://github.com/Evilander/logic2ableton/releases/latest) | Single exe, no install needed |
-| macOS (Apple Silicon) | [DMG (arm64)](https://github.com/Evilander/logic2ableton/releases/latest) | For M1/M2/M3/M4 Macs |
-| macOS (Intel) | [DMG (x64)](https://github.com/Evilander/logic2ableton/releases/latest) | For Intel Macs |
+- Audio tracks into Ableton Arrangement View
+- Timeline placement from embedded WAV BWF timestamps
+- Timeline placement from Logic AIFF `MARK` chunks
+- Overlap resolution: comp > bounce-in-place > latest take
+- Tempo and time signature transfer
+- Optional mixer overrides from JSON
+- Plugin identification with VST3 suggestions
 
-### Desktop App
+## Current Limits
 
-The desktop app provides drag-and-drop project selection, a project preview with track/clip/plugin counts, real-time conversion progress, and a history sidebar. Just drop your `.logicx` folder and convert.
+- MIDI and software instrument tracks are not transferred
+- Bus/send routing is not recreated
+- Automation is not recreated
+- Plugin parameters are not recreated
+- Imported audio without embedded timestamps defaults to bar 1
+- External or aliased media that is not inside `Media/Audio Files` cannot be copied yet
 
-### CLI
+That last pair is the main reason some projects convert well and others do not. As of `v1.0.2`, the conversion report explicitly calls these cases out instead of looking like a clean success.
 
-Also available as a command-line tool when installed from source:
+## Desktop App
+
+The desktop app supports drag-and-drop project selection, project previews, real-time conversion progress, and a conversion history sidebar.
+
+## CLI
+
+Install from source:
 
 ```bash
 git clone https://github.com/Evilander/logic2ableton.git
 cd logic2ableton
 pip install -e .
+```
+
+Convert a project:
+
+```bash
 logic2ableton "path/to/MySong.logicx" --output ./output
 ```
 
-## What It Transfers
+Generate only the text report:
 
-- Audio tracks and clips into Ableton Arrangement View
-- Timeline positions from embedded WAV (BWF bext) and AIFF (MARK chunk) timestamps
-- Clip overlap resolution: comp > bounce-in-place > latest take
-- Mixer state (volume, pan, mute, solo) via JSON overrides
-- Tempo and time signature
-- Plugin identification with VST3 match suggestions
-
-## What It Does Not Transfer Yet
-
-- Automation curves
-- MIDI notes and instrument tracks
-- Bus/send routing
-- Plugin parameters
-- Folder/grouping
-
-## CLI Reference
-
-```text
-logic2ableton <input.logicx> [options]
+```bash
+logic2ableton "path/to/MySong.logicx" --report-only
 ```
+
+Generate a mixer template you can edit:
+
+```bash
+logic2ableton "path/to/MySong.logicx" --output ./output --generate-mixer-template --report-only
+```
+
+Apply mixer overrides during conversion:
+
+```bash
+logic2ableton "path/to/MySong.logicx" --output ./output --mixer ./output/mixer_overrides.json
+```
+
+### CLI Options
 
 | Option | Description |
 |--------|-------------|
 | `--version`, `-V` | Show version |
-| `--output`, `-o` | Output directory (default `.`) |
-| `--report-only` | Print conversion report only |
-| `--no-copy` | Don't copy audio files |
-| `--template` | Path to Ableton `DefaultLiveSet.als` template (bundled by default) |
-| `--vst3-path` | VST3 directory for suggestion scanning |
-| `--mixer` | Path to `mixer_overrides.json` |
-| `--generate-mixer-template` | Generate editable mixer JSON for all tracks |
-| `--json-progress` | Machine-readable JSON progress output |
+| `--output`, `-o` | Output directory |
+| `--alternative`, `-a` | Logic alternative index |
+| `--report-only` | Print the conversion report without writing `.als` |
+| `--no-copy` | Do not copy audio files into the Ableton project |
+| `--template` | Use a specific `DefaultLiveSet.als` |
+| `--vst3-path` | Override VST3 scan directory |
+| `--mixer` | Apply mixer overrides from JSON |
+| `--generate-mixer-template` | Write a starter `mixer_overrides.json` |
+| `--json-progress` | Emit JSON progress lines for GUI integration |
 
-## Mixer Override Workflow
-
-1. Generate a template:
-```bash
-logic2ableton "MySong.logicx" -o ./output --generate-mixer-template --report-only
-```
-
-2. Edit `output/mixer_overrides.json` with your volume/pan/mute/solo values.
-
-3. Apply during conversion:
-```bash
-logic2ableton "MySong.logicx" -o ./output --mixer ./output/mixer_overrides.json
-```
-
-## Output Structure
+## Output
 
 ```text
 output/
@@ -87,22 +88,33 @@ output/
     MySong.als
     Samples/
       Imported/
-        *.wav / *.aif / *.aiff
+        *.wav / *.aif / *.aiff / *.mp3 / *.m4a
   MySong_conversion_report.txt
 ```
 
-## Building from Source
+If Ableton generation fails after parsing, the converter still writes the text report so you have something actionable to inspect or attach to an issue.
+
+## Reading The Report
+
+The report now includes a `COMPATIBILITY WARNINGS` section. Pay attention to it when a session does not line up in Ableton.
+
+Typical warnings:
+
+- Audio listed by Logic but missing from the bundle
+- Audio files with no embedded timeline timestamp
+- A track-count mismatch between Logic metadata and recoverable bundled audio
+
+These warnings usually mean the session needs either a parser improvement or a different export path for part of the project.
+
+## Building And Testing
+
+Run the Python tests:
 
 ```bash
-git clone https://github.com/Evilander/logic2ableton.git
-cd logic2ableton
-pip install -e .
 python -m pytest tests -q
 ```
 
-No third-party Python dependencies. The Ableton template is bundled — no Ableton installation needed.
-
-### Desktop App Development
+Run the desktop app in development:
 
 ```bash
 cd app
@@ -110,12 +122,14 @@ npm install
 npm run dev
 ```
 
-## Contributing
+## Bug Reports
 
-1. Fork and create a branch from `master`
-2. Make changes with test coverage
-3. Run `python -m pytest tests -q`
-4. Open a pull request
+Useful bug reports include:
+
+- The Logic version used to save the project
+- The report text, especially `COMPATIBILITY WARNINGS`
+- Whether the project uses imported loops, external media, aliases, or lots of AIFF recordings
+- A minimal failing project if you can share one
 
 ## License
 

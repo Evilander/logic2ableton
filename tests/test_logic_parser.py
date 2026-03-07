@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from logic2ableton.models import AudioFileRef
 from logic2ableton.logic_parser import (
+    _build_compatibility_warnings,
     _get_aiff_timestamp,
     discover_audio_files,
     extract_plugins,
@@ -197,3 +199,31 @@ def test_load_mixer_overrides(tmp_path):
 def test_load_mixer_overrides_missing_file():
     result = load_mixer_overrides(Path("nonexistent.json"))
     assert result == {}
+
+
+def test_build_compatibility_warnings_for_missing_and_unpositioned_audio(tmp_path):
+    audio_file = tmp_path / "imported.wav"
+    audio_file.write_bytes(b"")
+    refs = [
+        AudioFileRef(
+            filename="imported.wav",
+            track_name="Imported",
+            take_number=0,
+            is_comp=False,
+            comp_name="",
+            file_path=audio_file,
+        )
+    ]
+
+    warnings = _build_compatibility_warnings(
+        {
+            "audio_files": ["imported.wav", "external.wav"],
+            "num_tracks": 3,
+        },
+        refs,
+        regions={},
+    )
+
+    assert any("external.wav" in warning for warning in warnings)
+    assert any("default to bar 1" in warning for warning in warnings)
+    assert any("3 track(s)" in warning for warning in warnings)
