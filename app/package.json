@@ -4,8 +4,7 @@
   "description": "Convert Logic Pro projects to Ableton Live sets",
   "main": "./out/main/index.js",
   "author": {
-    "name": "Tyler Eveland",
-    "email": "j.tyler.eveland@gmail.com"
+    "name": "evilander",
   },
   "repository": {
     "type": "git",

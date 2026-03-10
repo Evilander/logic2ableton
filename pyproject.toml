@@ -9,7 +9,7 @@ description = "Convert Logic Pro .logicx projects to Ableton Live .als files"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "Tyler Eveland", email = "j.tyler.eveland@gmail.com" }]
+authors = [{ name = "evilander" }]
 keywords = ["logic-pro", "ableton", "daw", "converter", "music-production"]
 classifiers = [
     "Development Status :: 4 - Beta",
