@@ -46,6 +46,53 @@ def _build_failure_report(input_path: Path, stage: str, error: str) -> str:
     )
 
 
+def _progress_for_stage(stage: str) -> float:
+    return {
+        "parsing": 0.0,
+        "mixer": 0.3,
+        "plugins": 0.4,
+        "report": 0.45,
+        "generating": 0.5,
+        "report-write": 1.0,
+    }.get(stage, 0.0)
+
+
+def _persist_report_with_note(report_path: Path, report: str) -> tuple[bool, str]:
+    try:
+        _write_report(report_path, report)
+        return True, f" Report saved to {report_path}"
+    except OSError as exc:
+        return False, f" Could not save report to {report_path}: {exc}"
+
+
+def _emit_failure(
+    *,
+    output_dir: Path,
+    input_path: Path,
+    stage: str,
+    error: str,
+    jp: bool,
+    project_name: str | None = None,
+    report: str | None = None,
+    compatibility_warnings: list[str] | None = None,
+) -> int:
+    report_path = _report_path(output_dir, input_path, project_name)
+    report_text = report or _build_failure_report(input_path, stage, error)
+    _, report_note = _persist_report_with_note(report_path, report_text)
+    message = f"Failed during {stage}: {error}.{report_note}"
+    payload: dict[str, object] = {
+        "report": report_text,
+        "report_path": str(report_path),
+    }
+    if compatibility_warnings is not None:
+        payload["compatibility_warnings"] = compatibility_warnings
+    if jp:
+        _emit("error", _progress_for_stage(stage), message, **payload)
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main CLI entry point.
 
@@ -120,23 +167,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project = parse_logic_project(logicx_path, alternative=args.alternative)
     except Exception as exc:
-        report_path = _report_path(output_dir, logicx_path)
-        report = _build_failure_report(logicx_path, "parsing", str(exc))
-        report_note = ""
-        try:
-            _write_report(report_path, report)
-            report_note = f" Report saved to {report_path}"
-        except OSError as report_exc:
-            report_note = f" Could not save report to {report_path}: {report_exc}"
-        message = f"Failed to parse {logicx_path.name}: {exc}.{report_note}"
-        if jp:
-            _emit("error", 0.0, message, report=report, report_path=str(report_path))
-        else:
-            print(f"Error: {message}", file=sys.stderr)
-        return 1
+        return _emit_failure(
+            output_dir=output_dir,
+            input_path=logicx_path,
+            stage="parsing",
+            error=f"Failed to parse {logicx_path.name}: {exc}",
+            jp=jp,
+        )
 
     if args.mixer:
-        project.mixer_state = load_mixer_overrides(Path(args.mixer))
+        try:
+            project.mixer_state = load_mixer_overrides(Path(args.mixer))
+        except Exception as exc:
+            return _emit_failure(
+                output_dir=output_dir,
+                input_path=logicx_path,
+                stage="mixer",
+                error=str(exc),
+                jp=jp,
+                project_name=project.name,
+            )
         if not jp:
             print(f"  Loaded mixer overrides for {len(project.mixer_state)} track(s)")
 
@@ -169,15 +219,50 @@ def main(argv: list[str] | None = None) -> int:
 
     if jp:
         _emit("plugins", 0.4, "Matching plugins...")
-    plugin_matches = match_plugins(project.plugins, vst3_path)
-    report = generate_report(project, plugin_matches)
+    try:
+        plugin_matches = match_plugins(project.plugins, vst3_path)
+    except Exception as exc:
+        return _emit_failure(
+            output_dir=output_dir,
+            input_path=logicx_path,
+            stage="plugins",
+            error=str(exc),
+            jp=jp,
+            project_name=project.name,
+            compatibility_warnings=project.compatibility_warnings,
+        )
+
+    try:
+        report = generate_report(project, plugin_matches)
+    except Exception as exc:
+        return _emit_failure(
+            output_dir=output_dir,
+            input_path=logicx_path,
+            stage="report",
+            error=str(exc),
+            jp=jp,
+            project_name=project.name,
+            compatibility_warnings=project.compatibility_warnings,
+        )
     report_path = _report_path(output_dir, logicx_path, project.name)
 
     if not jp:
         print(report)
 
     if args.report_only:
-        _write_report(report_path, report)
+        try:
+            _write_report(report_path, report)
+        except OSError as exc:
+            return _emit_failure(
+                output_dir=output_dir,
+                input_path=logicx_path,
+                stage="report-write",
+                error=str(exc),
+                jp=jp,
+                project_name=project.name,
+                report=report,
+                compatibility_warnings=project.compatibility_warnings,
+            )
         if jp:
             _emit("complete", 1.0, "Report generated",
                   report=report,
@@ -205,21 +290,22 @@ def main(argv: list[str] | None = None) -> int:
             template_path=template_path,
         )
     except Exception as exc:
-        _write_report(report_path, report)
-        message = (
-            f"Conversion failed while generating Ableton session: {exc}. "
-            f"Report saved to {report_path}"
+        return _emit_failure(
+            output_dir=output_dir,
+            input_path=logicx_path,
+            stage="generating",
+            error=str(exc),
+            jp=jp,
+            project_name=project.name,
+            report=report,
+            compatibility_warnings=project.compatibility_warnings,
         )
-        if jp:
-            _emit("error", 0.5, message, report=report, compatibility_warnings=project.compatibility_warnings)
-        else:
-            print(f"Error: {message}", file=sys.stderr)
-        return 1
 
     if jp:
         _emit("complete", 1.0, "Conversion complete",
               als_path=str(als_path),
               report=report,
+              report_path=str(report_path),
               tracks=len(project.track_names),
               clips=len(project.audio_files),
               audio_files=len(project.audio_files),
@@ -227,10 +313,29 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"  Created: {als_path}")
 
-    _write_report(report_path, report)
+    saved, report_note = _persist_report_with_note(report_path, report)
+    if not saved:
+        warning = f"Conversion completed, but the report could not be written.{report_note}"
+        if jp:
+            _emit(
+                "complete",
+                1.0,
+                warning,
+                als_path=str(als_path),
+                report=report,
+                report_path=str(report_path),
+                tracks=len(project.track_names),
+                clips=len(project.audio_files),
+                audio_files=len(project.audio_files),
+                compatibility_warnings=project.compatibility_warnings,
+                warning=warning,
+            )
+        else:
+            print(f"Warning: {warning}", file=sys.stderr)
 
     if not jp:
-        print(f"  Report: {report_path}")
+        if saved:
+            print(f"  Report: {report_path}")
         print("\nDone!")
 
     return 0

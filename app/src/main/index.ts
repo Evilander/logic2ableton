@@ -1,6 +1,9 @@
+import type { ChildProcess } from "node:child_process"
+import type { IpcMainInvokeEvent } from "electron"
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron"
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
-import { dirname, join, normalize } from "node:path"
+import { dirname, extname, join, normalize } from "node:path"
+import type { ProgressEvent } from "./converter"
 import { runConversion } from "./converter"
 
 interface ConversionStats {
@@ -21,8 +24,11 @@ interface ConversionRecord {
 }
 
 const HISTORY_LIMIT = 100
+const ALLOWED_OPEN_EXTENSIONS = new Set([".als", ".txt"])
 
 let mainWindow: BrowserWindow | null = null
+let activeJob: { kind: "conversion" | "preview"; child: ChildProcess } | null = null
+const approvedPaths = new Set<string>()
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -68,6 +74,72 @@ function normalizePathInput(filePath: string): string {
   return normalize(filePath.trim())
 }
 
+function approvePath(filePath: string | null | undefined): void {
+  if (!filePath) return
+  approvedPaths.add(normalizePathInput(filePath))
+}
+
+function assertApprovedPath(filePath: string): string {
+  const normalized = normalizePathInput(filePath)
+  if (!approvedPaths.has(normalized)) {
+    throw new Error("Path is not available for this operation")
+  }
+  const extension = extname(normalized).toLowerCase()
+  if (extension && !ALLOWED_OPEN_EXTENSIONS.has(extension)) {
+    throw new Error("Unsupported file type")
+  }
+  return normalized
+}
+
+function clearActiveJob(child?: ChildProcess | null): void {
+  if (!activeJob) return
+  if (!child || activeJob.child.pid === child.pid) {
+    activeJob = null
+  }
+}
+
+function stopActiveJob(): void {
+  const current = activeJob
+  activeJob = null
+  if (!current || current.child.killed) return
+  current.child.kill()
+}
+
+function startJob(
+  kind: "conversion" | "preview",
+  event: IpcMainInvokeEvent,
+  logicxPath: string,
+  outputDir: string,
+  reportOnly = false,
+): void {
+  if (activeJob) {
+    throw new Error(`${activeJob.kind === "preview" ? "Preview" : "Conversion"} already in progress`)
+  }
+
+  const progressChannel = kind === "preview" ? "preview-progress" : "conversion-progress"
+  const errorChannel = kind === "preview" ? "preview-error" : "conversion-error"
+  const exitChannel = kind === "preview" ? "preview-exit" : "conversion-exit"
+
+  const child = runConversion(
+    normalizePathInput(logicxPath),
+    normalizePathInput(outputDir),
+    (progress: ProgressEvent) => {
+      approvePath(progress.als_path)
+      approvePath(progress.report_path)
+      event.sender.send(progressChannel, progress)
+    },
+    (error) => event.sender.send(errorChannel, error),
+    (code) => {
+      clearActiveJob(child)
+      event.sender.send(exitChannel, code)
+    },
+    reportOnly,
+  )
+
+  if (!child) return
+  activeJob = { kind, child }
+}
+
 function isConversionStats(value: unknown): value is ConversionStats {
   if (!value || typeof value !== "object") return false
   const stats = value as Partial<ConversionStats>
@@ -94,7 +166,13 @@ function readHistory(): ConversionRecord[] {
   try {
     const parsed = JSON.parse(readFileSync(historyPath, "utf-8"))
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(isConversionRecord).slice(0, HISTORY_LIMIT)
+    const history = parsed.filter(isConversionRecord).slice(0, HISTORY_LIMIT)
+    for (const record of history) {
+      if (record.status === "success") {
+        approvePath(record.outputPath)
+      }
+    }
+    return history
   } catch {
     return []
   }
@@ -121,6 +199,10 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on("before-quit", () => {
+  stopActiveJob()
 })
 
 app.on("window-all-closed", () => {
@@ -152,32 +234,19 @@ ipcMain.handle("select-output-dir", async () => {
 })
 
 ipcMain.handle("start-conversion", async (event, logicxPath: string, outputDir: string) => {
-  runConversion(
-    normalizePathInput(logicxPath),
-    normalizePathInput(outputDir),
-    (progress) => event.sender.send("conversion-progress", progress),
-    (error) => event.sender.send("conversion-error", error),
-    (code) => event.sender.send("conversion-exit", code),
-  )
+  startJob("conversion", event, logicxPath, outputDir)
 })
 
 ipcMain.handle("start-preview", async (event, logicxPath: string) => {
-  runConversion(
-    normalizePathInput(logicxPath),
-    previewOutputDir(),
-    (progress) => event.sender.send("preview-progress", progress),
-    (error) => event.sender.send("preview-error", error),
-    (code) => event.sender.send("preview-exit", code),
-    true,
-  )
+  startJob("preview", event, logicxPath, previewOutputDir(), true)
 })
 
 ipcMain.handle("open-file", async (_, filePath: string) => {
-  return shell.openPath(normalizePathInput(filePath))
+  return shell.openPath(assertApprovedPath(filePath))
 })
 
 ipcMain.handle("show-in-folder", async (_, filePath: string) => {
-  shell.showItemInFolder(normalizePathInput(filePath))
+  shell.showItemInFolder(assertApprovedPath(filePath))
 })
 
 ipcMain.handle("get-history", async () => {
@@ -187,6 +256,9 @@ ipcMain.handle("get-history", async () => {
 ipcMain.handle("add-history", async (_, record: unknown) => {
   if (!isConversionRecord(record)) {
     throw new Error("Invalid conversion history record")
+  }
+  if (record.status === "success") {
+    approvePath(record.outputPath)
   }
   const history = [record, ...readHistory()].slice(0, HISTORY_LIMIT)
   writeHistory(history)

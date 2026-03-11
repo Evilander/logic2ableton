@@ -147,6 +147,109 @@ def test_cli_writes_report_when_generation_fails(tmp_path, monkeypatch, capsys):
     assert report_path.exists()
 
 
+def test_cli_writes_report_when_mixer_overrides_fail(tmp_path, monkeypatch, capsys):
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: LogicProject(
+            name="Mixer Project",
+            tempo=120.0,
+            time_sig_numerator=4,
+            time_sig_denominator=4,
+            sample_rate=44100,
+            audio_files=[],
+            plugins=[],
+            track_names=["Track 1"],
+            alternative=0,
+            compatibility_warnings=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "logic2ableton.cli.load_mixer_overrides",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("invalid mixer payload")),
+    )
+
+    exit_code = main([str(project_path), "--output", str(output_dir), "--mixer", "bad.json"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "invalid mixer payload" in captured.err
+    report_path = output_dir / "Mixer Project_conversion_report.txt"
+    assert report_path.exists()
+    assert "Stage: mixer" in report_path.read_text(encoding="utf-8")
+
+
+def test_cli_writes_report_when_plugin_matching_fails(tmp_path, monkeypatch, capsys):
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: LogicProject(
+            name="Plugin Project",
+            tempo=120.0,
+            time_sig_numerator=4,
+            time_sig_denominator=4,
+            sample_rate=44100,
+            audio_files=[],
+            plugins=[],
+            track_names=["Track 1"],
+            alternative=0,
+            compatibility_warnings=["Plugin scan failed"],
+        ),
+    )
+    monkeypatch.setattr(
+        "logic2ableton.cli.match_plugins",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("vst scan crashed")),
+    )
+
+    exit_code = main([str(project_path), "--output", str(output_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "vst scan crashed" in captured.err
+    report_path = output_dir / "Plugin Project_conversion_report.txt"
+    assert report_path.exists()
+    assert "Stage: plugins" in report_path.read_text(encoding="utf-8")
+
+
+def test_cli_report_only_fails_cleanly_when_report_write_fails(tmp_path, monkeypatch, capsys):
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: LogicProject(
+            name="Report Project",
+            tempo=120.0,
+            time_sig_numerator=4,
+            time_sig_denominator=4,
+            sample_rate=44100,
+            audio_files=[],
+            plugins=[],
+            track_names=["Track 1"],
+            alternative=0,
+            compatibility_warnings=[],
+        ),
+    )
+    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "logic2ableton.cli._write_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    exit_code = main([str(project_path), "--output", str(output_dir), "--report-only"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "disk full" in captured.err
+
+
 @pytest.mark.needs_test_project
 def test_cli_template_flag(tmp_path):
     """--template flag should be accepted."""

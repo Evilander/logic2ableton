@@ -31,10 +31,45 @@ jobs:
       - name: Build Python package
         run: python -m build
 
-  build:
+  desktop-smoke:
     needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build standalone converter
+        run: pyinstaller logic2ableton.spec
+
+      - name: Smoke test standalone converter
+        run: .\dist\logic2ableton.exe --version
+
+      - name: Copy converter binary to app resources
+        run: Copy-Item dist\logic2ableton.exe app\resources\logic2ableton.exe -Force
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build app bundles
+        working-directory: app
+        run: npm run build
+
+  build:
+    needs: [test, desktop-smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -42,16 +77,19 @@ jobs:
             arch: x64
             artifact_name: installer-win-x64
             converter_binary: dist/logic2ableton.exe
+            smoke_command: .\dist\logic2ableton.exe --version
           - os: macos-13
             platform: mac
             arch: x64
             artifact_name: installer-mac-x64
             converter_binary: dist/logic2ableton
+            smoke_command: ./dist/logic2ableton --version
           - os: macos-14
             platform: mac
             arch: arm64
             artifact_name: installer-mac-arm64
             converter_binary: dist/logic2ableton
+            smoke_command: ./dist/logic2ableton --version
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -71,14 +109,7 @@ jobs:
         run: pyinstaller logic2ableton.spec
 
       - name: Smoke test standalone converter
-        run: |
-          python - <<'PY'
-          import subprocess
-
-          binary = r"${{ matrix.converter_binary }}"
-          result = subprocess.run([binary, "--version"], capture_output=True, text=True, check=True)
-          print(result.stdout.strip())
-          PY
+        run: ${{ matrix.smoke_command }}
 
       - name: Copy converter binary to app resources
         shell: bash

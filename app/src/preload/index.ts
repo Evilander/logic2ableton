@@ -11,6 +11,8 @@ export interface ProgressEvent {
   clips?: number
   audio_files?: number
   plugins?: number
+  compatibility_warnings?: string[]
+  warning?: string
 }
 
 export interface ConversionRecord {

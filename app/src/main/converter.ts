@@ -9,10 +9,13 @@ export interface ProgressEvent {
   message: string
   als_path?: string
   report?: string
+  report_path?: string
   tracks?: number
   clips?: number
   audio_files?: number
   plugins?: number
+  compatibility_warnings?: string[]
+  warning?: string
 }
 
 function getConverterCommand(): { cmd: string; baseArgs: string[] } {
