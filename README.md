@@ -1,5 +1,9 @@
 # logic2ableton
 
+[![PyPI version](https://img.shields.io/pypi/v/logic2ableton)](https://pypi.org/project/logic2ableton/)
+[![Python 3.11+](https://img.shields.io/pypi/pyversions/logic2ableton)](https://pypi.org/project/logic2ableton/)
+[![License: MIT](https://img.shields.io/pypi/l/logic2ableton)](https://github.com/Evilander/logic2ableton/blob/master/LICENSE)
+
 Convert Logic Pro `.logicx` projects into Ableton Live `.als` sessions with a desktop app or CLI.
 
 `logic2ableton` is built for audio-first projects: bounced stems, recorded takes, arrangement timing, tempo, time signature, mixer-state overrides, and plugin identification. The goal is simple: get a working Ableton arrangement fast, then use the compatibility report to see exactly what still needs manual cleanup.
@@ -35,6 +39,13 @@ If a project lands imperfectly, the first thing to inspect is the generated conv
 
 ## Install
 
+| Method | Command / Link | Description |
+|--------|----------------|-------------|
+| **PyPI** | `pip install logic2ableton` | CLI tool, any platform with Python 3.11+ |
+| Windows | [Installer](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app, standard Windows installer |
+| Windows | [Portable](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app, single exe, no install needed |
+| macOS (Apple Silicon) | [DMG (arm64)](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app for M1/M2/M3/M4 Macs |
+
 ### Desktop App
 
 Download the latest installer or portable build from GitHub Releases:
@@ -48,12 +59,16 @@ Notes:
 - Intel macOS users currently need to run from source or use a self-hosted packaging flow. GitHub-hosted Intel runner support for this repo's release lane is not stable enough to publish as an official artifact.
 - The desktop app bundles the converter binary, so end users do not need Python installed.
 
-### CLI From Source
+### Install from PyPI
 
 ```bash
-git clone https://github.com/Evilander/logic2ableton.git
-cd logic2ableton
-pip install -e .
+pip install logic2ableton
+```
+
+Then run from anywhere:
+
+```bash
+logic2ableton "path/to/MySong.logicx" --output ./output
 ```
 
 Show the installed version:
@@ -156,6 +171,8 @@ Run tests:
 ```bash
 python -m pytest tests -q
 ```
+
+No third-party Python dependencies. The Ableton template is bundled — no Ableton installation needed.
 
 Build the Python package:
 
