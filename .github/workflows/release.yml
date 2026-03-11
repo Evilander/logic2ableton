@@ -78,12 +78,6 @@ jobs:
             artifact_name: installer-win-x64
             converter_binary: dist/logic2ableton.exe
             smoke_command: .\dist\logic2ableton.exe --version
-          - os: macos-13
-            platform: mac
-            arch: x64
-            artifact_name: installer-mac-x64
-            converter_binary: dist/logic2ableton
-            smoke_command: ./dist/logic2ableton --version
           - os: macos-14
             platform: mac
             arch: arm64

@@ -40,11 +40,12 @@ If a project lands imperfectly, the first thing to inspect is the generated conv
 Download the latest installer or portable build from GitHub Releases:
 
 - Windows: NSIS installer and portable `.exe`
-- macOS: Intel and Apple Silicon `.dmg`
+- macOS: Apple Silicon `.dmg`
 
 Notes:
 
 - macOS builds are unsigned. Gatekeeper may require opening them manually the first time.
+- Intel macOS users currently need to run from source or use a self-hosted packaging flow. GitHub-hosted Intel runner support for this repo's release lane is not stable enough to publish as an official artifact.
 - The desktop app bundles the converter binary, so end users do not need Python installed.
 
 ### CLI From Source
