@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "logic2ableton"
-version = "1.0.2"
+dynamic = ["version"]
 description = "Convert Logic Pro .logicx projects to Ableton Live .als files"
 readme = "README.md"
 license = "MIT"
@@ -15,7 +15,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3.11",
@@ -37,6 +36,9 @@ include = ["logic2ableton*"]
 
 [tool.setuptools.package-data]
 logic2ableton = ["data/*.als"]
+
+[tool.setuptools.dynamic]
+version = { attr = "logic2ableton.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

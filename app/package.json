@@ -1,10 +1,10 @@
 {
   "name": "logic2ableton",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Convert Logic Pro projects to Ableton Live sets",
   "main": "./out/main/index.js",
   "author": {
-    "name": "evilander",
+    "name": "evilander"
   },
   "repository": {
     "type": "git",
@@ -14,10 +14,10 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "postinstall": "electron-vite build",
-    "dist": "electron-vite build && electron-builder --config electron-builder.yml",
+    "prepare:mac-icon": "node ./scripts/generate-mac-icon.mjs",
+    "dist": "npm run build && npm run prepare:mac-icon && electron-builder --config electron-builder.yml",
     "dist:win": "electron-vite build && electron-builder --win --config electron-builder.yml",
-    "dist:mac": "electron-vite build && electron-builder --mac --config electron-builder.yml"
+    "dist:mac": "npm run build && npm run prepare:mac-icon && electron-builder --mac --config electron-builder.yml"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

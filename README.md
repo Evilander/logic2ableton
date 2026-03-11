@@ -25,7 +25,7 @@ The converter is aimed at audio-first Logic sessions: recorded stems, bounced co
 - Imported audio without embedded timestamps defaults to bar 1
 - External or aliased media that is not inside `Media/Audio Files` cannot be copied yet
 
-That last pair is the main reason some projects convert well and others do not. As of `v1.0.2`, the conversion report explicitly calls these cases out instead of looking like a clean success.
+That last pair is the main reason some projects convert well and others do not. As of `v1.0.3`, the conversion report explicitly calls these cases out, `--report-only` persists the report artifact, and parse failures save a stage-tagged error report instead of failing silently.
 
 ## Desktop App
 
@@ -114,11 +114,17 @@ Run the Python tests:
 python -m pytest tests -q
 ```
 
+Build the source distribution and wheel:
+
+```bash
+python -m build
+```
+
 Run the desktop app in development:
 
 ```bash
 cd app
-npm install
+npm ci
 npm run dev
 ```
 

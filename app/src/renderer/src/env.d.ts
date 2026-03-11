@@ -6,6 +6,7 @@ interface ProgressEvent {
   message: string
   als_path?: string
   report?: string
+  report_path?: string
   tracks?: number
   clips?: number
   audio_files?: number
@@ -29,12 +30,14 @@ interface Window {
     selectOutputDir: () => Promise<string | null>
     startConversion: (logicxPath: string, outputDir: string) => Promise<void>
     startPreview: (logicxPath: string) => Promise<void>
-    openFile: (path: string) => Promise<void>
+    openFile: (path: string) => Promise<string>
     showInFolder: (path: string) => Promise<void>
     getHistory: () => Promise<ConversionRecord[]>
-    addHistory: (record: ConversionRecord) => Promise<void>
+    addHistory: (record: ConversionRecord) => Promise<ConversionRecord[]>
     onProgress: (cb: (event: ProgressEvent) => void) => () => void
     onPreviewProgress: (cb: (event: ProgressEvent) => void) => () => void
+    onPreviewError: (cb: (error: string) => void) => () => void
+    onPreviewExit: (cb: (code: number) => void) => () => void
     onError: (cb: (error: string) => void) => () => void
     onExit: (cb: (code: number) => void) => () => void
   }

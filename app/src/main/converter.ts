@@ -1,5 +1,6 @@
-import { spawn, ChildProcess } from "child_process"
-import { join, resolve } from "path"
+import { spawn, ChildProcess } from "node:child_process"
+import { existsSync } from "node:fs"
+import { join, resolve } from "node:path"
 import { app } from "electron"
 
 export interface ProgressEvent {
@@ -17,8 +18,12 @@ export interface ProgressEvent {
 function getConverterCommand(): { cmd: string; baseArgs: string[] } {
   if (app.isPackaged) {
     const ext = process.platform === "win32" ? ".exe" : ""
+    const packagedBinary = join(process.resourcesPath, `logic2ableton${ext}`)
+    if (!existsSync(packagedBinary)) {
+      throw new Error(`Bundled converter not found at ${packagedBinary}`)
+    }
     return {
-      cmd: join(process.resourcesPath, `logic2ableton${ext}`),
+      cmd: packagedBinary,
       baseArgs: [],
     }
   }
@@ -36,8 +41,18 @@ export function runConversion(
   onError: (error: string) => void,
   onExit: (code: number) => void,
   reportOnly = false,
-): ChildProcess {
-  const { cmd, baseArgs } = getConverterCommand()
+): ChildProcess | null {
+  let cmd: string
+  let baseArgs: string[]
+
+  try {
+    ({ cmd, baseArgs } = getConverterCommand())
+  } catch (error) {
+    onError(error instanceof Error ? error.message : String(error))
+    onExit(1)
+    return null
+  }
+
   const args = [
     ...baseArgs,
     logicxPath,
@@ -51,6 +66,13 @@ export function runConversion(
   const cwd = app.isPackaged ? undefined : resolve(__dirname, "../../..")
 
   const child = spawn(cmd, args, { cwd })
+  let finished = false
+
+  const finish = (code: number) => {
+    if (finished) return
+    finished = true
+    onExit(code)
+  }
 
   let buffer = ""
   child.stdout?.on("data", (data: Buffer) => {
@@ -71,8 +93,13 @@ export function runConversion(
     onError(data.toString())
   })
 
+  child.on("error", (error) => {
+    onError(`Failed to start converter: ${error.message}`)
+    finish(1)
+  })
+
   child.on("close", (code) => {
-    onExit(code ?? 1)
+    finish(code ?? 1)
   })
 
   return child

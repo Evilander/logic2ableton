@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from logic2ableton.cli import main
+from logic2ableton import __version__
 from logic2ableton.models import LogicProject
 
 TEST_PROJECT = Path("Might Last Forever.logicx")
@@ -60,7 +61,58 @@ def test_cli_version():
         text=True,
     )
     assert result.returncode == 0
-    assert "1.0.2" in result.stdout
+    assert __version__ in result.stdout
+
+
+def test_cli_report_only_writes_report(tmp_path, monkeypatch, capsys):
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: LogicProject(
+            name="Preview Project",
+            tempo=120.0,
+            time_sig_numerator=4,
+            time_sig_denominator=4,
+            sample_rate=44100,
+            audio_files=[],
+            plugins=[],
+            track_names=["Track 1"],
+            alternative=0,
+            compatibility_warnings=[],
+        ),
+    )
+    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+
+    exit_code = main([str(project_path), "--output", str(output_dir), "--report-only"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    report_path = output_dir / "Preview Project_conversion_report.txt"
+    assert report_path.exists()
+    assert str(report_path) in captured.out
+
+
+def test_cli_writes_report_when_parse_fails(tmp_path, monkeypatch, capsys):
+    project_path = tmp_path / "broken.logicx"
+    project_path.mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("project package is unreadable")),
+    )
+
+    exit_code = main([str(project_path), "--output", str(output_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "project package is unreadable" in captured.err
+    report_path = output_dir / "broken_conversion_report.txt"
+    assert report_path.exists()
+    assert "Stage: parsing" in report_path.read_text(encoding="utf-8")
 
 
 def test_cli_writes_report_when_generation_fails(tmp_path, monkeypatch, capsys):

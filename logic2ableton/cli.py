@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from datetime import datetime, UTC
 from pathlib import Path
 
 from logic2ableton import __version__
@@ -22,6 +23,27 @@ def _write_report(report_path: Path, report: str) -> None:
     """Persist the human-readable conversion report."""
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report, encoding="utf-8")
+
+
+def _report_path(output_dir: Path, input_path: Path, project_name: str | None = None) -> Path:
+    """Build the report filename for a conversion attempt."""
+    report_name = project_name or input_path.stem or "logic_project"
+    return output_dir / f"{report_name}_conversion_report.txt"
+
+
+def _build_failure_report(input_path: Path, stage: str, error: str) -> str:
+    """Capture actionable details when conversion fails before a full report exists."""
+    return "\n".join(
+        [
+            "LOGIC2ABLETON CONVERSION FAILED",
+            f"Timestamp (UTC): {datetime.now(UTC).isoformat()}",
+            f"Input: {input_path}",
+            f"Stage: {stage}",
+            "",
+            "ERROR",
+            error,
+        ]
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     logicx_path = Path(args.input)
+    output_dir = Path(args.output)
     jp = args.json_progress
 
     if not logicx_path.exists():
@@ -97,9 +120,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project = parse_logic_project(logicx_path, alternative=args.alternative)
     except Exception as exc:
-        message = f"Failed to parse {logicx_path.name}: {exc}"
+        report_path = _report_path(output_dir, logicx_path)
+        report = _build_failure_report(logicx_path, "parsing", str(exc))
+        report_note = ""
+        try:
+            _write_report(report_path, report)
+            report_note = f" Report saved to {report_path}"
+        except OSError as report_exc:
+            report_note = f" Could not save report to {report_path}: {report_exc}"
+        message = f"Failed to parse {logicx_path.name}: {exc}.{report_note}"
         if jp:
-            _emit("error", 0.0, message)
+            _emit("error", 0.0, message, report=report, report_path=str(report_path))
         else:
             print(f"Error: {message}", file=sys.stderr)
         return 1
@@ -140,22 +171,25 @@ def main(argv: list[str] | None = None) -> int:
         _emit("plugins", 0.4, "Matching plugins...")
     plugin_matches = match_plugins(project.plugins, vst3_path)
     report = generate_report(project, plugin_matches)
-    report_path = Path(args.output) / f"{project.name}_conversion_report.txt"
+    report_path = _report_path(output_dir, logicx_path, project.name)
 
     if not jp:
         print(report)
 
     if args.report_only:
+        _write_report(report_path, report)
         if jp:
             _emit("complete", 1.0, "Report generated",
                   report=report,
+                  report_path=str(report_path),
                   tracks=len(project.track_names),
                   audio_files=len(project.audio_files),
                   plugins=len(project.plugins),
                   compatibility_warnings=project.compatibility_warnings)
+        else:
+            print(f"\nReport: {report_path}")
         return 0
 
-    output_dir = Path(args.output)
     template_path = Path(args.template) if args.template else None
 
     if jp:

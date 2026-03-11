@@ -6,6 +6,7 @@ export interface ProgressEvent {
   message: string
   als_path?: string
   report?: string
+  report_path?: string
   tracks?: number
   clips?: number
   audio_files?: number
@@ -20,7 +21,13 @@ export interface ConversionRecord {
   date: string
   status: "success" | "failed"
   report: string
-  stats?: { tracks: number; clips: number; audioFiles: number }
+  stats?: { tracks: number; clips?: number; audioFiles: number }
+}
+
+function subscribe<T>(channel: string, cb: (value: T) => void) {
+  const handler = (_: unknown, value: T) => cb(value)
+  ipcRenderer.on(channel, handler)
+  return () => ipcRenderer.removeListener(channel, handler)
 }
 
 const api = {
@@ -30,31 +37,16 @@ const api = {
     ipcRenderer.invoke("start-conversion", logicxPath, outputDir),
   startPreview: (logicxPath: string): Promise<void> =>
     ipcRenderer.invoke("start-preview", logicxPath),
-  openFile: (path: string): Promise<void> => ipcRenderer.invoke("open-file", path),
+  openFile: (path: string): Promise<string> => ipcRenderer.invoke("open-file", path),
   showInFolder: (path: string): Promise<void> => ipcRenderer.invoke("show-in-folder", path),
   getHistory: (): Promise<ConversionRecord[]> => ipcRenderer.invoke("get-history"),
-  addHistory: (record: ConversionRecord): Promise<void> => ipcRenderer.invoke("add-history", record),
-
-  onProgress: (cb: (event: ProgressEvent) => void) => {
-    const handler = (_: unknown, event: ProgressEvent) => cb(event)
-    ipcRenderer.on("conversion-progress", handler)
-    return () => ipcRenderer.removeListener("conversion-progress", handler)
-  },
-  onPreviewProgress: (cb: (event: ProgressEvent) => void) => {
-    const handler = (_: unknown, event: ProgressEvent) => cb(event)
-    ipcRenderer.on("preview-progress", handler)
-    return () => ipcRenderer.removeListener("preview-progress", handler)
-  },
-  onError: (cb: (error: string) => void) => {
-    const handler = (_: unknown, error: string) => cb(error)
-    ipcRenderer.on("conversion-error", handler)
-    return () => ipcRenderer.removeListener("conversion-error", handler)
-  },
-  onExit: (cb: (code: number) => void) => {
-    const handler = (_: unknown, code: number) => cb(code)
-    ipcRenderer.on("conversion-exit", handler)
-    return () => ipcRenderer.removeListener("conversion-exit", handler)
-  },
+  addHistory: (record: ConversionRecord): Promise<ConversionRecord[]> => ipcRenderer.invoke("add-history", record),
+  onProgress: (cb: (event: ProgressEvent) => void) => subscribe("conversion-progress", cb),
+  onPreviewProgress: (cb: (event: ProgressEvent) => void) => subscribe("preview-progress", cb),
+  onPreviewError: (cb: (error: string) => void) => subscribe("preview-error", cb),
+  onPreviewExit: (cb: (code: number) => void) => subscribe("preview-exit", cb),
+  onError: (cb: (error: string) => void) => subscribe("conversion-error", cb),
+  onExit: (cb: (code: number) => void) => subscribe("conversion-exit", cb),
 }
 
 contextBridge.exposeInMainWorld("api", api)

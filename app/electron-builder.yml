@@ -2,6 +2,7 @@ appId: com.evilander.logic2ableton
 productName: Logic to Ableton Converter
 copyright: Copyright (c) 2025 evilander
 publish: null
+artifactName: ${productName}-${version}-${arch}.${ext}
 
 directories:
   buildResources: resources
@@ -32,7 +33,7 @@ nsis:
   license: ../LICENSE
 
 portable:
-  artifactName: ${productName}-${version}-portable.exe
+  artifactName: ${productName}-${version}-${arch}-portable.exe
 
 mac:
   target:

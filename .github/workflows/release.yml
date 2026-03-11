@@ -3,24 +3,33 @@ name: CI & Release
 on:
   push:
     branches: [master]
-    tags: ['v*']
+    tags: ["v*"]
   pull_request:
     branches: [master]
+  workflow_dispatch:
 
 jobs:
   test:
     strategy:
       matrix:
         os: [windows-latest, macos-latest]
-        python-version: ['3.11', '3.12', '3.13']
+        python-version: ["3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install pytest
-      - run: python -m pytest tests/ -q
+
+      - name: Install Python tooling
+        run: python -m pip install --upgrade pip pytest build
+
+      - name: Run Python tests
+        run: python -m pytest tests/ -q
+
+      - name: Build Python package
+        run: python -m build
 
   build:
     needs: test
@@ -30,25 +39,47 @@ jobs:
         include:
           - os: windows-latest
             platform: win
-          - os: macos-latest
+            arch: x64
+            artifact_name: installer-win-x64
+            converter_binary: dist/logic2ableton.exe
+          - os: macos-13
             platform: mac
+            arch: x64
+            artifact_name: installer-mac-x64
+            converter_binary: dist/logic2ableton
+          - os: macos-14
+            platform: mac
+            arch: arm64
+            artifact_name: installer-mac-arm64
+            converter_binary: dist/logic2ableton
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: "3.13"
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
-      # Build standalone CLI exe with PyInstaller
-      - run: pip install pyinstaller
-      - run: pyinstaller logic2ableton.spec
+      - name: Install packaging tools
+        run: python -m pip install --upgrade pip pyinstaller
 
-      # Copy Python exe to Electron resources
+      - name: Build standalone converter
+        run: pyinstaller logic2ableton.spec
+
+      - name: Smoke test standalone converter
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          binary = r"${{ matrix.converter_binary }}"
+          result = subprocess.run([binary, "--version"], capture_output=True, text=True, check=True)
+          print(result.stdout.strip())
+          PY
+
       - name: Copy converter binary to app resources
         shell: bash
         run: |
@@ -58,37 +89,36 @@ jobs:
             cp dist/logic2ableton app/resources/logic2ableton
           fi
 
-      # Build Electron app
       - name: Install app dependencies
         working-directory: app
-        run: npm ci || npm install
+        run: npm ci
+
+      - name: Build app bundles
+        working-directory: app
+        run: npm run build
+
+      - name: Generate macOS icon
+        if: matrix.platform == 'mac'
+        working-directory: app
+        run: npm run prepare:mac-icon
 
       - name: Build Electron installer
         working-directory: app
         shell: bash
         run: |
           if [ "${{ matrix.platform }}" = "win" ]; then
-            npx electron-builder --win --config electron-builder.yml
+            npx electron-builder --win --${{ matrix.arch }} --config electron-builder.yml
           else
-            npx electron-builder --mac --config electron-builder.yml
+            npx electron-builder --mac --${{ matrix.arch }} --config electron-builder.yml
           fi
 
-      # Upload Electron installer
-      - name: Upload installer (Windows)
-        if: matrix.platform == 'win'
+      - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: installer-win
+          name: ${{ matrix.artifact_name }}
           path: |
-            app/dist/*Setup*.exe
-            app/dist/*portable*.exe
-
-      - name: Upload installer (macOS)
-        if: matrix.platform == 'mac'
-        uses: actions/upload-artifact@v4
-        with:
-          name: installer-mac
-          path: app/dist/*.dmg
+            app/dist/*.exe
+            app/dist/*.dmg
 
   release:
     needs: build
@@ -101,22 +131,9 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: installer-win
-          path: artifacts/installer-win/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: installer-mac
-          path: artifacts/installer-mac/
-        continue-on-error: true
-
-      - name: Prepare release artifacts
-        run: |
-          mkdir -p release
-          cp artifacts/installer-win/*Setup*.exe release/ || true
-          cp artifacts/installer-win/*portable*.exe release/ || true
-          cp artifacts/installer-mac/*.dmg release/ || true
-          ls -lh release/
+          pattern: installer-*
+          merge-multiple: true
+          path: release/
 
       - name: Create release
         uses: softprops/action-gh-release@v2
