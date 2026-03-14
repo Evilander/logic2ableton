@@ -1,21 +1,35 @@
-import { motion } from "motion/react"
 import { CircleNotch } from "@phosphor-icons/react"
+import { motion } from "motion/react"
+import type { ConversionDirection } from "../hooks/useAppState"
 
 interface ConversionProgressProps {
+  direction: ConversionDirection
   stage: string
   progress: number
   message: string
   logs: string[]
 }
 
-const STAGE_LABELS: Record<string, string> = {
+const FORWARD_LABELS: Record<string, string> = {
   parsing: "Parsing Logic Pro project",
   plugins: "Matching plugins",
   generating: "Generating Ableton session",
-  copying: "Copying audio files",
 }
 
-export default function ConversionProgress({ stage, progress, message, logs }: ConversionProgressProps) {
+const REVERSE_LABELS: Record<string, string> = {
+  parsing: "Parsing Ableton Live Set",
+  generating: "Building Logic transfer package",
+}
+
+export default function ConversionProgress({
+  direction,
+  stage,
+  progress,
+  message,
+  logs,
+}: ConversionProgressProps) {
+  const stageLabels = direction === "logic2ableton" ? FORWARD_LABELS : REVERSE_LABELS
+
   return (
     <div className="flex-1 flex items-center justify-center p-8">
       <motion.div
@@ -23,7 +37,6 @@ export default function ConversionProgress({ stage, progress, message, logs }: C
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md space-y-6"
       >
-        {/* Spinner + Stage */}
         <div className="flex items-center gap-3">
           <motion.div
             animate={{ rotate: 360 }}
@@ -31,12 +44,9 @@ export default function ConversionProgress({ stage, progress, message, logs }: C
           >
             <CircleNotch size={20} className="text-rose" />
           </motion.div>
-          <span className="text-sm font-medium">
-            {STAGE_LABELS[stage] || message}
-          </span>
+          <span className="text-sm font-medium">{stageLabels[stage] || message}</span>
         </div>
 
-        {/* Progress Bar */}
         <div className="space-y-2">
           <div className="h-2 bg-surface rounded-full overflow-hidden border border-border">
             <motion.div
@@ -52,12 +62,11 @@ export default function ConversionProgress({ stage, progress, message, logs }: C
           </div>
         </div>
 
-        {/* Log Panel */}
         {logs.length > 0 && (
           <div className="bg-surface rounded-xl border border-border p-3 max-h-40 overflow-y-auto">
             <div className="space-y-0.5 font-mono text-xs text-text-tertiary">
-              {logs.map((log, i) => (
-                <div key={i}>{log}</div>
+              {logs.map((log, index) => (
+                <div key={index}>{log}</div>
               ))}
             </div>
           </div>

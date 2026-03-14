@@ -1,10 +1,10 @@
 # Roadmap
 
-Last updated: 2026-02-19
+Last updated: 2026-03-14
 
 ## Priorities
 
-1. Don't generate broken `.als` files. Ever.
+1. Don't generate broken `.als` files or broken transfer packages. Ever.
 2. Same input = same output. No random IDs, no timestamp jitter.
 3. Audio fidelity first, then mix state, then MIDI/plugins.
 4. Every feature gets tests. No exceptions.
@@ -22,10 +22,12 @@ Last updated: 2026-02-19
 | VST3 suggestion matching | Done | Category-based, scans local VST3 directory |
 | Mixer state (JSON overrides) | Done | `--mixer` flag, `--generate-mixer-template` |
 | Conversion report | Done | Tracks, plugins, mixer state, suggestions |
+| Ableton `.als` parser | Done | Audio tracks, clips, tempo, time sig, locators |
+| Logic transfer package | Done | Track-grouped audio files, manifests, import guide, report |
 | Cross-platform support | Done | macOS + Windows template/VST3 paths, --template flag |
 | Plugin database (252 AU) | Done | Waves, Apple, iZotope, Soundtoys, Arturia, NI, Brainworx, +more |
 | Name-similarity matching | Done | Token overlap scoring when category match is too broad |
-| Test suite | Done | 107 tests across all modules, 5 real projects |
+| Test suite | Done | 129 tests across all modules, with real-project coverage gated by local fixtures |
 
 ## Phase 1: Native Mixer Extraction
 
@@ -185,7 +187,7 @@ These aren't planned but would be valuable if the core is solid:
 - **Track grouping** — Logic folder stacks → Ableton Group Tracks
 - **DAW-neutral intermediate format** — parse Logic once into a universal model, export to Ableton/Reaper/Pro Tools/etc.
 - **Conversion diff tool** — compare two .als outputs to verify changes between converter versions
-- **Ableton → Logic** — reverse direction (much harder, Ableton XML → Logic binary)
+- **Native `.logicx` synthesis** — generate a real Logic package without relying on manual import steps; blocked on undocumented Logic `ProjectData`
 
 ## Rules
 

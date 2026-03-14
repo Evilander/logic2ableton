@@ -1,6 +1,6 @@
-import { motion } from "motion/react"
-import { CheckCircle, FolderOpen, Play, ArrowCounterClockwise, XCircle } from "@phosphor-icons/react"
 import { useState } from "react"
+import { motion } from "motion/react"
+import { ArrowCounterClockwise, CheckCircle, FolderOpen, Play, XCircle } from "@phosphor-icons/react"
 import type { ConversionResult } from "../hooks/useAppState"
 
 interface ConversionCompleteProps {
@@ -44,6 +44,9 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
 
   if (!result) return null
 
+  const isForward = result.direction === "logic2ableton"
+  const primaryActionLabel = isForward ? "Open in Ableton" : "Open Import Guide"
+
   return (
     <div className="flex-1 flex items-center justify-center p-8">
       <motion.div
@@ -52,14 +55,17 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
         transition={{ type: "spring", stiffness: 300, damping: 25 }}
         className="w-full max-w-md space-y-4"
       >
-        {/* Success Card */}
         <div className="bg-surface rounded-2xl border-2 border-gold p-6 space-y-4">
           <div className="flex items-center gap-3">
             <CheckCircle size={24} weight="fill" className="text-gold" />
-            <span className="font-semibold">Conversion Complete</span>
+            <div>
+              <div className="font-semibold">Conversion Complete</div>
+              <div className="text-xs text-text-tertiary">
+                {isForward ? "Logic to Ableton" : "Ableton to Logic"}
+              </div>
+            </div>
           </div>
 
-          {/* Stats */}
           <div className="grid grid-cols-3 gap-3 text-center">
             <div>
               <div className="text-lg font-semibold font-mono">{result.tracks}</div>
@@ -70,24 +76,27 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
               <div className="text-xs text-text-secondary">clips</div>
             </div>
             <div>
-              <div className="text-lg font-semibold font-mono">{result.audioFiles}</div>
-              <div className="text-xs text-text-secondary">audio files</div>
+              <div className="text-lg font-semibold font-mono">
+                {isForward ? result.audioFiles : result.locators ?? 0}
+              </div>
+              <div className="text-xs text-text-secondary">
+                {isForward ? "audio files" : "locators"}
+              </div>
             </div>
           </div>
 
-          {/* Action Buttons */}
           <div className="flex gap-2">
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              onClick={() => window.api.openFile(result.alsPath)}
+              onClick={() => window.api.openFile(result.artifactPath)}
               className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-rose hover:bg-rose-hover text-bg font-medium text-sm transition-colors cursor-pointer"
             >
               <Play size={16} weight="fill" />
-              Open in Ableton
+              {primaryActionLabel}
             </motion.button>
             <button
-              onClick={() => window.api.showInFolder(result.alsPath)}
+              onClick={() => window.api.showInFolder(result.artifactPath)}
               className="px-3 py-2.5 rounded-xl bg-bg hover:bg-surface-hover border border-border text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
             >
               <FolderOpen size={16} />
@@ -95,7 +104,6 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
           </div>
         </div>
 
-        {/* Report Toggle */}
         <button
           onClick={() => setShowReport(!showReport)}
           className="w-full text-xs text-text-tertiary hover:text-text-secondary text-center py-1 transition-colors cursor-pointer"
@@ -115,7 +123,6 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
           </motion.div>
         )}
 
-        {/* Convert Another */}
         <button
           onClick={onConvertAnother}
           className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-surface hover:bg-surface-hover border border-border text-sm transition-colors cursor-pointer"

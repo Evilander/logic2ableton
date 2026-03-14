@@ -1,5 +1,5 @@
 appId: com.evilander.logic2ableton
-productName: Logic to Ableton Converter
+productName: Logic Ableton Transfer
 copyright: Copyright (c) 2026 evilander
 publish: null
 artifactName: ${productName}-${version}-${arch}.${ext}

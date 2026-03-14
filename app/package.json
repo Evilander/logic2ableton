@@ -1,7 +1,7 @@
 {
   "name": "logic2ableton",
-  "version": "1.0.5",
-  "description": "Convert Logic Pro projects to Ableton Live sets",
+  "version": "2.0.0",
+  "description": "Bidirectional audio-first transfer between Logic Pro and Ableton Live",
   "main": "./out/main/index.js",
   "author": {
     "name": "evilander"

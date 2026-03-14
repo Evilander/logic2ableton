@@ -3,17 +3,23 @@ import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { app } from "electron"
 
+export type ConversionDirection = "logic2ableton" | "ableton2logic"
+
 export interface ProgressEvent {
+  direction?: ConversionDirection
   stage: string
   progress: number
   message: string
   als_path?: string
+  artifact_path?: string
+  package_path?: string
   report?: string
   report_path?: string
   tracks?: number
   clips?: number
   audio_files?: number
   plugins?: number
+  locators?: number
   compatibility_warnings?: string[]
   warning?: string
 }
@@ -30,7 +36,7 @@ function getConverterCommand(): { cmd: string; baseArgs: string[] } {
       baseArgs: [],
     }
   }
-  // Dev mode: use system Python against the source
+
   return {
     cmd: "python",
     baseArgs: ["-m", "logic2ableton.cli"],
@@ -38,7 +44,8 @@ function getConverterCommand(): { cmd: string; baseArgs: string[] } {
 }
 
 export function runConversion(
-  logicxPath: string,
+  direction: ConversionDirection,
+  sourcePath: string,
   outputDir: string,
   onProgress: (event: ProgressEvent) => void,
   onError: (error: string) => void,
@@ -58,16 +65,18 @@ export function runConversion(
 
   const args = [
     ...baseArgs,
-    logicxPath,
-    "--output", outputDir,
+    "--mode",
+    direction,
+    sourcePath,
+    "--output",
+    outputDir,
     "--json-progress",
   ]
   if (reportOnly) {
-    args.push("--report-only", "--no-copy")
+    args.push("--report-only")
   }
 
   const cwd = app.isPackaged ? undefined : resolve(__dirname, "../../..")
-
   const child = spawn(cmd, args, { cwd })
   let finished = false
 
@@ -87,7 +96,7 @@ export function runConversion(
       try {
         onProgress(JSON.parse(line))
       } catch {
-        // non-JSON line, skip
+        // Ignore non-JSON output from the converter.
       }
     }
   })

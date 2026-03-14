@@ -12,6 +12,8 @@ a = Analysis(
         'logic2ableton.models',
         'logic2ableton.logic_parser',
         'logic2ableton.ableton_generator',
+        'logic2ableton.ableton_parser',
+        'logic2ableton.logic_transfer',
         'logic2ableton.plugin_database',
         'logic2ableton.plugin_matcher',
         'logic2ableton.vst3_scanner',

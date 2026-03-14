@@ -1,13 +1,21 @@
 import { useEffect, useRef, useState, type CSSProperties, type MutableRefObject } from "react"
 import { AnimatePresence, motion } from "motion/react"
-import { useAppState } from "./hooks/useAppState"
-import Sidebar from "./components/Sidebar"
+import ConversionComplete from "./components/ConversionComplete"
+import ConversionProgress from "./components/ConversionProgress"
 import DropZone from "./components/DropZone"
 import ProjectPreview from "./components/ProjectPreview"
-import ConversionProgress from "./components/ConversionProgress"
-import ConversionComplete from "./components/ConversionComplete"
+import Sidebar from "./components/Sidebar"
+import { useAppState, type ConversionDirection, type ConversionRecord } from "./hooks/useAppState"
 
 type CleanupRef = MutableRefObject<(() => void) | null>
+
+function artifactPathFromEvent(event: ProgressEvent): string | null {
+  return event.artifact_path || event.als_path || null
+}
+
+function nameFromPath(path: string): string {
+  return path.split(/[/\\]/).pop() || "Unknown"
+}
 
 export default function App() {
   const state = useAppState()
@@ -36,6 +44,12 @@ export default function App() {
     }
   }
 
+  const abortActiveWork = () => {
+    cleanupListeners(previewCleanupRef)
+    cleanupListeners(conversionCleanupRef)
+    void window.api.cancelActiveJob()
+  }
+
   useEffect(() => {
     void window.api.getHistory().then(state.setHistory)
   }, [])
@@ -47,9 +61,18 @@ export default function App() {
     }
   }, [])
 
+  const handleDirectionChange = (direction: ConversionDirection) => {
+    setSelectedHistoryId(null)
+    abortActiveWork()
+    setPreviewLoading(false)
+    logsRef.current = []
+    setLogs([])
+    state.reset(direction)
+  }
+
   const handleProjectSelected = async (path: string) => {
     cleanupListeners(previewCleanupRef)
-    state.setLogicxPath(path)
+    state.setSourcePath(path)
     state.setPreview(null)
     state.setError(null)
     state.setView("preview")
@@ -61,10 +84,13 @@ export default function App() {
         if (event.stage !== "complete" || settled) return
         settled = true
         state.setPreview({
-          projectName: path.split(/[/\\]/).pop()?.replace(".logicx", "") || "Unknown",
+          direction: state.direction,
+          projectName: nameFromPath(path).replace(/\.(logicx|als)$/i, ""),
           tracks: event.tracks || 0,
+          clips: event.clips || event.audio_files || 0,
           audioFiles: event.audio_files || 0,
-          plugins: event.plugins || 0,
+          plugins: event.plugins,
+          locators: event.locators,
           report: event.report || "",
         })
         setPreviewLoading(false)
@@ -94,7 +120,7 @@ export default function App() {
     }
 
     try {
-      await window.api.startPreview(path)
+      await window.api.startPreview(state.direction, path)
     } catch (error) {
       if (!settled) {
         setPreviewLoading(false)
@@ -111,7 +137,7 @@ export default function App() {
   }
 
   const handleConvert = async () => {
-    if (!state.logicxPath || !state.outputDir || conversionCleanupRef.current) return
+    if (!state.sourcePath || !state.outputDir || conversionCleanupRef.current) return
 
     cleanupListeners(conversionCleanupRef)
     state.setView("converting")
@@ -133,8 +159,9 @@ export default function App() {
 
       const record: ConversionRecord = {
         id: crypto.randomUUID(),
+        direction: state.direction,
         projectName: state.preview?.projectName || "Unknown",
-        inputPath: state.logicxPath!,
+        inputPath: state.sourcePath!,
         outputPath: "",
         date: new Date().toISOString(),
         status: "failed",
@@ -150,22 +177,26 @@ export default function App() {
         state.setProgressStage(event.stage)
         appendLog(event.message)
 
-        if (event.stage === "complete" && event.als_path && outcome === "pending") {
+        const artifactPath = artifactPathFromEvent(event)
+        if (event.stage === "complete" && artifactPath && outcome === "pending") {
           outcome = "success"
           state.setResult({
-            alsPath: event.als_path,
+            direction: state.direction,
+            artifactPath,
             report: event.report || "",
             tracks: event.tracks || 0,
             clips: event.clips || 0,
             audioFiles: event.audio_files || 0,
+            locators: event.locators,
           })
           state.setView("complete")
 
           const record: ConversionRecord = {
             id: crypto.randomUUID(),
+            direction: state.direction,
             projectName: state.preview?.projectName || "Unknown",
-            inputPath: state.logicxPath!,
-            outputPath: event.als_path,
+            inputPath: state.sourcePath!,
+            outputPath: artifactPath,
             date: new Date().toISOString(),
             status: "success",
             report: event.report || "",
@@ -173,6 +204,7 @@ export default function App() {
               tracks: event.tracks || 0,
               clips: event.clips,
               audioFiles: event.audio_files || 0,
+              locators: event.locators,
             },
           }
           void persistHistory(record)
@@ -201,7 +233,7 @@ export default function App() {
     }
 
     try {
-      await window.api.startConversion(state.logicxPath, state.outputDir)
+      await window.api.startConversion(state.direction, state.sourcePath, state.outputDir)
     } catch (error) {
       recordFailure(error instanceof Error ? error.message : String(error))
       cleanupListeners(conversionCleanupRef)
@@ -209,14 +241,22 @@ export default function App() {
   }
 
   const handleSelectRecord = (record: ConversionRecord) => {
+    abortActiveWork()
     setSelectedHistoryId(record.id)
+    setPreviewLoading(false)
+    logsRef.current = []
+    setLogs([])
+    state.setDirection(record.direction)
+
     if (record.status === "success") {
       state.setResult({
-        alsPath: record.outputPath,
+        direction: record.direction,
+        artifactPath: record.outputPath,
         report: record.report,
         tracks: record.stats?.tracks || 0,
         clips: record.stats?.clips || 0,
         audioFiles: record.stats?.audioFiles || 0,
+        locators: record.stats?.locators,
       })
       state.setView("complete")
       return
@@ -230,10 +270,8 @@ export default function App() {
     <div className="flex h-screen">
       <Sidebar
         history={state.history}
-        onNewConversion={() => {
-          setSelectedHistoryId(null)
-          state.reset()
-        }}
+        direction={state.direction}
+        onNewConversion={() => handleDirectionChange(state.direction)}
         onSelectRecord={handleSelectRecord}
         selectedId={selectedHistoryId}
       />
@@ -251,7 +289,11 @@ export default function App() {
               transition={{ duration: 0.2 }}
               className="flex-1 flex"
             >
-              <DropZone onProjectSelected={handleProjectSelected} />
+              <DropZone
+                direction={state.direction}
+                onDirectionChange={handleDirectionChange}
+                onProjectSelected={handleProjectSelected}
+              />
             </motion.div>
           )}
 
@@ -265,7 +307,7 @@ export default function App() {
               className="flex-1 flex"
             >
               <ProjectPreview
-                logicxPath={state.logicxPath!}
+                sourcePath={state.sourcePath!}
                 preview={state.preview}
                 outputDir={state.outputDir}
                 onSelectOutputDir={handleSelectOutputDir}
@@ -285,6 +327,7 @@ export default function App() {
               className="flex-1 flex"
             >
               <ConversionProgress
+                direction={state.direction}
                 stage={state.progressStage}
                 progress={state.progress}
                 message={state.progressMessage}
@@ -305,10 +348,7 @@ export default function App() {
               <ConversionComplete
                 result={state.result}
                 error={state.error}
-                onConvertAnother={() => {
-                  setSelectedHistoryId(null)
-                  state.reset()
-                }}
+                onConvertAnother={() => handleDirectionChange(state.direction)}
               />
             </motion.div>
           )}

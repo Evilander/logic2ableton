@@ -1,29 +1,36 @@
 import { contextBridge, ipcRenderer } from "electron"
 
+export type ConversionDirection = "logic2ableton" | "ableton2logic"
+
 export interface ProgressEvent {
+  direction?: ConversionDirection
   stage: string
   progress: number
   message: string
   als_path?: string
+  artifact_path?: string
+  package_path?: string
   report?: string
   report_path?: string
   tracks?: number
   clips?: number
   audio_files?: number
   plugins?: number
+  locators?: number
   compatibility_warnings?: string[]
   warning?: string
 }
 
 export interface ConversionRecord {
   id: string
+  direction: ConversionDirection
   projectName: string
   inputPath: string
   outputPath: string
   date: string
   status: "success" | "failed"
   report: string
-  stats?: { tracks: number; clips?: number; audioFiles: number }
+  stats?: { tracks: number; clips?: number; audioFiles: number; locators?: number }
 }
 
 function subscribe<T>(channel: string, cb: (value: T) => void) {
@@ -33,12 +40,17 @@ function subscribe<T>(channel: string, cb: (value: T) => void) {
 }
 
 const api = {
-  selectLogicx: (): Promise<string | null> => ipcRenderer.invoke("select-logicx"),
+  selectSource: (direction: ConversionDirection): Promise<string | null> =>
+    ipcRenderer.invoke("select-source", direction),
   selectOutputDir: (): Promise<string | null> => ipcRenderer.invoke("select-output-dir"),
-  startConversion: (logicxPath: string, outputDir: string): Promise<void> =>
-    ipcRenderer.invoke("start-conversion", logicxPath, outputDir),
-  startPreview: (logicxPath: string): Promise<void> =>
-    ipcRenderer.invoke("start-preview", logicxPath),
+  startConversion: (
+    direction: ConversionDirection,
+    sourcePath: string,
+    outputDir: string,
+  ): Promise<void> => ipcRenderer.invoke("start-conversion", direction, sourcePath, outputDir),
+  startPreview: (direction: ConversionDirection, sourcePath: string): Promise<void> =>
+    ipcRenderer.invoke("start-preview", direction, sourcePath),
+  cancelActiveJob: (): Promise<void> => ipcRenderer.invoke("cancel-active-job"),
   openFile: (path: string): Promise<string> => ipcRenderer.invoke("open-file", path),
   showInFolder: (path: string): Promise<void> => ipcRenderer.invoke("show-in-folder", path),
   getHistory: (): Promise<ConversionRecord[]> => ipcRenderer.invoke("get-history"),

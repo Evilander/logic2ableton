@@ -56,6 +56,55 @@ class LogicProject:
     compatibility_warnings: list[str] = field(default_factory=list)
 
 
+@dataclass
+class AbletonLocator:
+    name: str
+    time_beats: float
+
+
+@dataclass
+class AbletonAudioClip:
+    clip_name: str
+    track_name: str
+    source_path: Path | None
+    relative_source_path: str | None
+    start_beats: float
+    end_beats: float
+    source_in_beats: float = 0.0
+    is_warped: bool = False
+    is_disabled: bool = False
+    source_issue: str | None = None
+
+    @property
+    def duration_beats(self) -> float:
+        return max(0.0, self.end_beats - self.start_beats)
+
+
+@dataclass
+class AbletonTrack:
+    name: str
+    clips: list[AbletonAudioClip] = field(default_factory=list)
+
+
+@dataclass
+class AbletonProject:
+    name: str
+    tempo: float
+    time_sig_numerator: int
+    time_sig_denominator: int
+    audio_tracks: list[AbletonTrack]
+    locators: list[AbletonLocator]
+    compatibility_warnings: list[str] = field(default_factory=list)
+
+    @property
+    def clips(self) -> list[AbletonAudioClip]:
+        return [clip for track in self.audio_tracks for clip in track.clips]
+
+    @property
+    def track_names(self) -> list[str]:
+        return [track.name for track in self.audio_tracks]
+
+
 def parse_audio_filename(filename: str) -> tuple[str, int, bool, str]:
     """Parse a Logic Pro audio filename into (track_name, take_number, is_comp, comp_name).
 

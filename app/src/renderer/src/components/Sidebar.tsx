@@ -1,8 +1,11 @@
-import { Plus, Clock, CheckCircle, XCircle, Waveform } from "@phosphor-icons/react"
+import { ArrowsLeftRight, CheckCircle, Clock, Plus, Waveform, XCircle } from "@phosphor-icons/react"
 import { motion } from "motion/react"
+import type { CSSProperties } from "react"
+import type { ConversionDirection, ConversionRecord } from "../hooks/useAppState"
 
 interface SidebarProps {
   history: ConversionRecord[]
+  direction: ConversionDirection
   onNewConversion: () => void
   onSelectRecord: (record: ConversionRecord) => void
   selectedId: string | null
@@ -19,19 +22,32 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`
 }
 
-export default function Sidebar({ history, onNewConversion, onSelectRecord, selectedId }: SidebarProps) {
-  return (
-    <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-surface shrink-0">
-      {/* Drag region for macOS traffic lights */}
-      <div className="h-10 shrink-0" style={{ WebkitAppRegion: "drag" } as React.CSSProperties} />
+function directionLabel(direction: ConversionDirection): string {
+  return direction === "logic2ableton" ? "L→A" : "A→L"
+}
 
-      {/* Header */}
-      <div className="px-4 pb-3 flex items-center gap-2">
-        <Waveform size={20} weight="duotone" className="text-rose" />
-        <span className="text-sm font-semibold tracking-tight">logic2ableton</span>
+export default function Sidebar({
+  history,
+  direction,
+  onNewConversion,
+  onSelectRecord,
+  selectedId,
+}: SidebarProps) {
+  return (
+    <aside className="w-[280px] h-screen flex flex-col border-r border-border bg-surface shrink-0">
+      <div className="h-10 shrink-0" style={{ WebkitAppRegion: "drag" } as CSSProperties} />
+
+      <div className="px-4 pb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Waveform size={20} weight="duotone" className="text-rose" />
+          <span className="text-sm font-semibold tracking-tight">logic2ableton 2.0</span>
+        </div>
+        <div className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-1 text-[11px] text-text-secondary">
+          <ArrowsLeftRight size={12} />
+          {directionLabel(direction)}
+        </div>
       </div>
 
-      {/* New Conversion Button */}
       <div className="px-3 pb-3">
         <button
           onClick={onNewConversion}
@@ -42,20 +58,17 @@ export default function Sidebar({ history, onNewConversion, onSelectRecord, sele
         </button>
       </div>
 
-      {/* History */}
       <div className="flex-1 overflow-y-auto px-2">
         {history.length === 0 ? (
-          <div className="px-3 py-8 text-center text-text-tertiary text-xs">
-            No conversions yet
-          </div>
+          <div className="px-3 py-8 text-center text-text-tertiary text-xs">No conversions yet</div>
         ) : (
-          <div className="space-y-0.5">
-            {history.map((record, i) => (
+          <div className="space-y-1">
+            {history.map((record, index) => (
               <motion.button
                 key={record.id}
                 initial={{ opacity: 0, x: -12 }}
                 animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: i * 0.04 }}
+                transition={{ delay: index * 0.03 }}
                 onClick={() => onSelectRecord(record)}
                 className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left text-sm transition-colors cursor-pointer ${
                   selectedId === record.id
@@ -68,17 +81,19 @@ export default function Sidebar({ history, onNewConversion, onSelectRecord, sele
                 ) : (
                   <XCircle size={14} weight="fill" className="text-error shrink-0" />
                 )}
-                <span className="truncate flex-1">{record.projectName}</span>
-                <span className="text-xs text-text-tertiary shrink-0">
-                  {timeAgo(record.date)}
-                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate">{record.projectName}</div>
+                  <div className="text-[11px] text-text-tertiary">
+                    {directionLabel(record.direction)}
+                  </div>
+                </div>
+                <span className="text-xs text-text-tertiary shrink-0">{timeAgo(record.date)}</span>
               </motion.button>
             ))}
           </div>
         )}
       </div>
 
-      {/* Footer */}
       <div className="px-4 py-3 border-t border-border">
         <div className="flex items-center gap-1.5 text-xs text-text-tertiary">
           <Clock size={12} />

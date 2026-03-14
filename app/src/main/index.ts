@@ -3,17 +3,19 @@ import type { IpcMainInvokeEvent } from "electron"
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron"
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, extname, join, normalize } from "node:path"
-import type { ProgressEvent } from "./converter"
+import type { ConversionDirection, ProgressEvent } from "./converter"
 import { runConversion } from "./converter"
 
 interface ConversionStats {
   tracks: number
   clips?: number
   audioFiles: number
+  locators?: number
 }
 
 interface ConversionRecord {
   id: string
+  direction: ConversionDirection
   projectName: string
   inputPath: string
   outputPath: string
@@ -24,7 +26,7 @@ interface ConversionRecord {
 }
 
 const HISTORY_LIMIT = 100
-const ALLOWED_OPEN_EXTENSIONS = new Set([".als", ".txt"])
+const ALLOWED_OPEN_EXTENSIONS = new Set([".als", ".txt", ".md", ".json", ".csv"])
 
 let mainWindow: BrowserWindow | null = null
 let activeJob: { kind: "conversion" | "preview"; child: ChildProcess } | null = null
@@ -32,10 +34,10 @@ const approvedPaths = new Set<string>()
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 700,
-    minWidth: 800,
-    minHeight: 500,
+    width: 1180,
+    height: 760,
+    minWidth: 900,
+    minHeight: 600,
     backgroundColor: "#1A1820",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 16 },
@@ -57,8 +59,8 @@ function createWindow(): void {
   }
 }
 
-function previewOutputDir(): string {
-  const outputDir = join(app.getPath("temp"), "logic2ableton-preview")
+function previewOutputDir(direction: ConversionDirection): string {
+  const outputDir = join(app.getPath("temp"), "logic2ableton-preview", direction)
   mkdirSync(outputDir, { recursive: true })
   return outputDir
 }
@@ -108,7 +110,8 @@ function stopActiveJob(): void {
 function startJob(
   kind: "conversion" | "preview",
   event: IpcMainInvokeEvent,
-  logicxPath: string,
+  direction: ConversionDirection,
+  sourcePath: string,
   outputDir: string,
   reportOnly = false,
 ): void {
@@ -121,10 +124,12 @@ function startJob(
   const exitChannel = kind === "preview" ? "preview-exit" : "conversion-exit"
 
   const child = runConversion(
-    normalizePathInput(logicxPath),
+    direction,
+    normalizePathInput(sourcePath),
     normalizePathInput(outputDir),
     (progress: ProgressEvent) => {
       approvePath(progress.als_path)
+      approvePath(progress.artifact_path)
       approvePath(progress.report_path)
       event.sender.send(progressChannel, progress)
     },
@@ -146,6 +151,7 @@ function isConversionStats(value: unknown): value is ConversionStats {
   return typeof stats.tracks === "number"
     && typeof stats.audioFiles === "number"
     && (stats.clips === undefined || typeof stats.clips === "number")
+    && (stats.locators === undefined || typeof stats.locators === "number")
 }
 
 function isConversionRecord(value: unknown): value is ConversionRecord {
@@ -161,12 +167,19 @@ function isConversionRecord(value: unknown): value is ConversionRecord {
     && (record.stats === undefined || isConversionStats(record.stats))
 }
 
+function normalizeRecord(record: ConversionRecord | (Omit<ConversionRecord, "direction"> & { direction?: ConversionDirection })): ConversionRecord {
+  return {
+    ...record,
+    direction: record.direction ?? "logic2ableton",
+  }
+}
+
 function readHistory(): ConversionRecord[] {
   const historyPath = getHistoryPath()
   try {
     const parsed = JSON.parse(readFileSync(historyPath, "utf-8"))
     if (!Array.isArray(parsed)) return []
-    const history = parsed.filter(isConversionRecord).slice(0, HISTORY_LIMIT)
+    const history = parsed.filter(isConversionRecord).map(normalizeRecord).slice(0, HISTORY_LIMIT)
     for (const record of history) {
       if (record.status === "success") {
         approvePath(record.outputPath)
@@ -209,18 +222,25 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit()
 })
 
-ipcMain.handle("select-logicx", async () => {
+ipcMain.handle("select-source", async (_, direction: ConversionDirection) => {
+  const pickingLogicProject = direction === "logic2ableton"
   const isMac = process.platform === "darwin"
+
   const result = await dialog.showOpenDialog({
-    properties: isMac ? ["openFile"] : ["openDirectory"],
-    title: "Select a Logic Pro project",
-    ...(isMac && {
-      filters: [{ name: "Logic Pro Project", extensions: ["logicx"] }],
-    }),
+    properties: pickingLogicProject && !isMac ? ["openDirectory"] : ["openFile"],
+    title: pickingLogicProject ? "Select a Logic Pro project" : "Select an Ableton Live Set",
+    filters: [
+      {
+        name: pickingLogicProject ? "Logic Pro Project" : "Ableton Live Set",
+        extensions: [pickingLogicProject ? "logicx" : "als"],
+      },
+    ],
   })
+
   if (result.canceled || result.filePaths.length === 0) return null
   const selected = result.filePaths[0]
-  if (!selected.endsWith(".logicx")) return null
+  const expectedExtension = pickingLogicProject ? ".logicx" : ".als"
+  if (!selected.toLowerCase().endsWith(expectedExtension)) return null
   return selected
 })
 
@@ -233,12 +253,16 @@ ipcMain.handle("select-output-dir", async () => {
   return result.filePaths[0]
 })
 
-ipcMain.handle("start-conversion", async (event, logicxPath: string, outputDir: string) => {
-  startJob("conversion", event, logicxPath, outputDir)
+ipcMain.handle("start-conversion", async (event, direction: ConversionDirection, sourcePath: string, outputDir: string) => {
+  startJob("conversion", event, direction, sourcePath, outputDir)
 })
 
-ipcMain.handle("start-preview", async (event, logicxPath: string) => {
-  startJob("preview", event, logicxPath, previewOutputDir(), true)
+ipcMain.handle("start-preview", async (event, direction: ConversionDirection, sourcePath: string) => {
+  startJob("preview", event, direction, sourcePath, previewOutputDir(direction), true)
+})
+
+ipcMain.handle("cancel-active-job", async () => {
+  stopActiveJob()
 })
 
 ipcMain.handle("open-file", async (_, filePath: string) => {

@@ -3,30 +3,41 @@
 [![PyPI version](https://img.shields.io/pypi/v/logic2ableton)](https://pypi.org/project/logic2ableton/)
 [![Python 3.11+](https://img.shields.io/pypi/pyversions/logic2ableton)](https://pypi.org/project/logic2ableton/)
 [![License: MIT](https://img.shields.io/pypi/l/logic2ableton)](https://github.com/Evilander/logic2ableton/blob/master/LICENSE)
+Bidirectional, audio-first transfer between Logic Pro `.logicx` projects and Ableton Live `.als` sessions.
 
-Convert Logic Pro `.logicx` projects into Ableton Live `.als` sessions with a desktop app or CLI.
+Version 2.0 ships two production workflows in the same project:
 
-`logic2ableton` is built for audio-first projects: bounced stems, recorded takes, arrangement timing, tempo, time signature, mixer-state overrides, and plugin identification. The goal is simple: get a working Ableton arrangement fast, then use the compatibility report to see exactly what still needs manual cleanup.
+- `logic2ableton`: convert Logic Pro projects into Ableton Live sets
+- `ableton2logic`: turn Ableton Live sets into Logic-ready transfer packages
 
-**Latest release:** https://github.com/Evilander/logic2ableton/releases/latest
+The product goal is speed with evidence. Every run produces a report so users can see exactly what transferred cleanly, what needs manual cleanup, and where the source project exceeds what a cross-DAW workflow can preserve.
 
-## Why People Use It
+## What Works Well
 
-- Move recorded Logic sessions into Ableton without rebuilding the entire timeline by hand.
-- Recover placement from embedded WAV BWF timestamps and Logic AIFF `MARK` chunks.
-- See conversion limits immediately through a saved compatibility report instead of guessing what failed.
-- Hand off projects between collaborators who prefer different DAWs.
-
-## What The Converter Transfers Well
+### Logic to Ableton
 
 - Audio tracks into Ableton Arrangement View
-- Timeline placement from bundled audio timestamps
+- Timeline placement from bundled WAV BWF timestamps and Logic AIFF `MARK` chunks
 - Tempo and time signature
-- Overlap resolution for comp-style takes
+- Overlap resolution for takes and comp bounces
 - Optional mixer overrides from JSON
 - Plugin identification with VST3 suggestions in the report
 
+### Ableton to Logic
+
+- Audio-track and clip discovery from `.als`
+- Tempo, time signature, and locators
+- Logic-ready transfer package with:
+  - `Audio Files/` grouped by Ableton track
+  - `timeline_manifest.json`
+  - `timeline_manifest.csv`
+  - `locators.csv`
+  - `IMPORT_TO_LOGIC.md`
+  - a saved transfer report
+
 ## Current Limits
+
+### Logic to Ableton
 
 - MIDI and software instrument tracks are not recreated
 - Automation is not recreated
@@ -35,7 +46,14 @@ Convert Logic Pro `.logicx` projects into Ableton Live `.als` sessions with a de
 - Imported audio without embedded timestamps defaults to bar 1
 - Media outside `Media/Audio Files` is not copied automatically
 
-If a project lands imperfectly, the first thing to inspect is the generated conversion report. It is the primary support artifact for this project.
+### Ableton to Logic
+
+- The reverse lane does not synthesize a native `.logicx` package
+- Ableton devices, racks, plugin state, and return-bus processing are not transferred
+- Warped clips are exported as source references and called out in the report, but warp rendering must be recreated manually in Logic
+- The transfer package is audio-first; use the manifest and import guide to rebuild the arrangement inside Logic
+
+If a project lands imperfectly, the first thing to inspect is the generated report. It is the primary support artifact for this project.
 
 ## Install
 
@@ -56,7 +74,7 @@ Download the latest installer or portable build from GitHub Releases:
 Notes:
 
 - macOS builds are unsigned. Gatekeeper may require opening them manually the first time.
-- Intel macOS users currently need to run from source or use a self-hosted packaging flow. GitHub-hosted Intel runner support for this repo's release lane is not stable enough to publish as an official artifact.
+- Intel macOS users currently need a self-hosted packaging flow or a local source build.
 - The desktop app bundles the converter binary, so end users do not need Python installed.
 
 ### Install from PyPI
@@ -81,28 +99,40 @@ logic2ableton --version
 
 ### Desktop Workflow
 
-1. Drop a `.logicx` project into the app.
-2. Review the preview summary.
-3. Pick an output directory.
-4. Convert and inspect the report if anything looks off.
-
-The app keeps a local history of recent conversions so failed runs are easier to revisit.
+1. Launch the app.
+2. Choose `Logic to Ableton` or `Ableton to Logic`.
+3. Drop a `.logicx` or `.als` file into the window.
+4. Review the preview and select an output directory.
+5. Run the transfer and inspect the report if anything looks off.
 
 ### CLI Workflow
 
-Convert a project:
+Logic to Ableton:
 
 ```bash
 logic2ableton "/path/to/MySong.logicx" --output ./output
 ```
 
-Generate only the report:
+Ableton to Logic:
+
+```bash
+ableton2logic "/path/to/MySet.als" --output ./output
+```
+
+The original `logic2ableton` command also auto-detects `.als` input:
+
+```bash
+logic2ableton "/path/to/MySet.als" --output ./output
+```
+
+Preview-only / report-only:
 
 ```bash
 logic2ableton "/path/to/MySong.logicx" --report-only
+ableton2logic "/path/to/MySet.als" --report-only
 ```
 
-Generate a mixer template:
+Generate a Logic mixer template:
 
 ```bash
 logic2ableton "/path/to/MySong.logicx" --output ./output --generate-mixer-template --report-only
@@ -118,24 +148,35 @@ Emit JSON progress for app or automation integration:
 
 ```bash
 logic2ableton "/path/to/MySong.logicx" --output ./output --json-progress
+ableton2logic "/path/to/MySet.als" --output ./output --json-progress
 ```
 
 ## CLI Options
 
+### Shared
+
 | Option | Description |
 | --- | --- |
 | `--version`, `-V` | Show version |
+| `--mode` | Force `logic2ableton` or `ableton2logic` |
 | `--output`, `-o` | Output directory |
+| `--report-only` | Write the transfer report without generating output files |
+| `--no-copy` | Do not copy audio files into the generated project/package |
+| `--json-progress` | Emit JSON progress lines for GUI or automation use |
+
+### Logic to Ableton Only
+
+| Option | Description |
+| --- | --- |
 | `--alternative`, `-a` | Logic alternative index |
-| `--report-only` | Write the conversion report without generating `.als` |
-| `--no-copy` | Do not copy audio files into the Ableton project |
 | `--template` | Use a specific `DefaultLiveSet.als` |
 | `--vst3-path` | Override the VST3 scan directory |
 | `--mixer` | Apply mixer overrides from JSON |
 | `--generate-mixer-template` | Write a starter `mixer_overrides.json` |
-| `--json-progress` | Emit JSON progress lines for GUI integration |
 
 ## Output Layout
+
+### Logic to Ableton
 
 ```text
 output/
@@ -147,22 +188,35 @@ output/
   MySong_conversion_report.txt
 ```
 
-The report is written for successful conversions, `--report-only` runs, and controlled failure paths so troubleshooting does not depend on terminal scrollback.
+### Ableton to Logic
 
-## Reading The Report
+```text
+output/
+  MySet Logic Transfer/
+    Audio Files/
+      01 - Drums/
+      02 - Vocals/
+    timeline_manifest.json
+    timeline_manifest.csv
+    locators.csv
+    IMPORT_TO_LOGIC.md
+    MySet_logic_transfer_report.txt
+```
+
+## Reading The Reports
 
 Pay close attention to `COMPATIBILITY WARNINGS`.
 
-Typical warnings:
+Typical warnings include:
 
-- Audio listed by Logic but missing from the bundle
-- Audio files with no embedded timeline timestamp
-- Track-count mismatches between Logic metadata and recoverable audio
+- Audio referenced by the source project but missing on disk
+- Logic audio with no embedded timeline timestamp
+- Ableton clips that rely on warping or other live processing that cannot be rendered faithfully by this project
 
-These warnings usually mean one of two things:
+Warnings generally mean one of two things:
 
-- the project needs a parser improvement in `logic2ableton`
-- part of the source session needs a cleaner export path before conversion
+- the converter needs a parser/generator improvement
+- the source session needs manual cleanup or a more deliberate export/import path
 
 ## Development
 
@@ -228,10 +282,10 @@ Publishing a release is done by pushing a `v*` tag. The workflow uploads the gen
 
 Useful issues include:
 
-- The Logic Pro version used to save the project
-- The exact conversion report
-- Whether the project uses imported loops, aliases, or external media
+- The Logic Pro or Ableton Live version used to save the project
+- The exact generated report
 - A minimal failing project if one can be shared
+- Whether the issue is in the desktop app, CLI, or packaging
 
 Open issues here: https://github.com/Evilander/logic2ableton/issues
 
