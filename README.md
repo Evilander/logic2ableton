@@ -24,7 +24,7 @@ The product goal is speed with evidence. Every run produces a report so users ca
 | Workflow | Input | Output | Best For |
 | --- | --- | --- | --- |
 | `logic2ableton` | Logic Pro `.logicx` | Ableton Live `.als` + copied media + conversion report | Moving audio-first Logic sessions into Ableton Arrangement View |
-| `ableton2logic` | Ableton Live `.als` | Logic transfer package + manifests + import guide + transfer report | Rebuilding Ableton audio sessions inside Logic with exact placement guidance |
+| `ableton2logic` | Ableton Live `.als` | Logic import package with track stems, timestamped clip WAVs, Logic timeline MIDI, and transfer report | Rebuilding Ableton audio sessions inside Logic with much cleaner layout recovery |
 
 ## What Works Well
 
@@ -40,9 +40,11 @@ The product goal is speed with evidence. Every run produces a report so users ca
 ### Ableton to Logic
 
 - Audio-track and clip discovery from `.als`
-- Tempo, time signature, and locators
+- Tempo, locators, and a documented base time signature
 - Logic-ready transfer package with:
-  - `Audio Files/` grouped by Ableton track
+  - `Track Stems/` for the fastest arrangement-faithful import
+  - `Logic Timeline/Logic Timeline.mid` for tempo and locator import
+  - `Audio Files/` grouped by Ableton track with timestamped WAV clip exports where supported
   - `timeline_manifest.json`
   - `timeline_manifest.csv`
   - `locators.csv`
@@ -64,10 +66,21 @@ The product goal is speed with evidence. Every run produces a report so users ca
 
 - The reverse lane does not synthesize a native `.logicx` package
 - Ableton devices, racks, plugin state, and return-bus processing are not transferred
-- Warped clips are exported as source references and called out in the report, but warp rendering must be recreated manually in Logic
-- The transfer package is audio-first; use the manifest and import guide to rebuild the arrangement inside Logic
+- Warped clips are exported with best-effort timing, but they still need review inside Logic before delivery
+- Tempo and markers are exported into the Logic Timeline MIDI file; do not assume time-signature changes are fully reconstructed unless you verify them in Logic
+- Non-PCM sources that cannot be rendered to timestamped WAV in-process are copied as references and flagged in the report/manifest
+- The transfer package is audio-first; use the stems first, then clip exports and the manifest if you need finer reconstruction
 
 If a project lands imperfectly, the first thing to inspect is the generated report. It is the primary support artifact for this project.
+
+## Reverse Import Strategy
+
+For `ableton2logic`, the cleanest path is:
+
+1. Import `Logic Timeline/Logic Timeline.mid` into a new empty Logic project at the project start.
+2. Drag every file from `Track Stems/` into Logic starting at bar 1.
+3. If you need clip-level editing, import `Audio Files/` and use Logic's `Edit > Move > To Recorded Position` command on timestamped WAV clips.
+4. Use the transfer report and `timeline_manifest.csv` to review warped clips, copied-source files, and any manual cleanup.
 
 ## Install
 
@@ -140,6 +153,13 @@ Ableton to Logic:
 ```bash
 ableton2logic "/path/to/MySet.als" --output ./output
 ```
+
+Fastest Logic import after the package is created:
+
+1. Open `IMPORT_TO_LOGIC.md`.
+2. Import `Logic Timeline/Logic Timeline.mid` into an empty Logic project at the timeline start.
+3. Drag `Track Stems/*.wav` into Logic starting at bar 1.
+4. Use `Audio Files/` only when you want clip-level reconstruction instead of full-track stems.
 
 The original `logic2ableton` command also auto-detects `.als` input:
 
@@ -215,6 +235,11 @@ output/
 ```text
 output/
   MySet Logic Transfer/
+    Track Stems/
+      01 - Drums.wav
+      02 - Vocals.wav
+    Logic Timeline/
+      Logic Timeline.mid
     Audio Files/
       01 - Drums/
       02 - Vocals/
@@ -231,6 +256,7 @@ output/
 - Windows desktop smoke coverage in CI before tagged release packaging
 - Reports emitted on both success and failure paths so support starts with evidence instead of guesswork
 - Desktop app safety rails around approved files, active jobs, and artifact opening
+- Ableton to Logic now ships multiple reconstruction layers instead of a single manifest-only package
 - Both conversion directions ship from the same repo and version together
 
 ## Reading The Reports
@@ -242,6 +268,7 @@ Typical warnings include:
 - Audio referenced by the source project but missing on disk
 - Logic audio with no embedded timeline timestamp
 - Ableton clips that rely on warping or other live processing that cannot be rendered faithfully by this project
+- Reverse-lane sources that were copied as references instead of rendered into timestamped WAV files
 
 Warnings generally mean one of two things:
 

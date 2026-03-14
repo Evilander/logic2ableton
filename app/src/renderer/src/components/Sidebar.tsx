@@ -23,7 +23,7 @@ function timeAgo(dateStr: string): string {
 }
 
 function directionLabel(direction: ConversionDirection): string {
-  return direction === "logic2ableton" ? "L→A" : "A→L"
+  return direction === "logic2ableton" ? "L->A" : "A->L"
 }
 
 export default function Sidebar({
@@ -40,7 +40,7 @@ export default function Sidebar({
       <div className="px-4 pb-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Waveform size={20} weight="duotone" className="text-rose" />
-          <span className="text-sm font-semibold tracking-tight">logic2ableton 2.0</span>
+          <span className="text-sm font-semibold tracking-tight">Logic Ableton Transfer</span>
         </div>
         <div className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-1 text-[11px] text-text-secondary">
           <ArrowsLeftRight size={12} />

@@ -45,7 +45,9 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
   if (!result) return null
 
   const isForward = result.direction === "logic2ableton"
-  const primaryActionLabel = isForward ? "Open in Ableton" : "Open Import Guide"
+  const primaryActionLabel = isForward ? "Open in Ableton" : "Open Logic Import Guide"
+  const title = isForward ? "Conversion Complete" : "Logic Import Package Ready"
+  const reportLabel = isForward ? "conversion report" : "transfer report"
 
   return (
     <div className="flex-1 flex items-center justify-center p-8">
@@ -59,7 +61,7 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
           <div className="flex items-center gap-3">
             <CheckCircle size={24} weight="fill" className="text-gold" />
             <div>
-              <div className="font-semibold">Conversion Complete</div>
+              <div className="font-semibold">{title}</div>
               <div className="text-xs text-text-tertiary">
                 {isForward ? "Logic to Ableton" : "Ableton to Logic"}
               </div>
@@ -108,7 +110,7 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
           onClick={() => setShowReport(!showReport)}
           className="w-full text-xs text-text-tertiary hover:text-text-secondary text-center py-1 transition-colors cursor-pointer"
         >
-          {showReport ? "Hide" : "Show"} conversion report
+          {showReport ? "Hide" : "Show"} {reportLabel}
         </button>
 
         {showReport && (

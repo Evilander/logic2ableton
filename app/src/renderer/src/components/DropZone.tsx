@@ -9,16 +9,18 @@ interface DropZoneProps {
   onProjectSelected: (path: string) => void
 }
 
-const DIRECTION_COPY: Record<ConversionDirection, { title: string; extension: string; button: string }> = {
+const DIRECTION_COPY: Record<ConversionDirection, { title: string; extension: string; button: string; helper: string }> = {
   logic2ableton: {
     title: "Drop a .logicx project here",
     extension: ".logicx",
     button: "Browse Logic Project",
+    helper: "Use the toggle above to switch directions. The app will preview the session before it writes anything.",
   },
   ableton2logic: {
     title: "Drop an .als Live Set here",
     extension: ".als",
     button: "Browse Live Set",
+    helper: "This lane creates a Logic import package with stems, clip exports, and an import guide. It does not generate a finished .logicx session.",
   },
 }
 
@@ -119,9 +121,7 @@ export default function DropZone({ direction, onDirectionChange, onProjectSelect
 
         <div className="text-center max-w-md">
           <p className="text-text-primary text-base font-medium mb-1">{copy.title}</p>
-          <p className="text-text-secondary text-sm">
-            Use the toggle above to switch directions. The app will preview the session before it writes anything.
-          </p>
+          <p className="text-text-secondary text-sm">{copy.helper}</p>
         </div>
 
         <div className="flex items-center gap-3">

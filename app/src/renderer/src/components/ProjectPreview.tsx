@@ -95,7 +95,11 @@ export default function ProjectPreview({
         </div>
 
         <div className="bg-surface rounded-xl border border-border p-4">
-          <div className="text-xs text-text-secondary mb-2">Preview Report</div>
+          <div className="text-xs text-text-secondary mb-2">
+            {isForward
+              ? "Preview Report"
+              : "Preview Report - reverse mode creates a Logic import package, not a finished .logicx file"}
+          </div>
           <pre className="max-h-52 overflow-y-auto whitespace-pre-wrap font-mono text-xs text-text-tertiary">
             {preview.report}
           </pre>
@@ -108,7 +112,7 @@ export default function ProjectPreview({
           disabled={!outputDir}
           className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-rose hover:bg-rose-hover text-bg font-semibold text-base transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
         >
-          {isForward ? "Convert to Ableton" : "Build Logic Transfer Package"}
+          {isForward ? "Convert to Ableton" : "Create Logic Import Package"}
           <ArrowRight size={18} weight="bold" />
         </motion.button>
       </motion.div>
