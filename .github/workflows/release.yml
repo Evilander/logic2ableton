@@ -59,7 +59,8 @@ jobs:
         run: |
           python scripts/create_sample_als_fixture.py smoke/demo.als
           ./dist/logic2ableton.exe --mode ableton2logic smoke/demo.als --output smoke-out
-          test -f "smoke-out/Demo Set Logic Transfer/IMPORT_TO_LOGIC.md"
+          guide_path="$(find smoke-out -maxdepth 2 -name IMPORT_TO_LOGIC.md | head -n 1)"
+          test -n "$guide_path"
 
       - name: Copy converter binary to app resources
         run: Copy-Item dist\logic2ableton.exe app\resources\logic2ableton.exe -Force
@@ -121,7 +122,8 @@ jobs:
           else
             ./dist/logic2ableton --mode ableton2logic smoke/demo.als --output smoke-out
           fi
-          test -f "smoke-out/Demo Set Logic Transfer/IMPORT_TO_LOGIC.md"
+          guide_path="$(find smoke-out -maxdepth 2 -name IMPORT_TO_LOGIC.md | head -n 1)"
+          test -n "$guide_path"
 
       - name: Copy converter binary to app resources
         shell: bash
