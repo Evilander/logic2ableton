@@ -5,17 +5,13 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import re
 import shutil
 import struct
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-
-try:
-    import aifc
-except ImportError:  # pragma: no cover - Python versions that drop aifc entirely.
-    aifc = None
 
 from logic2ableton.models import AbletonAudioClip, AbletonProject, AbletonTrack
 
@@ -118,18 +114,110 @@ def _read_wave_source(path: Path) -> DecodedAudio:
         )
 
 
+def _decode_extended_float80(payload: bytes) -> float:
+    if len(payload) != 10:
+        raise ValueError("Expected 10-byte extended float")
+
+    sign = -1.0 if payload[0] & 0x80 else 1.0
+    exponent = ((payload[0] & 0x7F) << 8) | payload[1]
+    if exponent == 0 and payload[2:] == b"\x00" * 8:
+        return 0.0
+    if exponent == 0x7FFF:
+        raise ValueError("Unsupported AIFF sample rate")
+
+    high_mantissa = int.from_bytes(payload[2:6], "big")
+    low_mantissa = int.from_bytes(payload[6:10], "big")
+    unbiased = exponent - 16383
+    return sign * (
+        math.ldexp(high_mantissa, unbiased - 31)
+        + math.ldexp(low_mantissa, unbiased - 63)
+    )
+
+
+def _normalize_aiff_pcm_frames(frames: bytes, sample_width: int, *, little_endian: bool) -> bytes:
+    if sample_width == 1:
+        return bytes(byte ^ 0x80 for byte in frames)
+    if little_endian:
+        return frames
+
+    normalized = bytearray(len(frames))
+    for offset in range(0, len(frames), sample_width):
+        normalized[offset : offset + sample_width] = frames[offset : offset + sample_width][::-1]
+    return bytes(normalized)
+
+
 def _read_aiff_source(path: Path) -> DecodedAudio | None:
-    if aifc is None:
+    payload = path.read_bytes()
+    if len(payload) < 12 or payload[:4] != b"FORM":
         return None
-    with aifc.open(str(path), "rb") as handle:
-        if handle.getcomptype() not in {"NONE", "not compressed"}:
+
+    form_type = payload[8:12]
+    if form_type not in {b"AIFF", b"AIFC"}:
+        return None
+
+    channels: int | None = None
+    frame_rate: int | None = None
+    sample_width: int | None = None
+    frame_count: int | None = None
+    little_endian = False
+    sound_data: bytes | None = None
+
+    offset = 12
+    while offset + 8 <= len(payload):
+        chunk_id = payload[offset : offset + 4]
+        chunk_size = int.from_bytes(payload[offset + 4 : offset + 8], "big")
+        chunk_start = offset + 8
+        chunk_end = chunk_start + chunk_size
+        if chunk_end > len(payload):
             return None
-        return DecodedAudio(
-            frame_rate=handle.getframerate(),
-            channels=handle.getnchannels(),
-            sample_width=handle.getsampwidth(),
-            frames=handle.readframes(handle.getnframes()),
-        )
+
+        chunk_payload = payload[chunk_start:chunk_end]
+        if chunk_id == b"COMM":
+            if len(chunk_payload) < 18:
+                return None
+            channels = int.from_bytes(chunk_payload[0:2], "big")
+            frame_count = int.from_bytes(chunk_payload[2:6], "big")
+            sample_size_bits = int.from_bytes(chunk_payload[6:8], "big")
+            sample_width = (sample_size_bits + 7) // 8
+            if sample_width * 8 != sample_size_bits:
+                return None
+
+            rate = _decode_extended_float80(chunk_payload[8:18])
+            frame_rate = max(1, int(round(rate)))
+
+            if form_type == b"AIFC":
+                if len(chunk_payload) < 22:
+                    return None
+                compression = chunk_payload[18:22]
+                if compression == b"sowt":
+                    little_endian = True
+                elif compression not in {b"NONE", b"twos"}:
+                    return None
+
+        elif chunk_id == b"SSND":
+            if len(chunk_payload) < 8:
+                return None
+            data_offset = int.from_bytes(chunk_payload[0:4], "big")
+            sound_start = 8 + data_offset
+            if sound_start > len(chunk_payload):
+                return None
+            sound_data = chunk_payload[sound_start:]
+
+        offset = chunk_end + (chunk_size % 2)
+
+    if None in {channels, frame_rate, sample_width, frame_count} or sound_data is None:
+        return None
+
+    expected_bytes = frame_count * channels * sample_width
+    if len(sound_data) < expected_bytes:
+        return None
+
+    return DecodedAudio(
+        frame_rate=frame_rate,
+        channels=channels,
+        sample_width=sample_width,
+        frames=_normalize_aiff_pcm_frames(sound_data[:expected_bytes], sample_width, little_endian=little_endian),
+    )
 
 
 def _read_decoded_audio(path: Path, cache: dict[Path, DecodedAudio | None]) -> DecodedAudio | None:

@@ -1,11 +1,46 @@
 import json
+import math
+import struct
 import wave
+from pathlib import Path
 
 from conftest import create_test_als
 
 from logic2ableton.ableton_parser import parse_ableton_project
 from logic2ableton.logic_parser import _get_bwf_time_reference
-from logic2ableton.logic_transfer import build_logic_transfer_report, generate_logic_transfer
+from logic2ableton.logic_transfer import _read_decoded_audio, build_logic_transfer_report, generate_logic_transfer
+from logic2ableton.models import AbletonAudioClip, AbletonProject, AbletonTrack
+
+
+def _encode_extended_float80(value: float) -> bytes:
+    if value == 0:
+        return b"\x00" * 10
+
+    fraction, exponent = math.frexp(abs(value))
+    mantissa = int(fraction * (1 << 64))
+    biased_exponent = exponent + 16382
+    return struct.pack(">H", biased_exponent) + mantissa.to_bytes(8, "big")
+
+
+def _write_test_aiff(path: Path, samples: list[int], *, sample_rate: int = 10) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sound_data = b"".join(sample.to_bytes(2, "big", signed=True) for sample in samples)
+    comm_payload = (
+        struct.pack(">hIh", 1, len(samples), 16)
+        + _encode_extended_float80(float(sample_rate))
+    )
+    ssnd_payload = struct.pack(">II", 0, 0) + sound_data
+    form_payload = (
+        b"AIFF"
+        + b"COMM"
+        + struct.pack(">I", len(comm_payload))
+        + comm_payload
+        + b"SSND"
+        + struct.pack(">I", len(ssnd_payload))
+        + ssnd_payload
+    )
+    path.write_bytes(b"FORM" + struct.pack(">I", len(form_payload)) + form_payload)
+    return path
 
 
 def test_generate_logic_transfer_creates_expected_files(tmp_path):
@@ -120,3 +155,63 @@ def test_generate_logic_transfer_manifest_omits_absolute_source_paths(tmp_path):
 
     assert '"source_path"' not in manifest_text
     assert str(tmp_path) not in manifest_text
+
+
+def test_read_decoded_audio_normalizes_aiff_pcm_to_wave_bytes(tmp_path):
+    aiff_path = _write_test_aiff(tmp_path / "source.aiff", [1, -2, 32767, -32768], sample_rate=22050)
+
+    decoded = _read_decoded_audio(aiff_path, {})
+
+    assert decoded is not None
+    assert decoded.frame_rate == 22050
+    assert decoded.channels == 1
+    assert decoded.sample_width == 2
+    assert decoded.frames == (
+        (1).to_bytes(2, "little", signed=True)
+        + (-2).to_bytes(2, "little", signed=True)
+        + (32767).to_bytes(2, "little", signed=True)
+        + (-32768).to_bytes(2, "little", signed=True)
+    )
+
+
+def test_generate_logic_transfer_exports_timestamped_wavs_from_aiff_sources(tmp_path):
+    aiff_path = _write_test_aiff(tmp_path / "Samples" / "Imported" / "line.aiff", list(range(20)), sample_rate=10)
+    track = AbletonTrack(
+        name="AIFF Track",
+        clips=[
+            AbletonAudioClip(
+                clip_name="AIFF Line",
+                track_name="AIFF Track",
+                source_path=aiff_path,
+                relative_source_path="Samples/Imported/line.aiff",
+                start_beats=1.0,
+                end_beats=2.0,
+                source_in_beats=0.5,
+            )
+        ],
+    )
+    project = AbletonProject(
+        name="AIFF Demo",
+        tempo=60.0,
+        time_sig_numerator=4,
+        time_sig_denominator=4,
+        audio_tracks=[track],
+        locators=[],
+    )
+
+    transfer = generate_logic_transfer(project, tmp_path / "output")
+    exported = next((transfer.package_path / "Audio Files").rglob("*.wav"))
+    stem = next((transfer.package_path / "Track Stems").glob("*.wav"))
+    expected_frames = b"".join(sample.to_bytes(2, "little", signed=True) for sample in range(5, 15))
+
+    with wave.open(str(exported), "rb") as clip_handle:
+        assert clip_handle.getframerate() == 10
+        assert clip_handle.readframes(clip_handle.getnframes()) == expected_frames
+
+    with wave.open(str(stem), "rb") as stem_handle:
+        stem_frames = stem_handle.readframes(stem_handle.getnframes())
+
+    assert transfer.rendered_stem_files == 1
+    assert stem_frames[:20] == b"\x00" * 20
+    assert stem_frames[20:40] == expected_frames
+    assert _get_bwf_time_reference(exported) == 10
