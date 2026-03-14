@@ -3,14 +3,28 @@
 [![PyPI version](https://img.shields.io/pypi/v/logic2ableton)](https://pypi.org/project/logic2ableton/)
 [![Python 3.11+](https://img.shields.io/pypi/pyversions/logic2ableton)](https://pypi.org/project/logic2ableton/)
 [![License: MIT](https://img.shields.io/pypi/l/logic2ableton)](https://github.com/Evilander/logic2ableton/blob/master/LICENSE)
-Bidirectional, audio-first transfer between Logic Pro `.logicx` projects and Ableton Live `.als` sessions.
+Version 2.0 turns this project into a dual-direction transfer toolkit for Logic Pro and Ableton Live.
 
-Version 2.0 ships two production workflows in the same project:
+It ships two production workflows in the same repo, the same desktop app, and the same release train:
 
 - `logic2ableton`: convert Logic Pro projects into Ableton Live sets
 - `ableton2logic`: turn Ableton Live sets into Logic-ready transfer packages
 
 The product goal is speed with evidence. Every run produces a report so users can see exactly what transferred cleanly, what needs manual cleanup, and where the source project exceeds what a cross-DAW workflow can preserve.
+
+## Why Use It
+
+- One maintained project instead of separate one-off scripts for each DAW direction
+- Desktop app for non-technical users, CLI for power users and automation
+- Output built for real sessions: copied audio, timeline metadata, and explicit compatibility reporting
+- Reports are first-class artifacts, not an afterthought
+
+## Workflow Matrix
+
+| Workflow | Input | Output | Best For |
+| --- | --- | --- | --- |
+| `logic2ableton` | Logic Pro `.logicx` | Ableton Live `.als` + copied media + conversion report | Moving audio-first Logic sessions into Ableton Arrangement View |
+| `ableton2logic` | Ableton Live `.als` | Logic transfer package + manifests + import guide + transfer report | Rebuilding Ableton audio sessions inside Logic with exact placement guidance |
 
 ## What Works Well
 
@@ -83,6 +97,12 @@ Notes:
 pip install logic2ableton
 ```
 
+If you prefer an isolated global CLI install:
+
+```bash
+pipx install logic2ableton
+```
+
 Then run from anywhere:
 
 ```bash
@@ -106,6 +126,8 @@ logic2ableton --version
 5. Run the transfer and inspect the report if anything looks off.
 
 ### CLI Workflow
+
+Choose the command that matches the source DAW:
 
 Logic to Ableton:
 
@@ -203,6 +225,14 @@ output/
     MySet_logic_transfer_report.txt
 ```
 
+## What "Production Ready" Means Here
+
+- Repeated validation across parser tests, package builds, standalone converter builds, and desktop packaging
+- Windows desktop smoke coverage in CI before tagged release packaging
+- Reports emitted on both success and failure paths so support starts with evidence instead of guesswork
+- Desktop app safety rails around approved files, active jobs, and artifact opening
+- Both conversion directions ship from the same repo and version together
+
 ## Reading The Reports
 
 Pay close attention to `COMPATIBILITY WARNINGS`.
@@ -226,7 +256,7 @@ Run tests:
 python -m pytest tests -q
 ```
 
-No third-party Python dependencies. The Ableton template is bundled — no Ableton installation needed.
+No third-party Python dependencies. The Ableton template is bundled, so no Ableton installation is needed to generate Live sets.
 
 Build the Python package:
 
