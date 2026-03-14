@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import audioop
 import csv
 import io
 import json
@@ -22,9 +21,6 @@ from logic2ableton.models import AbletonAudioClip, AbletonProject, AbletonTrack
 
 SUPPORTED_PCM_SUFFIXES = {".wav", ".aif", ".aiff"}
 MIDI_TICKS_PER_QUARTER = 960
-DEFAULT_SAMPLE_RATE = 44_100
-DEFAULT_CHANNELS = 2
-DEFAULT_SAMPLE_WIDTH = 2
 
 
 @dataclass
@@ -166,61 +162,6 @@ def _slice_frames(audio: DecodedAudio, start_frame: int, frame_count: int) -> by
     return audio.frames[start_byte:end_byte]
 
 
-def _convert_channels(frames: bytes, sample_width: int, in_channels: int, out_channels: int) -> bytes:
-    if in_channels == out_channels:
-        return frames
-    if in_channels == 1 and out_channels == 2:
-        return audioop.tostereo(frames, sample_width, 1.0, 1.0)
-    if in_channels == 2 and out_channels == 1:
-        return audioop.tomono(frames, sample_width, 0.5, 0.5)
-    raise ValueError(f"Unsupported channel conversion {in_channels}->{out_channels}")
-
-
-def _convert_audio(
-    frames: bytes,
-    *,
-    in_rate: int,
-    out_rate: int,
-    in_channels: int,
-    out_channels: int,
-    in_width: int,
-    out_width: int,
-) -> bytes:
-    converted = frames
-    current_width = in_width
-
-    if in_width != out_width:
-        converted = audioop.lin2lin(converted, in_width, out_width)
-        current_width = out_width
-
-    converted = _convert_channels(converted, current_width, in_channels, out_channels)
-
-    if in_rate != out_rate and converted:
-        converted, _ = audioop.ratecv(converted, current_width, out_channels, in_rate, out_rate, None)
-
-    return converted
-
-
-def _resample_to_frame_count(frames: bytes, sample_width: int, channels: int, target_frame_count: int) -> bytes:
-    if not frames or target_frame_count <= 0:
-        return b""
-
-    frame_width = sample_width * channels
-    current_frame_count = len(frames) // frame_width
-    if current_frame_count == 0 or current_frame_count == target_frame_count:
-        return frames
-
-    resampled, _ = audioop.ratecv(
-        frames,
-        sample_width,
-        channels,
-        current_frame_count,
-        target_frame_count,
-        None,
-    )
-    return resampled
-
-
 def _fit_to_frame_count(frames: bytes, sample_width: int, channels: int, target_frame_count: int) -> bytes:
     target_bytes = max(0, target_frame_count) * sample_width * channels
     if len(frames) == target_bytes:
@@ -228,6 +169,45 @@ def _fit_to_frame_count(frames: bytes, sample_width: int, channels: int, target_
     if len(frames) > target_bytes:
         return frames[:target_bytes]
     return frames + (b"\x00" * (target_bytes - len(frames)))
+
+
+def _sample_limits(sample_width: int) -> tuple[int, int]:
+    if sample_width == 1:
+        return -128, 127
+    max_value = (1 << (sample_width * 8 - 1)) - 1
+    min_value = -(1 << (sample_width * 8 - 1))
+    return min_value, max_value
+
+
+def _decode_sample(chunk: bytes, sample_width: int) -> int:
+    if sample_width == 1:
+        return chunk[0] - 128
+    if sample_width == 3:
+        sign = b"\xff" if chunk[2] & 0x80 else b"\x00"
+        return int.from_bytes(chunk + sign, "little", signed=True)
+    return int.from_bytes(chunk, "little", signed=True)
+
+
+def _encode_sample(value: int, sample_width: int) -> bytes:
+    if sample_width == 1:
+        return bytes([value + 128])
+    if sample_width == 3:
+        return int(value).to_bytes(4, "little", signed=True)[:3]
+    return int(value).to_bytes(sample_width, "little", signed=True)
+
+
+def _mix_pcm_frames(base: bytes, overlay: bytes, sample_width: int) -> bytes:
+    if len(base) != len(overlay):
+        raise ValueError("PCM mixes must have equal byte lengths")
+
+    minimum, maximum = _sample_limits(sample_width)
+    mixed = bytearray(len(base))
+    for offset in range(0, len(base), sample_width):
+        base_sample = _decode_sample(base[offset : offset + sample_width], sample_width)
+        overlay_sample = _decode_sample(overlay[offset : offset + sample_width], sample_width)
+        sample = max(minimum, min(maximum, base_sample + overlay_sample))
+        mixed[offset : offset + sample_width] = _encode_sample(sample, sample_width)
+    return bytes(mixed)
 
 
 def _render_clip_pcm(
@@ -247,24 +227,12 @@ def _render_clip_pcm(
         return None
 
     source_start_frame = _beats_to_frames(clip.source_in_beats, tempo, decoded.frame_rate)
-    target_frame_count = max(1, _beats_to_frames(clip.duration_beats, tempo, out_rate))
-    source_frame_count = max(1, _beats_to_frames(clip.duration_beats, tempo, decoded.frame_rate))
-    raw_frames = _slice_frames(decoded, source_start_frame, source_frame_count)
+    target_frame_count = max(1, _beats_to_frames(clip.duration_beats, tempo, decoded.frame_rate))
+    if (decoded.frame_rate, decoded.channels, decoded.sample_width) != (out_rate, out_channels, out_width):
+        return None
 
-    converted = _convert_audio(
-        raw_frames,
-        in_rate=decoded.frame_rate,
-        out_rate=out_rate,
-        in_channels=decoded.channels,
-        out_channels=out_channels,
-        in_width=decoded.sample_width,
-        out_width=out_width,
-    )
-
-    if clip.is_warped and converted:
-        converted = _resample_to_frame_count(converted, out_width, out_channels, target_frame_count)
-
-    return _fit_to_frame_count(converted, out_width, out_channels, target_frame_count)
+    raw_frames = _slice_frames(decoded, source_start_frame, target_frame_count)
+    return _fit_to_frame_count(raw_frames, out_width, out_channels, target_frame_count)
 
 
 def _build_bext_chunk(time_reference_samples: int) -> bytes:
@@ -360,10 +328,10 @@ def _track_render_format(track: AbletonTrack, cache: dict[Path, DecodedAudio | N
     if not available:
         return None
 
-    sample_rate = max(audio.frame_rate for audio in available)
-    channels = min(2, max(audio.channels for audio in available))
-    sample_width = max(audio.sample_width for audio in available)
-    return sample_rate, channels, sample_width
+    formats = {(audio.frame_rate, audio.channels, audio.sample_width) for audio in available}
+    if len(formats) != 1:
+        return None
+    return next(iter(formats))
 
 
 def _render_track_stem(
@@ -405,7 +373,7 @@ def _render_track_stem(
 
         clipped = rendered[: end_byte - start_byte]
         existing = bytes(mix_buffer[start_byte:end_byte])
-        mix_buffer[start_byte:end_byte] = audioop.add(existing, clipped, sample_width)
+        mix_buffer[start_byte:end_byte] = _mix_pcm_frames(existing, clipped, sample_width)
         rendered_clips += 1
         approximated_warp = approximated_warp or clip.is_warped
 
