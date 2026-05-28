@@ -39,6 +39,55 @@ def parse_metadata(logicx_path: Path, alternative: int = 0) -> dict:
     }
 
 
+def discover_alternatives(logicx_path: Path) -> list[int]:
+    """Return sorted alternative indices that contain project data.
+
+    Logic numbers alternative folders arbitrarily (a project's only
+    alternative may be ``004``, not ``000``), so callers must discover what
+    actually exists rather than assuming a fixed index.
+    """
+    alt_dir = logicx_path / "Alternatives"
+    if not alt_dir.exists():
+        return []
+    found: list[int] = []
+    for child in alt_dir.iterdir():
+        if not child.is_dir() or not child.name.isdigit():
+            continue
+        if (child / "MetaData.plist").exists() or (child / "ProjectData").exists():
+            found.append(int(child.name))
+    return sorted(found)
+
+
+def resolve_alternative(
+    logicx_path: Path,
+    requested: int | None = None,
+    active_variant: int | None = None,
+) -> int:
+    """Pick which alternative folder to parse.
+
+    ``requested`` (e.g. CLI ``--alternative``) wins when present. Otherwise we
+    prefer the project's active variant, then fall back to the lowest-numbered
+    alternative that exists on disk.
+    """
+    available = discover_alternatives(logicx_path)
+    if not available:
+        raise FileNotFoundError(
+            f"No Logic alternatives found under {logicx_path / 'Alternatives'}. "
+            "The project may be empty or saved in an unsupported format."
+        )
+    if requested is not None:
+        if requested in available:
+            return requested
+        available_str = ", ".join(f"{n:03d}" for n in available)
+        raise FileNotFoundError(
+            f"Alternative {requested:03d} not found in {logicx_path.name}. "
+            f"Available alternative(s): {available_str}"
+        )
+    if active_variant is not None and active_variant in available:
+        return active_variant
+    return available[0]
+
+
 def _int_to_4cc(n: int) -> str:
     """Convert an integer to a 4-character code (FourCC)."""
     try:
@@ -417,10 +466,15 @@ def _build_compatibility_warnings(
     return warnings
 
 
-def parse_logic_project(logicx_path: Path, alternative: int = 0) -> LogicProject:
-    """Parse a complete Logic Pro project into a LogicProject dataclass."""
+def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> LogicProject:
+    """Parse a complete Logic Pro project into a LogicProject dataclass.
+
+    ``alternative`` defaults to ``None``, which auto-detects the active
+    alternative. Pass an explicit index to force a specific one.
+    """
     logicx_path = Path(logicx_path)
     info = parse_project_info(logicx_path)
+    alternative = resolve_alternative(logicx_path, alternative, info.get("active_variant"))
     meta = parse_metadata(logicx_path, alternative=alternative)
     audio_files = discover_audio_files(logicx_path)
 

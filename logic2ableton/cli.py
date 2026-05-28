@@ -116,7 +116,13 @@ def _build_forward_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input", help="Path to .logicx project")
     parser.add_argument("--output", "-o", default=".", help="Output directory")
-    parser.add_argument("--alternative", "-a", type=int, default=0, help="Logic alternative to convert")
+    parser.add_argument(
+        "--alternative",
+        "-a",
+        type=int,
+        default=None,
+        help="Logic alternative index to convert (auto-detects the active alternative if omitted)",
+    )
     parser.add_argument("--no-copy", action="store_true", help="Do not copy audio files into the output package")
     parser.add_argument("--report-only", action="store_true", help="Write the conversion report without generating output files")
     parser.add_argument(

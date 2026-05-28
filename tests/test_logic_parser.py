@@ -227,3 +227,74 @@ def test_build_compatibility_warnings_for_missing_and_unpositioned_audio(tmp_pat
     assert any("external.wav" in warning for warning in warnings)
     assert any("default to bar 1" in warning for warning in warnings)
     assert any("3 track(s)" in warning for warning in warnings)
+
+
+# Alternative discovery tests
+import plistlib
+
+from logic2ableton.logic_parser import discover_alternatives, resolve_alternative
+
+
+def _make_logicx(tmp_path: Path, *, alternatives: list[int], active_variant: int) -> Path:
+    logicx = tmp_path / "Sample.logicx"
+    resources = logicx / "Resources"
+    resources.mkdir(parents=True)
+    with open(resources / "ProjectInformation.plist", "wb") as f:
+        plistlib.dump({"ActiveVariant": active_variant, "VariantNames": {str(active_variant): "Sample"}}, f)
+    for index in alternatives:
+        alt = logicx / "Alternatives" / f"{index:03d}"
+        alt.mkdir(parents=True)
+        with open(alt / "MetaData.plist", "wb") as f:
+            plistlib.dump(
+                {
+                    "BeatsPerMinute": 120.0,
+                    "SongSignatureNumerator": 4,
+                    "SongSignatureDenominator": 4,
+                    "SampleRate": 44100,
+                    "NumberOfTracks": 0,
+                    "AudioFiles": [],
+                },
+                f,
+            )
+        (alt / "ProjectData").write_bytes(b"")
+    return logicx
+
+
+def test_discover_alternatives_finds_nonzero_index(tmp_path):
+    logicx = _make_logicx(tmp_path, alternatives=[4], active_variant=4)
+    assert discover_alternatives(logicx) == [4]
+
+
+def test_resolve_alternative_prefers_active_variant(tmp_path):
+    logicx = _make_logicx(tmp_path, alternatives=[0, 2, 4], active_variant=4)
+    assert resolve_alternative(logicx, None, 4) == 4
+
+
+def test_resolve_alternative_falls_back_to_lowest(tmp_path):
+    logicx = _make_logicx(tmp_path, alternatives=[2, 5], active_variant=9)
+    assert resolve_alternative(logicx, None, 9) == 2
+
+
+def test_resolve_alternative_honors_explicit_request(tmp_path):
+    logicx = _make_logicx(tmp_path, alternatives=[0, 4], active_variant=4)
+    assert resolve_alternative(logicx, 0, 4) == 0
+
+
+def test_resolve_alternative_rejects_missing_request(tmp_path):
+    logicx = _make_logicx(tmp_path, alternatives=[4], active_variant=4)
+    with pytest.raises(FileNotFoundError, match="Available alternative"):
+        resolve_alternative(logicx, 0, 4)
+
+
+def test_resolve_alternative_errors_when_none_exist(tmp_path):
+    logicx = tmp_path / "Empty.logicx"
+    (logicx / "Alternatives").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="No Logic alternatives"):
+        resolve_alternative(logicx, None, None)
+
+
+def test_parse_logic_project_auto_detects_alternative(tmp_path):
+    logicx = _make_logicx(tmp_path, alternatives=[4], active_variant=4)
+    project = parse_logic_project(logicx)
+    assert project.alternative == 4
+    assert project.tempo == 120.0
