@@ -148,9 +148,22 @@ Last updated: 2026-03-14
 **Status:** Reverse lane (ableton2logic) DONE — Ableton MIDI tracks/clips are parsed
 from the `.als` XML and exported as per-track Standard MIDI files under `MIDI Tracks/`,
 with notes at their absolute arrangement positions plus embedded tempo and time
-signature. Forward lane (logic2ableton) still NOT done: it requires reverse-engineering
-Logic's undocumented binary `ProjectData` note format. The reverse path was tractable
-because Ableton's format is documented XML; the forward path is the remaining hard part.
+signature.
+
+Forward lane (logic2ableton) note transfer NOT done — but the forward report now
+**detects and flags** software-instrument/MIDI content (via the MetaData instrument
+file lists) so it is no longer silently dropped.
+
+**Binary RE findings (forward note transfer):** Logic's `ProjectData` is a chunked
+binary using little-endian FourCC tags. Relevant chunks: `MSeq` (stored `qeSM`) = MIDI
+Sequence and `EvSq` (stored `qSvE`) = Event Sequence — these carry the per-region event
+data. They pair 1:1 and appear per region (audio included), so their raw count is NOT a
+MIDI-track count (a Live Loops project showed 185). Decoding individual note records
+(position/pitch/velocity/length, tick resolution, event-type discrimination) is the
+remaining work and is blocked on **ground truth**: verifying decoded notes requires
+controlled Logic projects with known content (i.e. driving Logic Pro), which an
+autonomous run cannot produce. Shipping unverified note guesses would violate Priority #1
+("never generate broken files"), so detection/reporting is the current responsible scope.
 
 **What to do:**
 - Extract MIDI note data from Logic's `ProjectData` binary

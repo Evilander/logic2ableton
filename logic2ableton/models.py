@@ -53,6 +53,7 @@ class LogicProject:
     mixer_state: dict[str, TrackMixerState] | None = None
     metadata_track_count: int = 0
     metadata_audio_files: list[str] = field(default_factory=list)
+    software_instrument_files: int = 0
     compatibility_warnings: list[str] = field(default_factory=list)
 
 

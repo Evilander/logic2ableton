@@ -97,6 +97,13 @@ def generate_report(project: LogicProject, plugin_matches: list[PluginMatch]) ->
     lines.append("")
 
     lines.append("NOT TRANSFERRED:")
+    if project.software_instrument_files:
+        lines.append(
+            f"  - MIDI notes and software instruments ({project.software_instrument_files} instrument "
+            "file(s) referenced); Logic-to-Ableton transfers audio only"
+        )
+    else:
+        lines.append("  - MIDI notes and software instruments (Logic-to-Ableton transfers audio only)")
     lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
     lines.append("  - Automation data (requires deeper binary parsing)")
     lines.append("  - Bus/send routing (recreate manually in Ableton)")

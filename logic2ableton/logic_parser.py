@@ -26,6 +26,10 @@ def parse_metadata(logicx_path: Path, alternative: int = 0) -> dict:
     plist_path = logicx_path / "Alternatives" / f"{alternative:03d}" / "MetaData.plist"
     with open(plist_path, "rb") as f:
         data = plistlib.load(f)
+    # Software-instrument file references signal MIDI/instrument tracks; reverb
+    # impulse responses are an audio-effect resource, not a MIDI-track indicator.
+    instrument_keys = ("SamplerInstrumentsFiles", "QuicksamplerFiles", "AlchemyFiles", "UltrabeatFiles")
+    software_instrument_files = sum(len(data.get(key, [])) for key in instrument_keys)
     return {
         "tempo": data.get("BeatsPerMinute", 120.0),
         "time_sig_numerator": data.get("SongSignatureNumerator", 4),
@@ -36,6 +40,7 @@ def parse_metadata(logicx_path: Path, alternative: int = 0) -> dict:
         "song_gender_key": data.get("SongGenderKey", ""),
         "audio_files": [f.replace("Audio Files/", "") for f in data.get("AudioFiles", [])],
         "unused_audio_files": [f.replace("Audio Files/", "") for f in data.get("UnusedAudioFiles", [])],
+        "software_instrument_files": software_instrument_files,
     }
 
 
@@ -463,6 +468,15 @@ def _build_compatibility_warnings(
             "depend on external media, aliases, or unsupported content types"
         )
 
+    instrument_files = meta.get("software_instrument_files", 0)
+    if instrument_files:
+        warnings.append(
+            f"This project references {instrument_files} software-instrument file(s), so it likely "
+            "contains MIDI/instrument tracks. Logic-to-Ableton transfers audio only — MIDI notes and "
+            "software instruments are not recreated. (The reverse direction, ableton2logic, does "
+            "transfer MIDI notes.)"
+        )
+
     return warnings
 
 
@@ -506,5 +520,6 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
         alternative=alternative,
         metadata_track_count=meta["num_tracks"],
         metadata_audio_files=meta["audio_files"],
+        software_instrument_files=meta["software_instrument_files"],
         compatibility_warnings=compatibility_warnings,
     )

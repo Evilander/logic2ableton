@@ -333,3 +333,56 @@ def test_extract_plugins_ignores_non_plugin_plists():
 
 def test_extract_plugins_empty_data_returns_empty():
     assert extract_plugins(Path("/x.logicx"), _data=b"") == []
+
+
+# Forward-lane MIDI/instrument detection
+def _make_logicx_with_instruments(tmp_path: Path, *, ultrabeat=0, alchemy=0) -> Path:
+    logicx = tmp_path / "Inst.logicx"
+    (logicx / "Resources").mkdir(parents=True)
+    with open(logicx / "Resources" / "ProjectInformation.plist", "wb") as f:
+        plistlib.dump({"ActiveVariant": 0, "VariantNames": {"0": "Inst"}}, f)
+    alt = logicx / "Alternatives" / "000"
+    alt.mkdir(parents=True)
+    with open(alt / "MetaData.plist", "wb") as f:
+        plistlib.dump(
+            {
+                "BeatsPerMinute": 120.0,
+                "SongSignatureNumerator": 4,
+                "SongSignatureDenominator": 4,
+                "SampleRate": 44100,
+                "NumberOfTracks": 2,
+                "AudioFiles": [],
+                "UltrabeatFiles": [f"Ultrabeat/{i}.ub" for i in range(ultrabeat)],
+                "AlchemyFiles": [f"Alchemy/{i}.aaz" for i in range(alchemy)],
+            },
+            f,
+        )
+    (alt / "ProjectData").write_bytes(b"")
+    return logicx
+
+
+def test_software_instrument_files_counted():
+    meta = {
+        "SamplerInstrumentsFiles": ["a", "b"],
+        "QuicksamplerFiles": ["c"],
+        "AlchemyFiles": ["d"],
+        "UltrabeatFiles": [],
+        "ImpulsResponsesFiles": ["ignored1", "ignored2"],  # reverb IR, not a MIDI signal
+    }
+    # Mirror parse_metadata's instrument tally without needing a real bundle.
+    keys = ("SamplerInstrumentsFiles", "QuicksamplerFiles", "AlchemyFiles", "UltrabeatFiles")
+    assert sum(len(meta.get(k, [])) for k in keys) == 4
+
+
+def test_parse_logic_project_flags_instrument_content(tmp_path):
+    logicx = _make_logicx_with_instruments(tmp_path, ultrabeat=3, alchemy=1)
+    project = parse_logic_project(logicx)
+    assert project.software_instrument_files == 4
+    assert any("software-instrument" in w and "audio only" in w for w in project.compatibility_warnings)
+
+
+def test_parse_logic_project_no_instrument_warning_when_absent(tmp_path):
+    logicx = _make_logicx_with_instruments(tmp_path, ultrabeat=0, alchemy=0)
+    project = parse_logic_project(logicx)
+    assert project.software_instrument_files == 0
+    assert not any("software-instrument" in w for w in project.compatibility_warnings)
