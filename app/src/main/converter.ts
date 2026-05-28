@@ -20,6 +20,8 @@ export interface ProgressEvent {
   audio_files?: number
   plugins?: number
   locators?: number
+  midi_tracks?: number
+  midi_notes?: number
   compatibility_warnings?: string[]
   warning?: string
 }

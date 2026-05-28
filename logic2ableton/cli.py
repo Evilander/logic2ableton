@@ -497,17 +497,22 @@ def _run_reverse(args: argparse.Namespace) -> int:
             report_suffix="_logic_transfer_report.txt",
         )
 
+    midi_track_count = sum(1 for track in project.midi_tracks if track.note_count > 0)
     if jp:
         _emit(
             "parsing",
             0.3,
-            f"Found {len(project.audio_tracks)} tracks, {len(project.clips)} clips, {len(project.locators)} locators",
+            f"Found {len(project.audio_tracks)} audio tracks, {len(project.clips)} clips, "
+            f"{midi_track_count} MIDI tracks ({project.total_midi_notes} notes), {len(project.locators)} locators",
             direction=REVERSE_MODE,
+            midi_tracks=midi_track_count,
+            midi_notes=project.total_midi_notes,
         )
     else:
         print(
-            f"  Found {len(project.audio_tracks)} tracks, "
+            f"  Found {len(project.audio_tracks)} audio tracks, "
             f"{len(project.clips)} clips, "
+            f"{midi_track_count} MIDI tracks ({project.total_midi_notes} notes), "
             f"{len(project.locators)} locators"
         )
 
@@ -606,11 +611,15 @@ def _run_reverse(args: argparse.Namespace) -> int:
             clips=len(project.clips),
             audio_files=transfer.copied_audio_files,
             locators=len(project.locators),
+            midi_tracks=transfer.rendered_midi_files,
+            midi_notes=transfer.transferred_midi_notes,
             compatibility_warnings=project.compatibility_warnings,
         )
     else:
         print(f"  Created: {transfer.package_path}")
         print(f"  Import guide: {transfer.artifact_path}")
+        if transfer.rendered_midi_files:
+            print(f"  MIDI tracks: {transfer.rendered_midi_files} ({transfer.transferred_midi_notes} notes)")
         print(f"  Report: {transfer.report_path}")
         print("\nDone!")
 

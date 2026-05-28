@@ -40,10 +40,12 @@ The product goal is speed with evidence. Every run produces a report so users ca
 ### Ableton to Logic
 
 - Audio-track and clip discovery from `.als`
+- MIDI-track and arrangement note extraction, exported as importable Standard MIDI files
 - Tempo, locators, and a documented base time signature
 - Logic-ready transfer package with:
   - `Track Stems/` for the fastest arrangement-faithful import
   - `Logic Timeline/Logic Timeline.mid` for tempo and locator import
+  - `MIDI Tracks/` with one Standard MIDI file per Ableton MIDI track, notes placed at their arrangement positions
   - `Audio Files/` grouped by Ableton track with timestamped WAV clip exports where supported
   - `timeline_manifest.json`
   - `timeline_manifest.csv`
@@ -65,11 +67,13 @@ The product goal is speed with evidence. Every run produces a report so users ca
 ### Ableton to Logic
 
 - The reverse lane does not synthesize a native `.logicx` package
+- MIDI note data transfers, but instruments, devices, racks, MIDI effects, and plugin state do not — reload those in Logic
+- Looping MIDI clips export only their first pass of notes; repeat them manually in Logic if needed
 - Ableton devices, racks, plugin state, and return-bus processing are not transferred
 - Warped clips are exported with best-effort timing, but they still need review inside Logic before delivery
 - Tempo and markers are exported into the Logic Timeline MIDI file; do not assume time-signature changes are fully reconstructed unless you verify them in Logic
 - Non-PCM sources that cannot be rendered to timestamped WAV in-process are copied as references and flagged in the report/manifest
-- The transfer package is audio-first; use the stems first, then clip exports and the manifest if you need finer reconstruction
+- The transfer package covers audio and MIDI; use the stems and MIDI files first, then clip exports and the manifest if you need finer reconstruction
 
 If a project lands imperfectly, the first thing to inspect is the generated report. It is the primary support artifact for this project.
 
@@ -246,6 +250,9 @@ output/
       02 - Vocals.wav
     Logic Timeline/
       Logic Timeline.mid
+    MIDI Tracks/
+      01 - Bass.mid
+      02 - Lead.mid
     Audio Files/
       01 - Drums/
       02 - Vocals/

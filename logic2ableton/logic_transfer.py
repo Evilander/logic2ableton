@@ -13,7 +13,7 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-from logic2ableton.models import AbletonAudioClip, AbletonProject, AbletonTrack
+from logic2ableton.models import AbletonAudioClip, AbletonMidiTrack, AbletonProject, AbletonTrack
 
 SUPPORTED_PCM_SUFFIXES = {".wav", ".aif", ".aiff"}
 MIDI_TICKS_PER_QUARTER = 960
@@ -27,6 +27,8 @@ class LogicTransferArtifact:
     copied_audio_files: int
     rendered_stem_files: int
     timeline_path: Path | None
+    rendered_midi_files: int = 0
+    transferred_midi_notes: int = 0
 
 
 @dataclass
@@ -80,6 +82,10 @@ def _clip_export_name(index: int, clip: AbletonAudioClip) -> str:
 
 def _track_stem_name(index: int, track_name: str) -> str:
     return f"{index:02d} - {_safe_name(track_name, f'track_{index:02d}')}.wav"
+
+
+def _midi_track_name(index: int, track_name: str) -> str:
+    return f"{index:02d} - {_safe_name(track_name, f'midi_{index:02d}')}.mid"
 
 
 def _clip_rows(project: AbletonProject) -> list[dict[str, object]]:
@@ -374,26 +380,39 @@ def _write_var_len(value: int) -> bytes:
     return bytes(encoded)
 
 
+def _tempo_meta(tempo: float) -> bytes:
+    mpqn = int(round(60_000_000 / max(1e-6, tempo)))
+    return b"\x00\xff\x51\x03" + mpqn.to_bytes(3, "big")
+
+
+def _time_signature_meta(numerator: int, denominator: int) -> bytes:
+    denominator_power = 0
+    denom = max(1, denominator)
+    while (1 << denominator_power) < denom and denominator_power < 7:
+        denominator_power += 1
+    return b"\x00\xff\x58\x04" + bytes([max(1, numerator), denominator_power, 24, 8])
+
+
+def _wrap_midi_track(track_data: bytes) -> bytes:
+    track = b"MTrk" + struct.pack(">I", len(track_data)) + track_data
+    header = b"MThd" + struct.pack(">IHHH", 6, 0, 1, MIDI_TICKS_PER_QUARTER)
+    return header + track
+
+
+def _beats_to_ticks(beats: float) -> int:
+    return max(0, int(round(beats * MIDI_TICKS_PER_QUARTER)))
+
+
 def _build_logic_timeline_midi(project: AbletonProject) -> bytes:
     track_data = bytearray()
     track_name = f"{project.name} Timeline".encode("utf-8")
     track_data.extend(b"\x00\xff\x03" + _write_var_len(len(track_name)) + track_name)
-
-    mpqn = int(round(60_000_000 / project.tempo))
-    track_data.extend(b"\x00\xff\x51\x03" + mpqn.to_bytes(3, "big"))
-
-    denominator_power = 0
-    denominator = max(1, project.time_sig_denominator)
-    while (1 << denominator_power) < denominator and denominator_power < 7:
-        denominator_power += 1
-    track_data.extend(
-        b"\x00\xff\x58\x04"
-        + bytes([project.time_sig_numerator, denominator_power, 24, 8])
-    )
+    track_data.extend(_tempo_meta(project.tempo))
+    track_data.extend(_time_signature_meta(project.time_sig_numerator, project.time_sig_denominator))
 
     previous_tick = 0
     for locator in sorted(project.locators, key=lambda item: item.time_beats):
-        tick = max(0, int(round(locator.time_beats * MIDI_TICKS_PER_QUARTER)))
+        tick = _beats_to_ticks(locator.time_beats)
         delta = tick - previous_tick
         previous_tick = tick
         marker_name = locator.name.encode("utf-8")
@@ -401,9 +420,35 @@ def _build_logic_timeline_midi(project: AbletonProject) -> bytes:
         track_data.extend(b"\xff\x06" + _write_var_len(len(marker_name)) + marker_name)
 
     track_data.extend(b"\x00\xff\x2f\x00")
-    track = b"MTrk" + struct.pack(">I", len(track_data)) + bytes(track_data)
-    header = b"MThd" + struct.pack(">IHHH", 6, 0, 1, MIDI_TICKS_PER_QUARTER)
-    return header + track
+    return _wrap_midi_track(bytes(track_data))
+
+
+def _build_midi_note_file(track: AbletonMidiTrack, *, tempo: float, numerator: int, denominator: int) -> bytes:
+    """Build a self-contained Type-0 SMF with the track's notes, tempo, and time signature."""
+    track_data = bytearray()
+    name_bytes = track.name.encode("utf-8")[:255]
+    track_data.extend(b"\x00\xff\x03" + _write_var_len(len(name_bytes)) + name_bytes)
+    track_data.extend(_tempo_meta(tempo))
+    track_data.extend(_time_signature_meta(numerator, denominator))
+
+    # (tick, ordering, status, pitch, velocity). Note-offs (ordering 0) sort
+    # before note-ons at the same tick so back-to-back same-pitch notes do not hang.
+    events: list[tuple[int, int, int, int, int]] = []
+    for note in track.notes:
+        on_tick = _beats_to_ticks(note.start_beats)
+        off_tick = max(on_tick + 1, _beats_to_ticks(note.start_beats + note.duration_beats))
+        events.append((on_tick, 1, 0x90, note.pitch, note.velocity))
+        events.append((off_tick, 0, 0x80, note.pitch, 0))
+    events.sort(key=lambda event: (event[0], event[1]))
+
+    previous_tick = 0
+    for tick, _ordering, status, pitch, velocity in events:
+        track_data.extend(_write_var_len(tick - previous_tick))
+        track_data.extend(bytes([status, pitch & 0x7F, velocity & 0x7F]))
+        previous_tick = tick
+
+    track_data.extend(b"\x00\xff\x2f\x00")
+    return _wrap_midi_track(bytes(track_data))
 
 
 def _track_render_format(track: AbletonTrack, cache: dict[Path, DecodedAudio | None]) -> tuple[int, int, int] | None:
@@ -539,6 +584,17 @@ def build_logic_transfer_report(project: AbletonProject) -> str:
         lines.append(f"  {index}. {track.name} - {clip_summary}")
     lines.append("")
 
+    midi_tracks_with_notes = [track for track in project.midi_tracks if track.note_count > 0]
+    lines.append(f"MIDI TRACKS FOUND ({len(midi_tracks_with_notes)}):")
+    if midi_tracks_with_notes:
+        for index, track in enumerate(midi_tracks_with_notes, start=1):
+            lines.append(
+                f"  {index}. {track.name} - {len(track.clips)} clip(s), {track.note_count} note(s)"
+            )
+    else:
+        lines.append("  - No MIDI tracks with notes were found in the arrangement.")
+    lines.append("")
+
     lines.append(f"LOCATORS FOUND ({len(project.locators)}):")
     if project.locators:
         for locator in project.locators[:20]:
@@ -552,6 +608,8 @@ def build_logic_transfer_report(project: AbletonProject) -> str:
     lines.append("TRANSFER PACKAGE CONTENTS:")
     lines.append("  - Track Stems/: full-length WAV stems that line up from project start")
     lines.append("  - Logic Timeline/: Standard MIDI file with tempo, time signature, and locators")
+    if midi_tracks_with_notes:
+        lines.append("  - MIDI Tracks/: one Standard MIDI file per Ableton MIDI track, with notes at their arrangement positions")
     lines.append("  - Audio Files/: timestamped WAV clip exports or copied source files grouped by track")
     lines.append("  - timeline_manifest.json + timeline_manifest.csv")
     lines.append("  - locators.csv")
@@ -584,29 +642,42 @@ def build_logic_transfer_report(project: AbletonProject) -> str:
 
 
 def build_logic_import_guide(project: AbletonProject) -> str:
-    return "\n".join(
-        [
-            f"# Import {project.name} into Logic Pro",
+    has_midi = any(track.note_count > 0 for track in project.midi_tracks)
+    lines = [
+        f"# Import {project.name} into Logic Pro",
+        "",
+        "## Fastest path (closest to the Ableton arrangement)",
+        "1. Create a new empty Logic Pro project.",
+        "2. Import `Logic Timeline/Logic Timeline.mid` to bring in the project tempo, time signature, and locators.",
+        "3. Drag every file from `Track Stems` into Logic starting at project bar 1.",
+        "4. Keep one Logic track per stem to preserve the Ableton track order and layout.",
+    ]
+    if has_midi:
+        lines += [
             "",
-            "## Fastest path (closest to the Ableton arrangement)",
-            "1. Create a new empty Logic Pro project.",
-            "2. Import `Logic Timeline/Logic Timeline.mid` to bring in the project tempo, time signature, and locators.",
-            "3. Drag every file from `Track Stems` into Logic starting at project bar 1.",
-            "4. Keep one Logic track per stem to preserve the Ableton track order and layout.",
-            "",
-            "## Clip-level reconstruction",
-            "1. Open the `Audio Files` folder in this package.",
-            "2. Import one track folder at a time so the track order stays readable.",
-            "3. For timestamped WAV exports, use Logic's `Edit > Move > To Recorded Position` command after import.",
-            "4. Use `timeline_manifest.csv` if you want to place or verify clips by beat number manually.",
-            "",
-            "## Notes",
-            f"- The intended project tempo is {project.tempo:.3f} BPM and the base time signature is "
-            f"{project.time_sig_numerator}/{project.time_sig_denominator}.",
-            "- Warped clips are exported with best-effort timing, but they should be reviewed in Logic before delivery.",
-            "- Copied source files that are not rendered as timestamped WAVs are called out in the report and manifest.",
+            "## MIDI tracks",
+            "1. Open the `MIDI Tracks` folder in this package.",
+            "2. Drag each `.mid` file into Logic at bar 1; the notes already carry their arrangement positions.",
+            "3. Assign a software instrument to each imported MIDI region (the Ableton instrument is not transferred).",
+            "4. Each file embeds the project tempo and time signature, so it lines up with the timeline import.",
         ]
-    )
+    lines += [
+        "",
+        "## Clip-level reconstruction",
+        "1. Open the `Audio Files` folder in this package.",
+        "2. Import one track folder at a time so the track order stays readable.",
+        "3. For timestamped WAV exports, use Logic's `Edit > Move > To Recorded Position` command after import.",
+        "4. Use `timeline_manifest.csv` if you want to place or verify clips by beat number manually.",
+        "",
+        "## Notes",
+        f"- The intended project tempo is {project.tempo:.3f} BPM and the base time signature is "
+        f"{project.time_sig_numerator}/{project.time_sig_denominator}.",
+        "- Warped clips are exported with best-effort timing, but they should be reviewed in Logic before delivery.",
+        "- Copied source files that are not rendered as timestamped WAVs are called out in the report and manifest.",
+    ]
+    if has_midi:
+        lines.append("- MIDI note data transfers, but instruments, devices, and MIDI effects do not — reload those in Logic.")
+    return "\n".join(lines)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -711,6 +782,35 @@ def generate_logic_transfer(
     timeline_path = timeline_root / "Logic Timeline.mid"
     timeline_path.write_bytes(_build_logic_timeline_midi(project))
 
+    rendered_midi_files = 0
+    transferred_midi_notes = 0
+    manifest_midi_tracks: list[dict[str, object]] = []
+    midi_tracks_with_notes = [track for track in project.midi_tracks if track.note_count > 0]
+    if midi_tracks_with_notes:
+        midi_root = package_path / "MIDI Tracks"
+        midi_root.mkdir(parents=True, exist_ok=True)
+        for midi_index, track in enumerate(midi_tracks_with_notes, start=1):
+            midi_name = _midi_track_name(midi_index, track.name)
+            (midi_root / midi_name).write_bytes(
+                _build_midi_note_file(
+                    track,
+                    tempo=project.tempo,
+                    numerator=project.time_sig_numerator,
+                    denominator=project.time_sig_denominator,
+                )
+            )
+            rendered_midi_files += 1
+            transferred_midi_notes += track.note_count
+            manifest_midi_tracks.append(
+                {
+                    "track_index": midi_index,
+                    "track_name": track.name,
+                    "midi_export_name": midi_name,
+                    "clip_count": len(track.clips),
+                    "note_count": track.note_count,
+                }
+            )
+
     manifest_path = package_path / "timeline_manifest.json"
     manifest_rows = _clip_rows(project)
     _write_json(
@@ -728,6 +828,7 @@ def generate_logic_transfer(
                 for locator in project.locators
             ],
             "tracks": manifest_tracks,
+            "midi_tracks": manifest_midi_tracks,
         },
     )
     _write_csv(package_path / "timeline_manifest.csv", manifest_rows)
@@ -749,4 +850,6 @@ def generate_logic_transfer(
         copied_audio_files=copied_audio_files,
         rendered_stem_files=rendered_stem_files,
         timeline_path=timeline_path,
+        rendered_midi_files=rendered_midi_files,
+        transferred_midi_notes=transferred_midi_notes,
     )

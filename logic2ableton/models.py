@@ -87,6 +87,44 @@ class AbletonTrack:
 
 
 @dataclass
+class AbletonMidiNote:
+    """A single MIDI note placed on the arrangement timeline (beats, absolute)."""
+    pitch: int              # 0-127
+    start_beats: float      # absolute arrangement position
+    duration_beats: float
+    velocity: int           # 1-127
+
+
+@dataclass
+class AbletonMidiClip:
+    clip_name: str
+    track_name: str
+    start_beats: float
+    end_beats: float
+    notes: list[AbletonMidiNote] = field(default_factory=list)
+    is_disabled: bool = False
+    is_looping: bool = False
+
+    @property
+    def duration_beats(self) -> float:
+        return max(0.0, self.end_beats - self.start_beats)
+
+
+@dataclass
+class AbletonMidiTrack:
+    name: str
+    clips: list[AbletonMidiClip] = field(default_factory=list)
+
+    @property
+    def notes(self) -> list[AbletonMidiNote]:
+        return [note for clip in self.clips for note in clip.notes]
+
+    @property
+    def note_count(self) -> int:
+        return sum(len(clip.notes) for clip in self.clips)
+
+
+@dataclass
 class AbletonProject:
     name: str
     tempo: float
@@ -94,6 +132,7 @@ class AbletonProject:
     time_sig_denominator: int
     audio_tracks: list[AbletonTrack]
     locators: list[AbletonLocator]
+    midi_tracks: list[AbletonMidiTrack] = field(default_factory=list)
     compatibility_warnings: list[str] = field(default_factory=list)
 
     @property
@@ -103,6 +142,10 @@ class AbletonProject:
     @property
     def track_names(self) -> list[str]:
         return [track.name for track in self.audio_tracks]
+
+    @property
+    def total_midi_notes(self) -> int:
+        return sum(track.note_count for track in self.midi_tracks)
 
 
 def parse_audio_filename(filename: str) -> tuple[str, int, bool, str]:

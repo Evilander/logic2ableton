@@ -9,6 +9,9 @@ from pathlib import Path
 from logic2ableton.models import (
     AbletonAudioClip,
     AbletonLocator,
+    AbletonMidiClip,
+    AbletonMidiNote,
+    AbletonMidiTrack,
     AbletonProject,
     AbletonTrack,
 )
@@ -191,11 +194,68 @@ def _parse_audio_tracks(live_set: ET.Element, als_path: Path, tempo: float) -> l
     return tracks
 
 
+def _parse_midi_clip(clip: ET.Element, track_name: str, tempo: float) -> AbletonMidiClip | None:
+    start_beats = _float_value(clip.find("CurrentStart"), _float_attr(clip, "Time", 0.0))
+    end_beats = _float_value(clip.find("CurrentEnd"), start_beats)
+
+    clip_name = _value(clip.find("Name")) or f"{track_name} clip"
+    is_disabled = _bool_value(clip.find("Disabled"))
+    is_looping = _bool_value(clip.find("Loop/LoopOn"))
+    # Notes are timed relative to the clip's content origin (1.1.1 == 0 beats),
+    # so a note's arrangement position is the clip start plus the note's own time.
+    notes: list[AbletonMidiNote] = []
+    for key_track in clip.findall(".//KeyTrack"):
+        pitch = int(_float_value(key_track.find("MidiKey"), -1.0))
+        if pitch < 0 or pitch > 127:
+            continue
+        for event in key_track.findall(".//MidiNoteEvent"):
+            if event.get("IsEnabled", "true").strip().lower() in {"false", "0"}:
+                continue
+            note_time = _float_attr(event, "Time", 0.0)
+            duration = _float_attr(event, "Duration", 0.0)
+            velocity = int(round(_float_attr(event, "Velocity", 100.0)))
+            absolute = start_beats + note_time
+            if absolute < 0 or duration <= 0:
+                continue
+            notes.append(
+                AbletonMidiNote(
+                    pitch=pitch,
+                    start_beats=absolute,
+                    duration_beats=duration,
+                    velocity=max(1, min(127, velocity)),
+                )
+            )
+
+    notes.sort(key=lambda note: (note.start_beats, note.pitch))
+    return AbletonMidiClip(
+        clip_name=clip_name,
+        track_name=track_name,
+        start_beats=start_beats,
+        end_beats=end_beats if end_beats > start_beats else start_beats,
+        notes=notes,
+        is_disabled=is_disabled,
+        is_looping=is_looping,
+    )
+
+
+def _parse_midi_tracks(live_set: ET.Element, tempo: float) -> list[AbletonMidiTrack]:
+    tracks: list[AbletonMidiTrack] = []
+    for track in live_set.findall(".//Tracks/MidiTrack"):
+        track_name = _value(track.find("Name/EffectiveName"), "MIDI Track")
+        clips: list[AbletonMidiClip] = []
+        for clip in track.findall(".//ArrangerAutomation/Events/MidiClip"):
+            parsed = _parse_midi_clip(clip, track_name, tempo)
+            if parsed is not None and not parsed.is_disabled:
+                clips.append(parsed)
+        tracks.append(AbletonMidiTrack(name=track_name, clips=clips))
+    return tracks
+
+
 def _build_compatibility_warnings(project: AbletonProject) -> list[str]:
     warnings: list[str] = []
     clips = project.clips
-    if not project.audio_tracks:
-        warnings.append("No Ableton audio tracks were found in the Live Set.")
+    if not project.audio_tracks and not project.midi_tracks:
+        warnings.append("No Ableton audio or MIDI tracks were found in the Live Set.")
         return warnings
 
     missing_files = [clip for clip in clips if clip.source_issue == "missing-file-reference"]
@@ -225,8 +285,23 @@ def _build_compatibility_warnings(project: AbletonProject) -> list[str]:
             f"{len(warped)} clip(s) use Ableton warping; source files will be copied as references, but warp rendering must be recreated manually in Logic: {examples}"
         )
 
-    if not clips:
+    if not clips and not project.midi_tracks:
         warnings.append("No arrangement audio clips were found in the Live Set.")
+
+    looping_midi = [
+        clip
+        for track in project.midi_tracks
+        for clip in track.clips
+        if clip.is_looping and clip.notes
+    ]
+    if looping_midi:
+        examples = ", ".join(clip.clip_name for clip in looping_midi[:5])
+        if len(looping_midi) > 5:
+            examples += ", ..."
+        warnings.append(
+            f"{len(looping_midi)} MIDI clip(s) loop in Ableton; only the first pass of notes is "
+            f"exported, so repeat them manually in Logic if needed: {examples}"
+        )
 
     return warnings
 
@@ -246,6 +321,7 @@ def parse_ableton_project(als_path: Path) -> AbletonProject:
         time_sig_denominator=int(_float_value(time_sig.find("Denominator") if time_sig is not None else None, 4.0)),
         audio_tracks=_parse_audio_tracks(live_set, als_path, tempo),
         locators=_parse_locators(live_set),
+        midi_tracks=_parse_midi_tracks(live_set, tempo),
     )
     project.compatibility_warnings = _build_compatibility_warnings(project)
     return project
