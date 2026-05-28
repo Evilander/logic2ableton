@@ -298,3 +298,38 @@ def test_parse_logic_project_auto_detects_alternative(tmp_path):
     project = parse_logic_project(logicx)
     assert project.alternative == 4
     assert project.tempo == 120.0
+
+
+# Synthetic plugin extraction (no real .logicx fixture required)
+def _fourcc(code: str) -> int:
+    return struct.unpack(">I", code.encode("ascii"))[0]
+
+
+def test_extract_plugins_from_synthetic_project_data():
+    plist_a = plistlib.dumps(
+        {"name": "Test EQ", "type": _fourcc("aufx"), "subtype": _fourcc("TST1"), "manufacturer": _fourcc("Acme")}
+    )
+    plist_b = plistlib.dumps(
+        {"name": "Test Comp", "type": _fourcc("aufx"), "subtype": _fourcc("TST2"), "manufacturer": _fourcc("Acme")}
+    )
+    blob = b"\x00\x01binary-noise" + plist_a + b"\xff\xff padding" + plist_b + b"\x00trailer"
+
+    plugins = extract_plugins(Path("/does-not-exist.logicx"), _data=blob)
+
+    assert [p.name for p in plugins] == ["Test EQ", "Test Comp"]
+    assert plugins[0].au_subtype == "TST1"
+    assert plugins[0].au_type == "aufx"
+    assert plugins[0].au_manufacturer == "Acme"
+    assert plugins[1].au_subtype == "TST2"
+
+
+def test_extract_plugins_ignores_non_plugin_plists():
+    # A plist without a "name" key must be skipped, not crash.
+    junk = plistlib.dumps({"unrelated": "data"})
+    plugin = plistlib.dumps({"name": "Real", "type": _fourcc("aumf"), "subtype": _fourcc("RL01"), "manufacturer": 0})
+    plugins = extract_plugins(Path("/x.logicx"), _data=junk + plugin)
+    assert [p.name for p in plugins] == ["Real"]
+
+
+def test_extract_plugins_empty_data_returns_empty():
+    assert extract_plugins(Path("/x.logicx"), _data=b"") == []
