@@ -26,6 +26,7 @@ const DIRECTION_COPY: Record<ConversionDirection, { title: string; extension: st
 
 export default function DropZone({ direction, onDirectionChange, onProjectSelected }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false)
+  const [dropError, setDropError] = useState<string | null>(null)
   const dragCounter = useRef(0)
   const copy = DIRECTION_COPY[direction]
 
@@ -33,6 +34,7 @@ export default function DropZone({ direction, onDirectionChange, onProjectSelect
     e.preventDefault()
     e.stopPropagation()
     dragCounter.current += 1
+    setDropError(null)
     setIsDragging(true)
   }, [])
 
@@ -53,15 +55,18 @@ export default function DropZone({ direction, onDirectionChange, onProjectSelect
     e.stopPropagation()
     dragCounter.current = 0
     setIsDragging(false)
+    setDropError(null)
 
     const files = e.dataTransfer.files
     if (files.length === 0) return
-    const file = files[0] as File & { path?: string }
-    const path = file.path
+    // Electron removed File.path in v32; resolve the real path via webUtils.
+    const path = window.api.getPathForFile(files[0])
     if (path && path.toLowerCase().endsWith(copy.extension)) {
       onProjectSelected(path)
+    } else {
+      setDropError(`That doesn't look like a ${copy.extension} ${direction === "logic2ableton" ? "Logic project" : "Live Set"}.`)
     }
-  }, [copy.extension, onProjectSelected])
+  }, [copy.extension, direction, onProjectSelected])
 
   const handleBrowse = async () => {
     const path = await window.api.selectSource(direction)
@@ -122,6 +127,7 @@ export default function DropZone({ direction, onDirectionChange, onProjectSelect
         <div className="text-center max-w-md">
           <p className="text-text-primary text-base font-medium mb-1">{copy.title}</p>
           <p className="text-text-secondary text-sm">{copy.helper}</p>
+          {dropError && <p className="text-error text-sm mt-2">{dropError}</p>}
         </div>
 
         <div className="flex items-center gap-3">

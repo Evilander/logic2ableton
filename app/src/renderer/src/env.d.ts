@@ -36,6 +36,7 @@ interface ConversionRecord {
 interface Window {
   api: {
     selectSource: (direction: ConversionDirection) => Promise<string | null>
+    getPathForFile: (file: File) => string
     selectOutputDir: () => Promise<string | null>
     startConversion: (direction: ConversionDirection, sourcePath: string, outputDir: string) => Promise<void>
     startPreview: (direction: ConversionDirection, sourcePath: string) => Promise<void>

@@ -37,8 +37,10 @@ function getConverterCommand(): { cmd: string; baseArgs: string[] } {
     }
   }
 
+  // Dev mode runs the source package directly. Modern macOS/Linux ship
+  // `python3`, not `python`.
   return {
-    cmd: "python",
+    cmd: process.platform === "win32" ? "python" : "python3",
     baseArgs: ["-m", "logic2ableton.cli"],
   }
 }

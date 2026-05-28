@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron"
+import { contextBridge, ipcRenderer, webUtils } from "electron"
 
 export type ConversionDirection = "logic2ableton" | "ableton2logic"
 
@@ -42,6 +42,7 @@ function subscribe<T>(channel: string, cb: (value: T) => void) {
 const api = {
   selectSource: (direction: ConversionDirection): Promise<string | null> =>
     ipcRenderer.invoke("select-source", direction),
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   selectOutputDir: (): Promise<string | null> => ipcRenderer.invoke("select-output-dir"),
   startConversion: (
     direction: ConversionDirection,

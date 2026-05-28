@@ -226,8 +226,18 @@ ipcMain.handle("select-source", async (_, direction: ConversionDirection) => {
   const pickingLogicProject = direction === "logic2ableton"
   const isMac = process.platform === "darwin"
 
+  // A .logicx is a macOS package (selectable as a file) but a plain folder on
+  // Windows/Linux. Allow both file and directory selection on macOS so package
+  // and folder-style projects both work; the suffix check below guards the pick.
+  let properties: Array<"openFile" | "openDirectory">
+  if (pickingLogicProject) {
+    properties = isMac ? ["openFile", "openDirectory"] : ["openDirectory"]
+  } else {
+    properties = ["openFile"]
+  }
+
   const result = await dialog.showOpenDialog({
-    properties: pickingLogicProject && !isMac ? ["openDirectory"] : ["openFile"],
+    properties,
     title: pickingLogicProject ? "Select a Logic Pro project" : "Select an Ableton Live Set",
     filters: [
       {
