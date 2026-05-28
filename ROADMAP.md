@@ -145,6 +145,13 @@ Last updated: 2026-03-14
 
 ## Phase 6: MIDI Transfer
 
+**Status:** Reverse lane (ableton2logic) DONE — Ableton MIDI tracks/clips are parsed
+from the `.als` XML and exported as per-track Standard MIDI files under `MIDI Tracks/`,
+with notes at their absolute arrangement positions plus embedded tempo and time
+signature. Forward lane (logic2ableton) still NOT done: it requires reverse-engineering
+Logic's undocumented binary `ProjectData` note format. The reverse path was tractable
+because Ableton's format is documented XML; the forward path is the remaining hard part.
+
 **What to do:**
 - Extract MIDI note data from Logic's `ProjectData` binary
 - Create MIDI tracks in Ableton (use template's built-in MIDI track structure, similar to AudioTrack cloning)
