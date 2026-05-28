@@ -58,7 +58,8 @@ def _bool_value(element: ET.Element | None, default: bool = False) -> bool:
 
 
 def _live_set(root: ET.Element) -> ET.Element:
-    return root.find("LiveSet") or root
+    live_set = root.find("LiveSet")
+    return live_set if live_set is not None else root
 
 
 def _project_name(als_path: Path, live_set: ET.Element) -> str:

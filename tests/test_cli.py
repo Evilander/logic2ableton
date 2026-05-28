@@ -67,6 +67,7 @@ def test_cli_version():
 def test_cli_report_only_writes_report(tmp_path, monkeypatch, capsys):
     project_path = tmp_path / "project.logicx"
     project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(
@@ -98,6 +99,7 @@ def test_cli_report_only_writes_report(tmp_path, monkeypatch, capsys):
 def test_cli_writes_report_when_parse_fails(tmp_path, monkeypatch, capsys):
     project_path = tmp_path / "broken.logicx"
     project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(
@@ -118,6 +120,7 @@ def test_cli_writes_report_when_parse_fails(tmp_path, monkeypatch, capsys):
 def test_cli_writes_report_when_generation_fails(tmp_path, monkeypatch, capsys):
     project_path = tmp_path / "project.logicx"
     project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(
@@ -150,6 +153,7 @@ def test_cli_writes_report_when_generation_fails(tmp_path, monkeypatch, capsys):
 def test_cli_writes_report_when_mixer_overrides_fail(tmp_path, monkeypatch, capsys):
     project_path = tmp_path / "project.logicx"
     project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(
@@ -185,6 +189,7 @@ def test_cli_writes_report_when_mixer_overrides_fail(tmp_path, monkeypatch, caps
 def test_cli_writes_report_when_plugin_matching_fails(tmp_path, monkeypatch, capsys):
     project_path = tmp_path / "project.logicx"
     project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(
@@ -220,6 +225,7 @@ def test_cli_writes_report_when_plugin_matching_fails(tmp_path, monkeypatch, cap
 def test_cli_report_only_fails_cleanly_when_report_write_fails(tmp_path, monkeypatch, capsys):
     project_path = tmp_path / "project.logicx"
     project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(
@@ -248,6 +254,45 @@ def test_cli_report_only_fails_cleanly_when_report_write_fails(tmp_path, monkeyp
 
     assert exit_code == 1
     assert "disk full" in captured.err
+
+
+def test_cli_forward_rejects_als_input(tmp_path, capsys):
+    als_path = tmp_path / "set.als"
+    als_path.write_bytes(b"not really")
+    output_dir = tmp_path / "output"
+
+    exit_code = main(["logic2ableton", str(als_path), "--output", str(output_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Expected a Logic Pro .logicx project" in captured.err
+    report_path = output_dir / "set_conversion_report.txt"
+    assert report_path.exists()
+    assert "Stage: validation" in report_path.read_text(encoding="utf-8")
+
+
+def test_cli_forward_rejects_unstructured_logicx(tmp_path, capsys):
+    project_path = tmp_path / "empty.logicx"
+    project_path.mkdir()
+    output_dir = tmp_path / "output"
+
+    exit_code = main([str(project_path), "--output", str(output_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "does not look like a Logic project" in captured.err
+
+
+def test_cli_reverse_rejects_logicx_input(tmp_path, capsys):
+    project_path = tmp_path / "song.logicx"
+    project_path.mkdir()
+    output_dir = tmp_path / "output"
+
+    exit_code = main(["ableton2logic", str(project_path), "--output", str(output_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Expected an Ableton .als Live Set" in captured.err
 
 
 @pytest.mark.needs_test_project

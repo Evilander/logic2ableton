@@ -58,8 +58,40 @@ def _build_failure_report(mode: str, input_path: Path, stage: str, error: str) -
     )
 
 
+def _validate_logic_input(path: Path) -> str | None:
+    """Return a human-readable reason the path is not a usable Logic project, or None."""
+    if path.suffix.lower() != ".logicx":
+        return (
+            f"Expected a Logic Pro .logicx project but got '{path.name}'. "
+            "Use ableton2logic for Ableton .als Live Sets."
+        )
+    if not path.is_dir():
+        return f"'{path.name}' is not a readable Logic project package."
+    has_alternatives = (path / "Alternatives").is_dir()
+    has_info = (path / "Resources" / "ProjectInformation.plist").is_file()
+    if not has_alternatives and not has_info:
+        return (
+            f"'{path.name}' does not look like a Logic project "
+            "(missing Alternatives/ and Resources/ProjectInformation.plist)."
+        )
+    return None
+
+
+def _validate_ableton_input(path: Path) -> str | None:
+    """Return a human-readable reason the path is not a usable Live Set, or None."""
+    if path.suffix.lower() != ".als":
+        return (
+            f"Expected an Ableton .als Live Set but got '{path.name}'. "
+            "Use logic2ableton for Logic .logicx projects."
+        )
+    if not path.is_file():
+        return f"'{path.name}' is not a readable .als file."
+    return None
+
+
 def _progress_for_stage(stage: str) -> float:
     return {
+        "validation": 0.05,
         "parsing": 0.1,
         "mixer": 0.3,
         "plugins": 0.4,
@@ -201,6 +233,17 @@ def _run_forward(args: argparse.Namespace) -> int:
             return 1
         print(f"Error: {message}", file=sys.stderr)
         return 1
+
+    validation_error = _validate_logic_input(logicx_path)
+    if validation_error:
+        return _emit_failure(
+            mode=FORWARD_MODE,
+            output_dir=output_dir,
+            input_path=logicx_path,
+            stage="validation",
+            error=validation_error,
+            jp=jp,
+        )
 
     if jp:
         _emit("parsing", 0.1, f"Parsing {logicx_path.name}...", direction=FORWARD_MODE)
@@ -423,6 +466,18 @@ def _run_reverse(args: argparse.Namespace) -> int:
             return 1
         print(f"Error: {message}", file=sys.stderr)
         return 1
+
+    validation_error = _validate_ableton_input(als_path)
+    if validation_error:
+        return _emit_failure(
+            mode=REVERSE_MODE,
+            output_dir=output_dir,
+            input_path=als_path,
+            stage="validation",
+            error=validation_error,
+            jp=jp,
+            report_suffix="_logic_transfer_report.txt",
+        )
 
     if jp:
         _emit("parsing", 0.1, f"Parsing {als_path.name}...", direction=REVERSE_MODE)
