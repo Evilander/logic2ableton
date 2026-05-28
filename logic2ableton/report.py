@@ -88,6 +88,16 @@ def generate_report(project: LogicProject, plugin_matches: list[PluginMatch]) ->
         lines.append(f"    -> Suggested: {suggestions}")
     lines.append("")
 
+    midi_tracks = [t for t in project.midi_tracks if t.note_count > 0]
+    if midi_tracks:
+        lines.append(
+            f"MIDI TRACKS EXTRACTED ({len(midi_tracks)}, {project.total_midi_notes} notes):"
+        )
+        for i, track in enumerate(midi_tracks, 1):
+            lines.append(f"  {i}. {track.name} - {track.note_count} note(s)")
+        lines.append("  Exported as Standard MIDI files in the MIDI/ folder; import them into Ableton.")
+        lines.append("")
+
     lines.append("COMPATIBILITY WARNINGS:")
     if project.compatibility_warnings:
         for warning in project.compatibility_warnings:
@@ -97,13 +107,7 @@ def generate_report(project: LogicProject, plugin_matches: list[PluginMatch]) ->
     lines.append("")
 
     lines.append("NOT TRANSFERRED:")
-    if project.software_instrument_files:
-        lines.append(
-            f"  - MIDI notes and software instruments ({project.software_instrument_files} instrument "
-            "file(s) referenced); Logic-to-Ableton transfers audio only"
-        )
-    else:
-        lines.append("  - MIDI notes and software instruments (Logic-to-Ableton transfers audio only)")
+    lines.append("  - Software instruments and MIDI effects (MIDI notes export to MIDI/, but reload the instruments in Ableton)")
     lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
     lines.append("  - Automation data (requires deeper binary parsing)")
     lines.append("  - Bus/send routing (recreate manually in Ableton)")

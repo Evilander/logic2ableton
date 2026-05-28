@@ -40,6 +40,25 @@ class PluginInstance:
 
 
 @dataclass
+class LogicMidiNote:
+    """A MIDI note decoded from Logic's binary ProjectData (960 PPQ, beats)."""
+    pitch: int              # 0-127
+    start_beats: float      # relative to the earliest note in the project
+    duration_beats: float
+    velocity: int           # 1-127
+
+
+@dataclass
+class LogicMidiTrack:
+    name: str
+    notes: list[LogicMidiNote] = field(default_factory=list)
+
+    @property
+    def note_count(self) -> int:
+        return len(self.notes)
+
+
+@dataclass
 class LogicProject:
     name: str
     tempo: float
@@ -54,7 +73,12 @@ class LogicProject:
     metadata_track_count: int = 0
     metadata_audio_files: list[str] = field(default_factory=list)
     software_instrument_files: int = 0
+    midi_tracks: list[LogicMidiTrack] = field(default_factory=list)
     compatibility_warnings: list[str] = field(default_factory=list)
+
+    @property
+    def total_midi_notes(self) -> int:
+        return sum(track.note_count for track in self.midi_tracks)
 
 
 @dataclass

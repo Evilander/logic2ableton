@@ -35,6 +35,7 @@ The product goal is speed with evidence. Every run produces a report so users ca
 - Tempo and time signature
 - Overlap resolution for takes and comp bounces
 - Distinct per-track colors, with arrangement clips matching their track color
+- MIDI note extraction from Logic's binary project data, exported as Standard MIDI files (pitch, velocity, position, and duration)
 - Optional mixer overrides from JSON
 - Plugin identification with VST3 suggestions in the report
 
@@ -58,7 +59,8 @@ The product goal is speed with evidence. Every run produces a report so users ca
 
 ### Logic to Ableton
 
-- MIDI and software instrument tracks are not recreated
+- MIDI notes are extracted to importable `.mid` files in `MIDI/`, but the software instruments, their settings, and MIDI effects are not recreated
+- Notes export relative to the earliest note in the project; place the imported regions on the Ableton timeline as needed
 - Automation is not recreated
 - Bus and send routing are not recreated
 - Plugin parameters are not recreated
@@ -238,6 +240,8 @@ output/
     Samples/
       Imported/
         *.wav / *.aif / *.aiff / *.mp3 / *.m4a
+    MIDI/
+      01 - MIDI 1.mid
   MySong_conversion_report.txt
 ```
 

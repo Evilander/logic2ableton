@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from logic2ableton.logic_parser import load_mixer_overrides, parse_logic_project
 from logic2ableton.logic_transfer import build_logic_transfer_report, generate_logic_transfer
 from logic2ableton.plugin_matcher import match_plugins
 from logic2ableton.report import generate_report
+from logic2ableton.smf import build_midi_note_file
 from logic2ableton.vst3_scanner import default_vst3_path
 
 FORWARD_MODE = "logic2ableton"
@@ -56,6 +58,27 @@ def _build_failure_report(mode: str, input_path: Path, stage: str, error: str) -
             error,
         ]
     )
+
+
+def _export_logic_midi(project, project_folder: Path) -> int:
+    """Write extracted Logic MIDI tracks as importable .mid files. Returns file count."""
+    tracks = [t for t in project.midi_tracks if t.note_count > 0]
+    if not tracks:
+        return 0
+    midi_dir = project_folder / "MIDI"
+    midi_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for index, track in enumerate(tracks, start=1):
+        safe = re.sub(r"[^\w.\- ]+", "_", track.name).strip() or f"midi_{index:02d}"
+        data = build_midi_note_file(
+            track,
+            tempo=project.tempo,
+            numerator=project.time_sig_numerator,
+            denominator=project.time_sig_denominator,
+        )
+        (midi_dir / f"{index:02d} - {safe}.mid").write_bytes(data)
+        written += 1
+    return written
 
 
 def _validate_logic_input(path: Path) -> str | None:
@@ -406,6 +429,12 @@ def _run_forward(args: argparse.Namespace) -> int:
             compatibility_warnings=project.compatibility_warnings,
         )
 
+    midi_files = 0
+    try:
+        midi_files = _export_logic_midi(project, als_path.parent)
+    except OSError:
+        midi_files = 0
+
     if jp:
         _emit(
             "complete",
@@ -419,10 +448,14 @@ def _run_forward(args: argparse.Namespace) -> int:
             tracks=len(project.track_names),
             clips=len(project.audio_files),
             audio_files=len(project.audio_files),
+            midi_tracks=midi_files,
+            midi_notes=project.total_midi_notes,
             compatibility_warnings=project.compatibility_warnings,
         )
     else:
         print(f"  Created: {als_path}")
+        if midi_files:
+            print(f"  MIDI: {midi_files} track(s) ({project.total_midi_notes} notes) -> {als_path.parent / 'MIDI'}")
 
     saved, report_note = _persist_report_with_note(report_path, report)
     if not saved:

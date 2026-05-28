@@ -4,7 +4,18 @@ import re
 import struct
 from pathlib import Path
 
-from logic2ableton.models import AudioFileRef, LogicProject, PluginInstance, TrackMixerState, parse_audio_filename
+import bisect
+
+from logic2ableton.models import (
+    AudioFileRef,
+    LogicMidiNote,
+    LogicMidiTrack,
+    LogicProject,
+    PluginInstance,
+    TrackMixerState,
+    parse_audio_filename,
+)
+from logic2ableton.smf import MIDI_TICKS_PER_QUARTER
 
 
 def parse_project_info(logicx_path: Path) -> dict:
@@ -143,6 +154,75 @@ def extract_plugins(logicx_path: Path, alternative: int = 0, *, _data: bytes | N
             raw_plist=parsed,
         ))
     return plugins
+
+
+# Logic stores arrangement MIDI inside EvSq ("qSvE") chunks of ProjectData. Each
+# note is a fixed record anchored by this 15-byte signature that follows the
+# [velocity][pitch] bytes; the format was reverse-engineered against ground-truth
+# projects (verified pitch, velocity, position, and duration).
+_MIDI_NOTE_SIGNATURE = bytes([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0x89, 0, 0, 0, 0])
+
+
+def extract_midi_notes(
+    logicx_path: Path,
+    alternative: int = 0,
+    *,
+    _data: bytes | None = None,
+) -> list[LogicMidiTrack]:
+    """Extract MIDI note sequences from Logic's binary ProjectData.
+
+    Notes are grouped by the EvSq sequence (region) they belong to and timed in
+    beats relative to the earliest note in the project, so inter-region timing is
+    preserved. Returns one LogicMidiTrack per note-bearing sequence.
+    """
+    data = _data if _data is not None else _read_project_data(logicx_path, alternative)
+    if not data:
+        return []
+
+    seq_offsets: list[int] = []
+    pos = 0
+    while (pos := data.find(b"qSvE", pos)) >= 0:
+        seq_offsets.append(pos)
+        pos += 4
+
+    raw: dict[int, list[tuple[int, int, int, int]]] = {}  # seq_offset -> (pitch, vel, pos_ticks, dur_ticks)
+    i = 0
+    while (i := data.find(_MIDI_NOTE_SIGNATURE, i)) >= 0:
+        i += 15
+        if i < 24:
+            continue
+        velocity = data[i - 17]
+        pitch = data[i - 16]
+        duration = struct.unpack_from("<I", data, i)[0]
+        position = struct.unpack_from("<I", data, i - 24)[0]
+        # Guard against false signature matches with out-of-range values.
+        if not (0 <= pitch <= 127 and 1 <= velocity <= 127):
+            continue
+        if duration <= 0 or duration > 1_000_000_000 or position > 1_000_000_000:
+            continue
+        seq_index = bisect.bisect_right(seq_offsets, i) - 1
+        seq_key = seq_offsets[seq_index] if seq_index >= 0 else -1
+        raw.setdefault(seq_key, []).append((pitch, velocity, position, duration))
+
+    if not raw:
+        return []
+
+    global_min = min(p for notes in raw.values() for (_, _, p, _) in notes)
+    tracks: list[LogicMidiTrack] = []
+    for index, seq_key in enumerate(sorted(raw), start=1):
+        notes = []
+        for pitch, velocity, position, duration in raw[seq_key]:
+            notes.append(
+                LogicMidiNote(
+                    pitch=pitch,
+                    start_beats=(position - global_min) / MIDI_TICKS_PER_QUARTER,
+                    duration_beats=duration / MIDI_TICKS_PER_QUARTER,
+                    velocity=velocity,
+                )
+            )
+        notes.sort(key=lambda note: (note.start_beats, note.pitch))
+        tracks.append(LogicMidiTrack(name=f"MIDI {index}", notes=notes))
+    return tracks
 
 
 def _get_bwf_time_reference(file_path: Path) -> int | None:
@@ -471,10 +551,9 @@ def _build_compatibility_warnings(
     instrument_files = meta.get("software_instrument_files", 0)
     if instrument_files:
         warnings.append(
-            f"This project references {instrument_files} software-instrument file(s), so it likely "
-            "contains MIDI/instrument tracks. Logic-to-Ableton transfers audio only — MIDI notes and "
-            "software instruments are not recreated. (The reverse direction, ableton2logic, does "
-            "transfer MIDI notes.)"
+            f"This project references {instrument_files} software-instrument file(s). MIDI notes are "
+            "extracted to the MIDI/ folder as importable Standard MIDI files, but the software "
+            "instruments and their settings are not transferred — reload them manually in Ableton."
         )
 
     return warnings
@@ -495,6 +574,7 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
     # Read ProjectData once, share across extractors.
     project_data = _read_project_data(logicx_path, alternative)
     plugins = extract_plugins(logicx_path, alternative, _data=project_data)
+    midi_tracks = extract_midi_notes(logicx_path, alternative, _data=project_data)
     regions = extract_regions(logicx_path, alternative, _data=project_data)
     for ref in audio_files:
         ref.start_position_samples = regions.get(ref.filename, 0)
@@ -521,5 +601,6 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
         metadata_track_count=meta["num_tracks"],
         metadata_audio_files=meta["audio_files"],
         software_instrument_files=meta["software_instrument_files"],
+        midi_tracks=midi_tracks,
         compatibility_warnings=compatibility_warnings,
     )
