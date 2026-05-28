@@ -203,6 +203,7 @@ def _make_audio_clip_xml(
     time_sig_numerator: int,
     time_sig_denominator: int,
     project_folder: Path | None = None,
+    color: int = 0,
 ) -> ET.Element:
     """Create an AudioClip element for arrangement view.
 
@@ -238,7 +239,8 @@ def _make_audio_clip_xml(
     # Name (stem without extension)
     clip_name = ref.filename.rsplit(".", 1)[0]
     _val(clip, "Name", clip_name)
-    _val(clip, "Color", "0")
+    # Match the clip color to its track so the arrangement reads cleanly.
+    _val(clip, "Color", str(color))
     _val(clip, "Disabled", "false")
     _val(clip, "IsWarped", "true")
 
@@ -387,6 +389,7 @@ def _inject_clips_into_track(
     time_sig_numerator: int,
     time_sig_denominator: int,
     project_folder: Path | None = None,
+    color: int = 0,
 ) -> None:
     """Inject AudioClip elements into a track's arrangement view.
 
@@ -430,6 +433,7 @@ def _inject_clips_into_track(
             time_sig_numerator=time_sig_numerator,
             time_sig_denominator=time_sig_denominator,
             project_folder=project_folder,
+            color=color,
         )
         events.append(clip_elem)
 
@@ -514,6 +518,7 @@ def generate_als(
             project.time_sig_numerator,
             project.time_sig_denominator,
             project_folder,
+            color=color,
         )
 
         # Apply mixer values when present.

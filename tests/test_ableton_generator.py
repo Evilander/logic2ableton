@@ -446,3 +446,58 @@ def test_generate_als_with_custom_template(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     als_path = generate_als(project, tmp_path / "output", copy_audio=False, template_path=real_template)
     assert als_path.exists()
+
+
+def _write_wav(path: Path, frames: int = 44100) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as h:
+        h.setnchannels(1)
+        h.setsampwidth(2)
+        h.setframerate(44100)
+        h.writeframes(b"\x00\x00" * frames)
+    return path
+
+
+def test_generated_clip_color_matches_track(tmp_path):
+    """Each arrangement clip should carry its track's color (Reddit request)."""
+    media = tmp_path / "media"
+    refs = []
+    for name in ("Drums", "Bass", "Vocals"):
+        wav = _write_wav(media / f"{name}.wav")
+        refs.append(
+            AudioFileRef(
+                filename=f"{name}.wav",
+                track_name=name,
+                take_number=0,
+                is_comp=False,
+                comp_name="",
+                file_path=wav,
+            )
+        )
+    project = LogicProject(
+        name="Colors",
+        tempo=120.0,
+        time_sig_numerator=4,
+        time_sig_denominator=4,
+        sample_rate=44100,
+        audio_files=refs,
+        plugins=[],
+        track_names=["Drums", "Bass", "Vocals"],
+        alternative=0,
+    )
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    tracks = root.findall(".//Tracks/AudioTrack")
+    assert len(tracks) == 3
+    saw_clip = False
+    for track in tracks:
+        track_color = track.find("Color").get("Value")
+        for clip in track.findall(".//Events/AudioClip"):
+            saw_clip = True
+            assert clip.find("Color").get("Value") == track_color
+    assert saw_clip, "expected at least one arrangement clip"
+    # Distinct tracks should not all share color 0.
+    colors = {t.find("Color").get("Value") for t in tracks}
+    assert len(colors) > 1

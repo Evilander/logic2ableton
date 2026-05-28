@@ -34,6 +34,7 @@ The product goal is speed with evidence. Every run produces a report so users ca
 - Timeline placement from bundled WAV BWF timestamps and Logic AIFF `MARK` chunks
 - Tempo and time signature
 - Overlap resolution for takes and comp bounces
+- Distinct per-track colors, with arrangement clips matching their track color
 - Optional mixer overrides from JSON
 - Plugin identification with VST3 suggestions in the report
 
