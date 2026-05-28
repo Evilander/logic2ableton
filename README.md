@@ -100,8 +100,14 @@ Download the latest installer or portable build from GitHub Releases:
 
 Notes:
 
-- macOS builds are unsigned. Gatekeeper may require opening them manually the first time.
-- Intel macOS users currently need a self-hosted packaging flow or a local source build.
+- macOS builds are ad-hoc signed but not notarized, so Gatekeeper quarantines them on first download. If macOS says the app "is damaged and can't be opened," clear the quarantine flag once after copying it to Applications:
+
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/Logic Ableton Transfer.app"
+  ```
+
+  Alternatively, right-click the app and choose **Open**, then confirm in the dialog.
+- Intel macOS users currently need a self-hosted packaging flow or a local source build (release DMGs are Apple Silicon only).
 - The desktop app bundles the converter binary, so end users do not need Python installed.
 
 ### Install from PyPI
