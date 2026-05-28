@@ -91,6 +91,8 @@ export default function App() {
           audioFiles: event.audio_files || 0,
           plugins: event.plugins,
           locators: event.locators,
+          midiTracks: event.midi_tracks,
+          midiNotes: event.midi_notes,
           report: event.report || "",
         })
         setPreviewLoading(false)
@@ -188,6 +190,8 @@ export default function App() {
             clips: event.clips || 0,
             audioFiles: event.audio_files || 0,
             locators: event.locators,
+            midiTracks: event.midi_tracks,
+            midiNotes: event.midi_notes,
           })
           state.setView("complete")
 

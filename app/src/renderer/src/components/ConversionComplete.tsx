@@ -48,6 +48,12 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
   const primaryActionLabel = isForward ? "Open in Ableton" : "Open Logic Import Guide"
   const title = isForward ? "Conversion Complete" : "Logic Import Package Ready"
   const reportLabel = isForward ? "conversion report" : "transfer report"
+  const hasMidi = (result.midiNotes ?? 0) > 0
+  const thirdStat = isForward
+    ? { value: result.audioFiles, label: "audio files" }
+    : hasMidi
+      ? { value: result.midiNotes ?? 0, label: "MIDI notes" }
+      : { value: result.locators ?? 0, label: "locators" }
 
   return (
     <div className="flex-1 flex items-center justify-center p-8">
@@ -78,12 +84,8 @@ export default function ConversionComplete({ result, error, onConvertAnother }: 
               <div className="text-xs text-text-secondary">clips</div>
             </div>
             <div>
-              <div className="text-lg font-semibold font-mono">
-                {isForward ? result.audioFiles : result.locators ?? 0}
-              </div>
-              <div className="text-xs text-text-secondary">
-                {isForward ? "audio files" : "locators"}
-              </div>
+              <div className="text-lg font-semibold font-mono">{thirdStat.value}</div>
+              <div className="text-xs text-text-secondary">{thirdStat.label}</div>
             </div>
           </div>
 

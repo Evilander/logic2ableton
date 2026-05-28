@@ -570,6 +570,8 @@ def _run_reverse(args: argparse.Namespace) -> int:
                 clips=len(project.clips),
                 audio_files=len(project.clips),
                 locators=len(project.locators),
+                midi_tracks=midi_track_count,
+                midi_notes=project.total_midi_notes,
                 compatibility_warnings=project.compatibility_warnings,
             )
         else:

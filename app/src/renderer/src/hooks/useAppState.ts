@@ -11,6 +11,8 @@ export interface PreviewData {
   audioFiles: number
   plugins?: number
   locators?: number
+  midiTracks?: number
+  midiNotes?: number
   report: string
 }
 
@@ -22,6 +24,8 @@ export interface ConversionResult {
   clips: number
   audioFiles: number
   locators?: number
+  midiTracks?: number
+  midiNotes?: number
 }
 
 export interface ConversionRecord {

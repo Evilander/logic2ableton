@@ -1,4 +1,4 @@
-import { FolderOpen, MapPin, MusicNote, Plugs, Waveform, ArrowRight } from "@phosphor-icons/react"
+import { FolderOpen, MapPin, MusicNote, MusicNotes, Plugs, Waveform, ArrowRight } from "@phosphor-icons/react"
 import { motion } from "motion/react"
 import type { PreviewData } from "../hooks/useAppState"
 
@@ -38,6 +38,7 @@ export default function ProjectPreview({
   }
 
   const isForward = preview.direction === "logic2ableton"
+  const hasMidi = (preview.midiNotes ?? 0) > 0
   const cards = isForward
     ? [
         { label: "Tracks", value: preview.tracks, icon: MusicNote },
@@ -45,9 +46,11 @@ export default function ProjectPreview({
         { label: "Plugins", value: preview.plugins ?? 0, icon: Plugs },
       ]
     : [
-        { label: "Tracks", value: preview.tracks, icon: MusicNote },
+        { label: "Audio Tracks", value: preview.tracks, icon: MusicNote },
         { label: "Clips", value: preview.clips, icon: Waveform },
-        { label: "Locators", value: preview.locators ?? 0, icon: MapPin },
+        hasMidi
+          ? { label: "MIDI Notes", value: preview.midiNotes ?? 0, icon: MusicNotes }
+          : { label: "Locators", value: preview.locators ?? 0, icon: MapPin },
       ]
 
   return (
