@@ -3,14 +3,19 @@
 [![PyPI version](https://img.shields.io/pypi/v/logic2ableton)](https://pypi.org/project/logic2ableton/)
 [![Python 3.11+](https://img.shields.io/pypi/pyversions/logic2ableton)](https://pypi.org/project/logic2ableton/)
 [![License: MIT](https://img.shields.io/pypi/l/logic2ableton)](https://github.com/Evilander/logic2ableton/blob/master/LICENSE)
-Version 2.0 turns this project into a dual-direction transfer toolkit for Logic Pro and Ableton Live.
 
-It ships two production workflows in the same repo, the same desktop app, and the same release train:
+**Move a project between Logic Pro and Ableton Live — in both directions.** logic2ableton reads Logic's proprietary, undocumented project format and rebuilds your session in the other DAW: audio placed on the timeline, tempo, time signature, per-track colors, and note-accurate MIDI.
 
-- `logic2ableton`: convert Logic Pro projects into Ableton Live sets
-- `ableton2logic`: turn Ableton Live sets into Logic-ready transfer packages
+> **Wait — how is that possible?** Logic stores its MIDI in an undocumented binary blob with no public spec. So I reverse-engineered it — and verified the decode against Apple's own shipping demo songs.
+>
+> 📖 **[Read the deep-dive: reverse-engineering Logic's binary format →](docs/reverse-engineering-logic-pro-midi.md)**
 
-The product goal is speed with evidence. Every run produces a report so users can see exactly what transferred cleanly, what needs manual cleanup, and where the source project exceeds what a cross-DAW workflow can preserve.
+It ships two production workflows in one repo, one desktop app, and one release train:
+
+- `logic2ableton` — convert Logic Pro projects into Ableton Live sets
+- `ableton2logic` — turn Ableton Live sets into Logic-ready transfer packages
+
+The product goal is **speed with evidence**: every run emits a report showing exactly what transferred cleanly, what needs manual cleanup, and where the source project exceeds what any cross-DAW workflow can preserve.
 
 ## Why Use It
 
