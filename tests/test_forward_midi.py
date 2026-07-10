@@ -1,11 +1,12 @@
 """Tests for forward-lane MIDI extraction from Logic ProjectData and .mid export."""
 
+import plistlib
 import struct
 from pathlib import Path
 
 import pytest
 
-from logic2ableton.logic_parser import _MIDI_NOTE_SIGNATURE, extract_midi_notes
+from logic2ableton.logic_parser import _MIDI_NOTE_SIGNATURE, extract_midi_notes, parse_logic_project
 from logic2ableton.models import LogicMidiNote, LogicMidiTrack, LogicProject
 from logic2ableton.cli import _export_logic_midi
 
@@ -72,6 +73,63 @@ def test_extract_midi_notes_rejects_out_of_range():
 
 def test_extract_midi_notes_empty():
     assert extract_midi_notes(Path("/x.logicx"), _data=b"") == []
+
+
+def test_extract_midi_notes_absolute_placement_for_later_region():
+    """Regions after bar 1 keep their absolute arrangement position (bar-1 anchor = tick 38400)."""
+    data = _project_data([[(60, 100, 46080, 960)]])  # 38400 + 8 beats * 960
+    warnings: list[str] = []
+    tracks = extract_midi_notes(Path("/x.logicx"), _data=data, warnings=warnings)
+    assert tracks[0].notes[0].start_beats == 8.0
+    assert warnings == []
+
+
+def test_extract_midi_notes_relative_fallback_before_bar1_anchor():
+    """Notes before the bar-1 anchor fall back to relative placement and warn."""
+    data = _project_data([[(60, 100, 20000, 960), (62, 100, 21920, 960)]])
+    warnings: list[str] = []
+    tracks = extract_midi_notes(Path("/x.logicx"), _data=data, warnings=warnings)
+    starts = [n.start_beats for n in tracks[0].notes]
+    assert starts == [0.0, 2.0]
+    assert len(warnings) == 1
+    assert "relative to the earliest note" in warnings[0]
+
+
+def _make_logicx(tmp_path, *, project_data: bytes, sampler_files: list[str] | None = None) -> Path:
+    """Synthesize a minimal .logicx bundle for parser-level tests."""
+    root = tmp_path / "Synth.logicx"
+    (root / "Resources").mkdir(parents=True)
+    (root / "Alternatives" / "000").mkdir(parents=True)
+    with open(root / "Resources" / "ProjectInformation.plist", "wb") as f:
+        plistlib.dump({"VariantNames": {"0": "Synth"}, "ActiveVariant": 0}, f)
+    meta = {
+        "BeatsPerMinute": 120.0,
+        "SampleRate": 44100,
+        "NumberOfTracks": 0,
+        "SamplerInstrumentsFiles": sampler_files or [],
+    }
+    with open(root / "Alternatives" / "000" / "MetaData.plist", "wb") as f:
+        plistlib.dump(meta, f)
+    (root / "Alternatives" / "000" / "ProjectData").write_bytes(project_data)
+    return root
+
+
+def test_parse_warns_when_instruments_present_but_midi_undecodable(tmp_path):
+    """Instrument files without decodable notes must not claim MIDI was exported."""
+    blob = b"qSvE" + b"\x00" * 32 + b"qSvE" + b"\x01" * 32  # sequences, no note records
+    logicx = _make_logicx(tmp_path, project_data=blob, sampler_files=["Piano.exs"])
+    project = parse_logic_project(logicx)
+    assert project.midi_tracks == []
+    assert any("could be decoded" in w and "not transferred" in w for w in project.compatibility_warnings)
+    assert not any("MIDI notes were transferred" in w for w in project.compatibility_warnings)
+
+
+def test_parse_reports_native_midi_when_instruments_and_notes_decodable(tmp_path):
+    blob = _project_data([[(60, 100, 38400, 960)]])
+    logicx = _make_logicx(tmp_path, project_data=blob, sampler_files=["Piano.exs"])
+    project = parse_logic_project(logicx)
+    assert project.total_midi_notes == 1
+    assert any("transferred as native MIDI tracks" in w for w in project.compatibility_warnings)
 
 
 def _read_midi_note_ons(data: bytes):

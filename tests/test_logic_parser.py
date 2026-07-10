@@ -222,6 +222,7 @@ def test_build_compatibility_warnings_for_missing_and_unpositioned_audio(tmp_pat
         },
         refs,
         regions={},
+        midi_tracks=[],
     )
 
     assert any("external.wav" in warning for warning in warnings)
@@ -375,10 +376,15 @@ def test_software_instrument_files_counted():
 
 
 def test_parse_logic_project_flags_instrument_content(tmp_path):
+    # Instrument files present but no decodable MIDI in ProjectData: the
+    # warning must say MIDI was NOT transferred (not claim a MIDI/ export).
     logicx = _make_logicx_with_instruments(tmp_path, ultrabeat=3, alchemy=1)
     project = parse_logic_project(logicx)
     assert project.software_instrument_files == 4
-    assert any("software-instrument" in w and "MIDI/" in w for w in project.compatibility_warnings)
+    assert any(
+        "software-instrument" in w and "not transferred" in w
+        for w in project.compatibility_warnings
+    )
 
 
 def test_parse_logic_project_no_instrument_warning_when_absent(tmp_path):

@@ -162,18 +162,26 @@ def extract_plugins(logicx_path: Path, alternative: int = 0, *, _data: bytes | N
 # projects (verified pitch, velocity, position, and duration).
 _MIDI_NOTE_SIGNATURE = bytes([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0x89, 0, 0, 0, 0])
 
+# Bar 1 of the arrangement sits at tick 38400 (40 quarter notes at 960 PPQ) in
+# every ground-truth project used to crack the note format. Positions at or
+# after this anchor convert to absolute arrangement beats.
+_LOGIC_BAR1_ORIGIN_TICKS = 38400
+
 
 def extract_midi_notes(
     logicx_path: Path,
     alternative: int = 0,
     *,
     _data: bytes | None = None,
+    warnings: list[str] | None = None,
 ) -> list[LogicMidiTrack]:
     """Extract MIDI note sequences from Logic's binary ProjectData.
 
-    Notes are grouped by the EvSq sequence (region) they belong to and timed in
-    beats relative to the earliest note in the project, so inter-region timing is
-    preserved. Returns one LogicMidiTrack per note-bearing sequence.
+    Notes are grouped by the EvSq sequence (region) they belong to. When every
+    note sits at or after Logic's bar-1 tick anchor, notes are placed at their
+    absolute arrangement positions; otherwise placement falls back to
+    relative-to-earliest-note (and a warning is appended when a ``warnings``
+    list is supplied). Returns one LogicMidiTrack per note-bearing sequence.
     """
     data = _data if _data is not None else _read_project_data(logicx_path, alternative)
     if not data:
@@ -208,6 +216,16 @@ def extract_midi_notes(
         return []
 
     global_min = min(p for notes in raw.values() for (_, _, p, _) in notes)
+    if global_min >= _LOGIC_BAR1_ORIGIN_TICKS:
+        origin = _LOGIC_BAR1_ORIGIN_TICKS
+    else:
+        origin = global_min
+        if warnings is not None:
+            warnings.append(
+                "MIDI notes were found before Logic's expected bar-1 anchor, so MIDI regions "
+                "were placed relative to the earliest note instead of at absolute arrangement "
+                "positions - verify their placement after import."
+            )
     tracks: list[LogicMidiTrack] = []
     for index, seq_key in enumerate(sorted(raw), start=1):
         notes = []
@@ -215,7 +233,7 @@ def extract_midi_notes(
             notes.append(
                 LogicMidiNote(
                     pitch=pitch,
-                    start_beats=(position - global_min) / MIDI_TICKS_PER_QUARTER,
+                    start_beats=(position - origin) / MIDI_TICKS_PER_QUARTER,
                     duration_beats=duration / MIDI_TICKS_PER_QUARTER,
                     velocity=velocity,
                 )
@@ -508,6 +526,7 @@ def _build_compatibility_warnings(
     meta: dict,
     audio_files: list[AudioFileRef],
     regions: dict[str, int],
+    midi_tracks: list[LogicMidiTrack],
 ) -> list[str]:
     """Summarize bundle conditions that are likely to produce incomplete conversions."""
     warnings: list[str] = []
@@ -549,11 +568,18 @@ def _build_compatibility_warnings(
         )
 
     instrument_files = meta.get("software_instrument_files", 0)
-    if instrument_files:
+    total_midi_notes = sum(track.note_count for track in midi_tracks)
+    if instrument_files and total_midi_notes:
         warnings.append(
-            f"This project references {instrument_files} software-instrument file(s). MIDI notes are "
-            "extracted to the MIDI/ folder as importable Standard MIDI files, but the software "
-            "instruments and their settings are not transferred — reload them manually in Ableton."
+            f"This project references {instrument_files} software-instrument file(s). MIDI notes were "
+            "transferred as native MIDI tracks (and exported to MIDI/), but the software instruments "
+            "and their settings are not transferred — reload them manually in Ableton."
+        )
+    elif instrument_files:
+        warnings.append(
+            f"This project references {instrument_files} software-instrument file(s), but no MIDI "
+            "notes could be decoded from its binary project data (likely an older Logic save "
+            "format), so MIDI was not transferred."
         )
 
     return warnings
@@ -574,7 +600,8 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
     # Read ProjectData once, share across extractors.
     project_data = _read_project_data(logicx_path, alternative)
     plugins = extract_plugins(logicx_path, alternative, _data=project_data)
-    midi_tracks = extract_midi_notes(logicx_path, alternative, _data=project_data)
+    midi_warnings: list[str] = []
+    midi_tracks = extract_midi_notes(logicx_path, alternative, _data=project_data, warnings=midi_warnings)
     regions = extract_regions(logicx_path, alternative, _data=project_data)
     for ref in audio_files:
         ref.start_position_samples = regions.get(ref.filename, 0)
@@ -586,7 +613,8 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
             seen.add(ref.track_name)
             track_names.append(ref.track_name)
 
-    compatibility_warnings = _build_compatibility_warnings(meta, audio_files, regions)
+    compatibility_warnings = _build_compatibility_warnings(meta, audio_files, regions, midi_tracks)
+    compatibility_warnings.extend(midi_warnings)
 
     return LogicProject(
         name=info["name"],
