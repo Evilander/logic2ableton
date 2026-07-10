@@ -26,6 +26,10 @@ classifiers = [
 [project.scripts]
 logic2ableton = "logic2ableton.cli:main"
 ableton2logic = "logic2ableton.cli:main"
+protools2ableton = "logic2ableton.cli:main"
+protools2logic = "logic2ableton.cli:main"
+ableton2protools = "logic2ableton.cli:main"
+logic2protools = "logic2ableton.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Evilander/logic2ableton"
