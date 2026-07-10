@@ -4,16 +4,21 @@
 [![Python 3.11+](https://img.shields.io/pypi/pyversions/logic2ableton)](https://pypi.org/project/logic2ableton/)
 [![License: MIT](https://img.shields.io/pypi/l/logic2ableton)](https://github.com/Evilander/logic2ableton/blob/master/LICENSE)
 
-**Move a project between Logic Pro and Ableton Live — in both directions.** logic2ableton reads Logic's proprietary, undocumented project format and rebuilds your session in the other DAW: audio placed on the timeline, tempo, time signature, per-track colors, and note-accurate MIDI.
+**Move a project between Logic Pro, Ableton Live, and Pro Tools.** logic2ableton reads the DAWs' proprietary, undocumented session formats and rebuilds your project on the other side: audio placed on the timeline with clip trims intact, tempo, time signature, per-track colors, and note-accurate MIDI that lands as real MIDI tracks.
 
-> **Wait — how is that possible?** Logic stores its MIDI in an undocumented binary blob with no public spec. So I reverse-engineered it — and verified the decode against Apple's own shipping demo songs.
+> **Wait — how is that possible?** Logic stores its MIDI in an undocumented binary blob, and Pro Tools sessions are an obfuscated binary container with no public spec. So they got reverse-engineered — Logic's format verified against Apple's own shipping demo songs, and Pro Tools' against real studio sessions.
 >
-> 📖 **[Read the deep-dive: reverse-engineering Logic's binary format →](docs/reverse-engineering-logic-pro-midi.md)**
+> 📖 **[Deep-dive: reverse-engineering Logic's binary format →](docs/reverse-engineering-logic-pro-midi.md)**
+> 📖 **[Deep-dive: inside the Pro Tools session container →](docs/reverse-engineering-pro-tools-sessions.md)**
 
-It ships two production workflows in one repo, one desktop app, and one release train:
+It ships six production workflows in one repo, one desktop app, and one release train:
 
 - `logic2ableton` — convert Logic Pro projects into Ableton Live sets
 - `ableton2logic` — turn Ableton Live sets into Logic-ready transfer packages
+- `protools2ableton` — convert Pro Tools sessions into Ableton Live sets
+- `protools2logic` — turn Pro Tools sessions into Logic-ready transfer packages
+- `ableton2protools` — turn Ableton Live sets into Pro Tools-ready transfer packages
+- `logic2protools` — turn Logic Pro projects into Pro Tools-ready transfer packages
 
 The product goal is **speed with evidence**: every run emits a report showing exactly what transferred cleanly, what needs manual cleanup, and where the source project exceeds what any cross-DAW workflow can preserve.
 
@@ -28,8 +33,12 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 
 | Workflow | Input | Output | Best For |
 | --- | --- | --- | --- |
-| `logic2ableton` | Logic Pro `.logicx` | Ableton Live `.als` + copied media + conversion report | Moving audio-first Logic sessions into Ableton Arrangement View |
-| `ableton2logic` | Ableton Live `.als` | Logic import package with track stems, timestamped clip WAVs, Logic timeline MIDI, and transfer report | Rebuilding Ableton audio sessions inside Logic with much cleaner layout recovery |
+| `logic2ableton` | Logic Pro `.logicx` | Ableton Live `.als` + native MIDI tracks + copied media + conversion report | Moving Logic sessions into Ableton Arrangement View |
+| `ableton2logic` | Ableton Live `.als` | Logic import package with track stems, timestamped clip WAVs, Logic timeline MIDI, and transfer report | Rebuilding Ableton sessions inside Logic with much cleaner layout recovery |
+| `protools2ableton` | Pro Tools `.ptx` | Ableton Live `.als` with trimmed clips at session positions + native MIDI tracks + conversion report | Opening Pro Tools sessions directly in Ableton |
+| `protools2logic` | Pro Tools `.ptx` | Logic import package with timestamped clip WAVs and MIDI + transfer report | Rebuilding Pro Tools sessions inside Logic |
+| `ableton2protools` | Ableton Live `.als` | Pro Tools import package with spot-to-timestamp WAVs, MIDI files, manifest, and import guide | Handing an Ableton session to a Pro Tools studio |
+| `logic2protools` | Logic Pro `.logicx` | Pro Tools import package with spot-to-timestamp WAVs, MIDI files, manifest, and import guide | Handing a Logic session to a Pro Tools studio |
 
 ## What Works Well
 
@@ -40,7 +49,7 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Tempo and time signature
 - Overlap resolution for takes and comp bounces
 - Distinct per-track colors, with arrangement clips matching their track color
-- MIDI note extraction from Logic's binary project data, exported as Standard MIDI files (pitch, velocity, position, and duration)
+- MIDI notes decoded from Logic's binary project data land as **native Ableton MIDI tracks** inside the `.als` (and as Standard MIDI file exports), placed at their absolute arrangement positions
 - Optional mixer overrides from JSON
 - Plugin identification with VST3 suggestions in the report
 
@@ -60,12 +69,30 @@ The product goal is **speed with evidence**: every run emits a report showing ex
   - `IMPORT_TO_LOGIC.md`
   - a saved transfer report
 
+### Pro Tools to Ableton / Logic
+
+- Reads `.ptx` sessions directly (Pro Tools 10 through current `.ptx` saves, plus legacy `.pts`), including the XOR-obfuscated container
+- Audio clips with their exact source trims (a clip that plays 8.6 s from the middle of a take stays that clip), placed at their session positions
+- Stereo tracks reassembled from Pro Tools' per-channel lanes
+- MIDI notes decoded from the session and created as native Ableton MIDI tracks or Logic-importable MIDI files
+- Session sample rate and format version detection
+- Crossfade render files are recognized and skipped so they don't appear as phantom clips
+
+### Ableton / Logic to Pro Tools
+
+- Pro Tools import package with per-track folders of timestamped WAV clip exports
+- BWF `TimeReference` stamped for Pro Tools' **Spot > Original Time Stamp** workflow (session start `00:00:00:00`, no SMPTE hour offset)
+- One Standard MIDI file per MIDI track
+- `manifest.json`, a transfer report, and a step-by-step `IMPORT GUIDE.txt`
+
 ## Current Limits
 
 ### Logic to Ableton
 
-- MIDI notes are extracted to importable `.mid` files in `MIDI/`, but the software instruments, their settings, and MIDI effects are not recreated
-- Notes export relative to the earliest note in the project; place the imported regions on the Ableton timeline as needed
+- MIDI notes transfer as native MIDI tracks (and `.mid` exports), but the software instruments, their settings, and MIDI effects are not recreated — reload instruments in Ableton
+- MIDI tracks are named `MIDI 1`, `MIDI 2`, ... (binding Logic's track names to its binary note sequences is still being reverse-engineered)
+- Notes placed before Logic's bar-1 anchor fall back to relative placement, with a warning in the report
+- Older Logic save formats store notes in a binary variant this project cannot decode yet; the report says so explicitly instead of pretending
 - Automation is not recreated
 - Bus and send routing are not recreated
 - Plugin parameters are not recreated
@@ -82,6 +109,14 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Tempo and markers are exported into the Logic Timeline MIDI file; do not assume time-signature changes are fully reconstructed unless you verify them in Logic
 - Non-PCM sources that cannot be rendered to timestamped WAV in-process are copied as references and flagged in the report/manifest
 - The transfer package covers audio and MIDI; use the stems and MIDI files first, then clip exports and the manifest if you need finer reconstruction
+
+### Pro Tools lanes
+
+- **Session tempo is not recoverable from `.ptx` yet.** Audio positions are sample-exact regardless, but beat positions are computed at an assumed tempo (default 120 BPM, override with `--tempo`). Keep the destination set at that tempo, or pass the real session BPM
+- Plugins, inserts, sends, automation, clip gain, and fades are not transferred; crossfade renders are skipped
+- Elastic Audio state is not reconstructed; clips reference their source audio directly
+- The source session's `Audio Files/` folder must sit next to the `.ptx` for media to be copied
+- MIDI regions anchor to their first note (a leading-silence offset inside a region is not preserved)
 
 If a project lands imperfectly, the first thing to inspect is the generated report. It is the primary support artifact for this project.
 
@@ -151,14 +186,13 @@ logic2ableton --version
 ### Desktop Workflow
 
 1. Launch the app.
-2. Choose `Logic to Ableton` or `Ableton to Logic`.
-3. Drop a `.logicx` or `.als` file into the window.
-4. Review the preview and select an output directory.
-5. Run the transfer and inspect the report if anything looks off.
+2. Drop any session file — `.logicx`, `.als`, or `.ptx` — into the window; the app detects the source DAW.
+3. Pick the destination DAW and review the preview.
+4. Select an output directory, run the transfer, and inspect the report if anything looks off.
 
 ### CLI Workflow
 
-Choose the command that matches the source DAW:
+Choose the command that matches the route:
 
 Logic to Ableton:
 
@@ -172,6 +206,25 @@ Ableton to Logic:
 ableton2logic "/path/to/MySet.als" --output ./output
 ```
 
+Pro Tools to Ableton (pass the session tempo so beat positions line up):
+
+```bash
+protools2ableton "/path/to/MySession.ptx" --output ./output --tempo 128
+```
+
+Pro Tools to Logic:
+
+```bash
+protools2logic "/path/to/MySession.ptx" --output ./output --tempo 128
+```
+
+Ableton or Logic to Pro Tools:
+
+```bash
+ableton2protools "/path/to/MySet.als" --output ./output
+logic2protools "/path/to/MySong.logicx" --output ./output
+```
+
 Fastest Logic import after the package is created:
 
 1. Open `IMPORT_TO_LOGIC.md`.
@@ -179,10 +232,11 @@ Fastest Logic import after the package is created:
 3. Drag `Track Stems/*.wav` into Logic starting at bar 1.
 4. Use `Audio Files/` only when you want clip-level reconstruction instead of full-track stems.
 
-The original `logic2ableton` command also auto-detects `.als` input:
+The original `logic2ableton` command also auto-detects `.als` and `.ptx` input:
 
 ```bash
-logic2ableton "/path/to/MySet.als" --output ./output
+logic2ableton "/path/to/MySet.als" --output ./output      # runs ableton2logic
+logic2ableton "/path/to/MySession.ptx" --output ./output  # runs protools2ableton
 ```
 
 Preview-only / report-only:
@@ -218,7 +272,7 @@ ableton2logic "/path/to/MySet.als" --output ./output --json-progress
 | Option | Description |
 | --- | --- |
 | `--version`, `-V` | Show version |
-| `--mode` | Force `logic2ableton` or `ableton2logic` |
+| `--mode` | Force any of the six lane names (`logic2ableton`, `ableton2logic`, `protools2ableton`, `protools2logic`, `ableton2protools`, `logic2protools`) |
 | `--output`, `-o` | Output directory |
 | `--report-only` | Write the transfer report without generating output files |
 | `--no-copy` | Do not copy audio files into the generated project/package |
@@ -228,20 +282,26 @@ ableton2logic "/path/to/MySet.als" --output ./output --json-progress
 
 | Option | Description |
 | --- | --- |
-| `--alternative`, `-a` | Logic alternative index |
-| `--template` | Use a specific `DefaultLiveSet.als` |
+| `--alternative`, `-a` | Logic alternative index (also on `logic2protools`) |
+| `--template` | Use a specific `DefaultLiveSet.als` (also on `protools2ableton`) |
 | `--vst3-path` | Override the VST3 scan directory |
 | `--mixer` | Apply mixer overrides from JSON |
 | `--generate-mixer-template` | Write a starter `mixer_overrides.json` |
 
+### Pro Tools Imports Only
+
+| Option | Description |
+| --- | --- |
+| `--tempo` | Tempo (BPM) used to convert sample positions to beats; `.ptx` does not expose its tempo yet (default 120) |
+
 ## Output Layout
 
-### Logic to Ableton
+### Logic (or Pro Tools) to Ableton
 
 ```text
 output/
   MySong Project/
-    MySong.als
+    MySong.als            <- audio tracks + native MIDI tracks
     Samples/
       Imported/
         *.wav / *.aif / *.aiff / *.mp3 / *.m4a
@@ -273,6 +333,23 @@ output/
     MySet_logic_transfer_report.txt
 ```
 
+### Ableton (or Logic) to Pro Tools
+
+```text
+output/
+  MySet Pro Tools Transfer/
+    Audio Files/
+      01 - Drums/
+        001 - Kick Loop - *.wav   <- BWF TimeReference stamped for Spot > Original Time Stamp
+      02 - Vocals/
+    MIDI/
+      01 - Bass.mid
+    manifest.json
+    IMPORT GUIDE.txt
+    MySet_protools_transfer_report.txt
+  MySet_protools_transfer_report.txt
+```
+
 ## What "Production Ready" Means Here
 
 - Repeated validation across parser tests, package builds, standalone converter builds, and desktop packaging
@@ -280,7 +357,8 @@ output/
 - Reports emitted on both success and failure paths so support starts with evidence instead of guesswork
 - Desktop app safety rails around approved files, active jobs, and artifact opening
 - Ableton to Logic now ships multiple reconstruction layers instead of a single manifest-only package
-- Both conversion directions ship from the same repo and version together
+- The Pro Tools parser is validated against a real Pro Tools 2023 studio session (96 kHz, comped vocals, stereo lanes) and a synthetic obfuscated fixture that runs in CI
+- All six conversion lanes ship from the same repo and version together
 
 ## Reading The Reports
 
