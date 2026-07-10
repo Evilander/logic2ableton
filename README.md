@@ -378,6 +378,10 @@ Warnings generally mean one of two things:
 
 ## Development
 
+Known deficiencies, open reverse-engineering threads, and the prioritized
+improvement plan live in [HANDOFF.md](HANDOFF.md). Feature phases live in
+[ROADMAP.md](ROADMAP.md).
+
 Run tests:
 
 ```bash
