@@ -455,7 +455,10 @@ def _run_forward(args: argparse.Namespace) -> int:
     else:
         print(f"  Created: {als_path}")
         if midi_files:
-            print(f"  MIDI: {midi_files} track(s) ({project.total_midi_notes} notes) -> {als_path.parent / 'MIDI'}")
+            print(
+                f"  MIDI: {midi_files} native MIDI track(s) ({project.total_midi_notes} notes) "
+                f"created in the set + .mid exports in {als_path.parent / 'MIDI'}"
+            )
 
     saved, report_note = _persist_report_with_note(report_path, report)
     if not saved:

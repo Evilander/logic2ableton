@@ -91,11 +91,14 @@ def generate_report(project: LogicProject, plugin_matches: list[PluginMatch]) ->
     midi_tracks = [t for t in project.midi_tracks if t.note_count > 0]
     if midi_tracks:
         lines.append(
-            f"MIDI TRACKS EXTRACTED ({len(midi_tracks)}, {project.total_midi_notes} notes):"
+            f"MIDI TRACKS TRANSFERRED ({len(midi_tracks)}, {project.total_midi_notes} notes):"
         )
         for i, track in enumerate(midi_tracks, 1):
             lines.append(f"  {i}. {track.name} - {track.note_count} note(s)")
-        lines.append("  Exported as Standard MIDI files in the MIDI/ folder; import them into Ableton.")
+        lines.append(
+            "  Created as native MIDI tracks inside the .als (load instruments manually), "
+            "and exported as Standard MIDI files in the MIDI/ folder."
+        )
         lines.append("")
 
     lines.append("COMPATIBILITY WARNINGS:")
@@ -107,7 +110,7 @@ def generate_report(project: LogicProject, plugin_matches: list[PluginMatch]) ->
     lines.append("")
 
     lines.append("NOT TRANSFERRED:")
-    lines.append("  - Software instruments and MIDI effects (MIDI notes export to MIDI/, but reload the instruments in Ableton)")
+    lines.append("  - Software instruments and MIDI effects (notes become native MIDI tracks, but reload the instruments in Ableton)")
     lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
     lines.append("  - Automation data (requires deeper binary parsing)")
     lines.append("  - Bus/send routing (recreate manually in Ableton)")

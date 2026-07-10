@@ -11,6 +11,7 @@ template tracks, every Id is reassigned using a global counter.
 import copy
 import gzip
 import io
+import math
 import shutil
 import struct
 import sys
@@ -18,7 +19,7 @@ import wave
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from logic2ableton.models import AudioFileRef, LogicProject, TrackMixerState
+from logic2ableton.models import AudioFileRef, LogicMidiTrack, LogicProject, TrackMixerState
 
 
 _EDITIONS = ["Suite", "Trial", "Standard", "Intro", "Lite"]
@@ -438,6 +439,200 @@ def _inject_clips_into_track(
         events.append(clip_elem)
 
 
+def _bar_length_beats(numerator: int, denominator: int) -> float:
+    """Length of one bar in quarter-note beats."""
+    return numerator * 4.0 / max(1, denominator)
+
+
+def _make_midi_clip_xml(
+    allocator: _IdAllocator,
+    midi_track: LogicMidiTrack,
+    time_sig_numerator: int,
+    time_sig_denominator: int,
+    color: int = 0,
+) -> ET.Element:
+    """Create a MidiClip element for arrangement view.
+
+    The element shape mirrors what Ableton Live 12.2/12.3 writes for its own
+    MIDI clips (captured from real Live-saved sets): notes live under
+    Notes > KeyTracks > KeyTrack (one per pitch) > Notes > MidiNoteEvent with
+    clip-local NoteIds, and NoteIdGenerator/NextId holds the next free id.
+    Note times are relative to the clip content origin, which aligns with
+    CurrentStart when StartRelative is 0.
+    """
+    bar = _bar_length_beats(time_sig_numerator, time_sig_denominator)
+    starts = [note.start_beats for note in midi_track.notes]
+    ends = [note.start_beats + note.duration_beats for note in midi_track.notes]
+    clip_start = math.floor(min(starts) / bar) * bar
+    clip_end = max(math.ceil(max(ends) / bar) * bar, clip_start + bar)
+    length = clip_end - clip_start
+
+    clip = ET.Element("MidiClip")
+    clip.set("Id", str(allocator.next()))
+    clip.set("Time", _format_ableton_number(clip_start))
+
+    _val(clip, "LomId", "0")
+    _val(clip, "LomIdView", "0")
+    _val(clip, "CurrentStart", _format_ableton_number(clip_start))
+    _val(clip, "CurrentEnd", _format_ableton_number(clip_end))
+
+    loop = ET.SubElement(clip, "Loop")
+    _val(loop, "LoopStart", "0")
+    _val(loop, "LoopEnd", _format_ableton_number(length))
+    _val(loop, "StartRelative", "0")
+    _val(loop, "LoopOn", "false")
+    _val(loop, "OutMarker", _format_ableton_number(length))
+    _val(loop, "HiddenLoopStart", "0")
+    _val(loop, "HiddenLoopEnd", _format_ableton_number(length))
+
+    _val(clip, "Name", midi_track.name)
+    _val(clip, "Annotation", "")
+    _val(clip, "Color", str(color))
+    _val(clip, "LaunchMode", "0")
+    _val(clip, "LaunchQuantisation", "0")
+
+    ts_outer = ET.SubElement(clip, "TimeSignature")
+    ts_list = ET.SubElement(ts_outer, "TimeSignatures")
+    ts_remote = ET.SubElement(ts_list, "RemoteableTimeSignature")
+    ts_remote.set("Id", str(allocator.next()))
+    _val(ts_remote, "Numerator", str(time_sig_numerator))
+    _val(ts_remote, "Denominator", str(time_sig_denominator))
+    _val(ts_remote, "Time", "0")
+
+    envelopes = ET.SubElement(clip, "Envelopes")
+    ET.SubElement(envelopes, "Envelopes")
+
+    scroller = ET.SubElement(clip, "ScrollerTimePreserver")
+    _val(scroller, "LeftTime", "0")
+    _val(scroller, "RightTime", _format_ableton_number(length))
+
+    time_selection = ET.SubElement(clip, "TimeSelection")
+    _val(time_selection, "AnchorTime", "0")
+    _val(time_selection, "OtherTime", "0")
+
+    _val(clip, "Legato", "false")
+    _val(clip, "Ram", "false")
+
+    groove = ET.SubElement(clip, "GrooveSettings")
+    _val(groove, "GrooveId", "-1")
+
+    _val(clip, "Disabled", "false")
+    _val(clip, "VelocityAmount", "0")
+
+    follow = ET.SubElement(clip, "FollowAction")
+    _val(follow, "FollowTime", "4")
+    _val(follow, "IsLinked", "true")
+    _val(follow, "LoopIterations", "1")
+    _val(follow, "FollowActionA", "4")
+    _val(follow, "FollowActionB", "0")
+    _val(follow, "FollowChanceA", "100")
+    _val(follow, "FollowChanceB", "0")
+    _val(follow, "JumpIndexA", "1")
+    _val(follow, "JumpIndexB", "1")
+    _val(follow, "FollowActionEnabled", "false")
+
+    grid = ET.SubElement(clip, "Grid")
+    _val(grid, "FixedNumerator", "1")
+    _val(grid, "FixedDenominator", "16")
+    _val(grid, "GridIntervalPixel", "20")
+    _val(grid, "Ntoles", "2")
+    _val(grid, "SnapToGrid", "true")
+    _val(grid, "Fixed", "false")
+
+    _val(clip, "FreezeStart", "0")
+    _val(clip, "FreezeEnd", "0")
+    _val(clip, "IsWarped", "true")
+    _val(clip, "TakeId", "1")
+
+    notes_elem = ET.SubElement(clip, "Notes")
+    key_tracks = ET.SubElement(notes_elem, "KeyTracks")
+
+    by_pitch: dict[int, list] = {}
+    for note in midi_track.notes:
+        by_pitch.setdefault(note.pitch, []).append(note)
+
+    note_id = 1
+    for key_index, pitch in enumerate(sorted(by_pitch)):
+        key_track = ET.SubElement(key_tracks, "KeyTrack")
+        key_track.set("Id", str(key_index))
+        kt_notes = ET.SubElement(key_track, "Notes")
+        for note in sorted(by_pitch[pitch], key=lambda n: n.start_beats):
+            event = ET.SubElement(kt_notes, "MidiNoteEvent")
+            event.set("Time", _format_ableton_number(note.start_beats - clip_start))
+            event.set("Duration", _format_ableton_number(note.duration_beats))
+            event.set("Velocity", str(max(1, min(127, note.velocity))))
+            event.set("OffVelocity", "64")
+            event.set("NoteId", str(note_id))
+            note_id += 1
+        _val(key_track, "MidiKey", str(pitch))
+
+    per_note = ET.SubElement(notes_elem, "PerNoteEventStore")
+    ET.SubElement(per_note, "EventLists")
+    ET.SubElement(notes_elem, "NoteProbabilityGroups")
+    group_gen = ET.SubElement(notes_elem, "ProbabilityGroupIdGenerator")
+    _val(group_gen, "NextId", "1")
+    note_gen = ET.SubElement(notes_elem, "NoteIdGenerator")
+    _val(note_gen, "NextId", str(note_id))
+
+    _val(clip, "BankSelectCoarse", "-1")
+    _val(clip, "BankSelectFine", "-1")
+    _val(clip, "ProgramChange", "-1")
+
+    expression_grid = ET.SubElement(clip, "ExpressionGrid")
+    _val(expression_grid, "FixedNumerator", "1")
+    _val(expression_grid, "FixedDenominator", "16")
+    _val(expression_grid, "GridIntervalPixel", "20")
+    _val(expression_grid, "Ntoles", "2")
+    _val(expression_grid, "SnapToGrid", "false")
+    _val(expression_grid, "Fixed", "false")
+
+    return clip
+
+
+def _inject_midi_clip_into_track(
+    track: ET.Element,
+    midi_track: LogicMidiTrack,
+    allocator: _IdAllocator,
+    time_sig_numerator: int,
+    time_sig_denominator: int,
+    color: int = 0,
+) -> None:
+    """Inject one MidiClip with the track's notes into a cloned MidiTrack.
+
+    MIDI arrangement clips live under MainSequencer > ClipTimeable >
+    ArrangerAutomation > Events (audio clips use Sample instead of
+    ClipTimeable).
+    """
+    if not midi_track.notes:
+        return
+
+    main_seq = track.find(".//MainSequencer")
+    if main_seq is None:
+        return
+    clip_timeable = main_seq.find("ClipTimeable")
+    if clip_timeable is None:
+        return
+    arranger = clip_timeable.find("ArrangerAutomation")
+    if arranger is None:
+        return
+    events = arranger.find("Events")
+    if events is None:
+        events = ET.SubElement(arranger, "Events")
+
+    for existing in list(events):
+        events.remove(existing)
+
+    events.append(
+        _make_midi_clip_xml(
+            allocator=allocator,
+            midi_track=midi_track,
+            time_sig_numerator=time_sig_numerator,
+            time_sig_denominator=time_sig_denominator,
+            color=color,
+        )
+    )
+
+
 def generate_als(
     project: LogicProject,
     output_dir: Path,
@@ -474,13 +669,15 @@ def generate_als(
     root = tree.getroot()
     live_set = root.find("LiveSet")
 
-    # Find the template AudioTrack to use as a structural base
+    # Find the template AudioTrack and MidiTrack to use as structural bases
     tracks_elem = live_set.find("Tracks")
     template_audio_track = None
+    template_midi_track = None
     for track in list(tracks_elem):
-        if track.tag == "AudioTrack":
+        if track.tag == "AudioTrack" and template_audio_track is None:
             template_audio_track = track
-            break
+        elif track.tag == "MidiTrack" and template_midi_track is None:
+            template_midi_track = track
 
     if template_audio_track is None:
         raise RuntimeError("No AudioTrack found in Ableton template")
@@ -526,6 +723,28 @@ def generate_als(
             _set_mixer_state(track, project.mixer_state.get(track_name))
 
         tracks_elem.append(track)
+
+    # Create native MIDI tracks from extracted Logic MIDI sequences
+    native_midi_tracks = [t for t in project.midi_tracks if t.note_count > 0]
+    if native_midi_tracks:
+        if template_midi_track is None:
+            project.compatibility_warnings.append(
+                "The Ableton template has no MIDI track to clone, so MIDI tracks were not "
+                "created inside the .als; import the files from MIDI/ manually."
+            )
+        else:
+            for j, midi_track in enumerate(native_midi_tracks):
+                color = (len(project.track_names) + j) % 16
+                track = _clone_track(template_midi_track, allocator, midi_track.name, color)
+                _inject_midi_clip_into_track(
+                    track,
+                    midi_track,
+                    allocator,
+                    project.time_sig_numerator,
+                    project.time_sig_denominator,
+                    color=color,
+                )
+                tracks_elem.append(track)
 
     # Re-add return tracks (must come after audio tracks)
     for rt in return_tracks:
