@@ -3,7 +3,16 @@ import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { app } from "electron"
 
-export type ConversionDirection = "logic2ableton" | "ableton2logic"
+export const CONVERSION_DIRECTIONS = [
+  "logic2ableton",
+  "ableton2logic",
+  "protools2ableton",
+  "protools2logic",
+  "ableton2protools",
+  "logic2protools",
+] as const
+
+export type ConversionDirection = (typeof CONVERSION_DIRECTIONS)[number]
 
 export interface ProgressEvent {
   direction?: ConversionDirection
@@ -55,6 +64,7 @@ export function runConversion(
   onError: (error: string) => void,
   onExit: (code: number) => void,
   reportOnly = false,
+  tempo?: number,
 ): ChildProcess | null {
   let cmd: string
   let baseArgs: string[]
@@ -78,6 +88,9 @@ export function runConversion(
   ]
   if (reportOnly) {
     args.push("--report-only")
+  }
+  if (direction.startsWith("protools2") && tempo !== undefined) {
+    args.push("--tempo", String(tempo))
   }
 
   const cwd = app.isPackaged ? undefined : resolve(__dirname, "../../..")

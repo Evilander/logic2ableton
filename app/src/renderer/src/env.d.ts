@@ -1,6 +1,14 @@
 /// <reference types="vite/client" />
 
-type ConversionDirection = "logic2ableton" | "ableton2logic"
+type ConversionDirection =
+  | "logic2ableton"
+  | "ableton2logic"
+  | "protools2ableton"
+  | "protools2logic"
+  | "ableton2protools"
+  | "logic2protools"
+
+type SourceFormat = "logic" | "ableton" | "protools"
 
 interface ProgressEvent {
   direction?: ConversionDirection
@@ -32,16 +40,27 @@ interface ConversionRecord {
   date: string
   status: "success" | "failed"
   report: string
-  stats?: { tracks: number; clips?: number; audioFiles: number; locators?: number }
+  compatibilityWarnings?: string[]
+  stats?: {
+    tracks: number
+    clips?: number
+    audioFiles: number
+    midiNotes?: number
+  }
 }
 
 interface Window {
   api: {
-    selectSource: (direction: ConversionDirection) => Promise<string | null>
+    selectSource: () => Promise<string | null>
     getPathForFile: (file: File) => string
     selectOutputDir: () => Promise<string | null>
-    startConversion: (direction: ConversionDirection, sourcePath: string, outputDir: string) => Promise<void>
-    startPreview: (direction: ConversionDirection, sourcePath: string) => Promise<void>
+    startConversion: (
+      direction: ConversionDirection,
+      sourcePath: string,
+      outputDir: string,
+      tempo?: number,
+    ) => Promise<void>
+    startPreview: (direction: ConversionDirection, sourcePath: string, tempo?: number) => Promise<void>
     cancelActiveJob: () => Promise<void>
     openFile: (path: string) => Promise<string>
     showInFolder: (path: string) => Promise<void>

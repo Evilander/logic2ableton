@@ -4,13 +4,13 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron"
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, extname, join, normalize } from "node:path"
 import type { ConversionDirection, ProgressEvent } from "./converter"
-import { runConversion } from "./converter"
+import { CONVERSION_DIRECTIONS, runConversion } from "./converter"
 
 interface ConversionStats {
   tracks: number
   clips?: number
   audioFiles: number
-  locators?: number
+  midiNotes?: number
 }
 
 interface ConversionRecord {
@@ -22,11 +22,18 @@ interface ConversionRecord {
   date: string
   status: "success" | "failed"
   report: string
+  compatibilityWarnings?: string[]
   stats?: ConversionStats
+}
+
+type StoredConversionRecord = Omit<ConversionRecord, "direction"> & {
+  direction?: ConversionDirection
 }
 
 const HISTORY_LIMIT = 100
 const ALLOWED_OPEN_EXTENSIONS = new Set([".als", ".txt", ".md", ".json", ".csv"])
+const SUPPORTED_SOURCE_EXTENSIONS = new Set([".logicx", ".als", ".ptx", ".pts"])
+const CONVERSION_DIRECTION_SET = new Set<ConversionDirection>(CONVERSION_DIRECTIONS)
 
 let mainWindow: BrowserWindow | null = null
 let activeJob: { kind: "conversion" | "preview"; child: ChildProcess } | null = null
@@ -76,6 +83,18 @@ function normalizePathInput(filePath: string): string {
   return normalize(filePath.trim())
 }
 
+function isConversionDirection(value: unknown): value is ConversionDirection {
+  return typeof value === "string" && CONVERSION_DIRECTION_SET.has(value as ConversionDirection)
+}
+
+function normalizeTempo(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 20 || value > 999) {
+    throw new Error("Tempo must be a number between 20 and 999 BPM")
+  }
+  return value
+}
+
 function approvePath(filePath: string | null | undefined): void {
   if (!filePath) return
   approvedPaths.add(normalizePathInput(filePath))
@@ -114,6 +133,7 @@ function startJob(
   sourcePath: string,
   outputDir: string,
   reportOnly = false,
+  tempo?: number,
 ): void {
   if (activeJob) {
     throw new Error(`${activeJob.kind === "preview" ? "Preview" : "Conversion"} already in progress`)
@@ -123,13 +143,15 @@ function startJob(
   const errorChannel = kind === "preview" ? "preview-error" : "conversion-error"
   const exitChannel = kind === "preview" ? "preview-exit" : "conversion-exit"
 
-  const child = runConversion(
+  let child: ChildProcess | null = null
+  child = runConversion(
     direction,
     normalizePathInput(sourcePath),
     normalizePathInput(outputDir),
     (progress: ProgressEvent) => {
       approvePath(progress.als_path)
       approvePath(progress.artifact_path)
+      approvePath(progress.package_path)
       approvePath(progress.report_path)
       event.sender.send(progressChannel, progress)
     },
@@ -139,6 +161,7 @@ function startJob(
       event.sender.send(exitChannel, code)
     },
     reportOnly,
+    tempo,
   )
 
   if (!child) return
@@ -151,23 +174,31 @@ function isConversionStats(value: unknown): value is ConversionStats {
   return typeof stats.tracks === "number"
     && typeof stats.audioFiles === "number"
     && (stats.clips === undefined || typeof stats.clips === "number")
-    && (stats.locators === undefined || typeof stats.locators === "number")
+    && (stats.midiNotes === undefined || typeof stats.midiNotes === "number")
 }
 
-function isConversionRecord(value: unknown): value is ConversionRecord {
+function isStoredConversionRecord(value: unknown): value is StoredConversionRecord {
   if (!value || typeof value !== "object") return false
-  const record = value as Partial<ConversionRecord>
+  const record = value as Partial<StoredConversionRecord>
   return typeof record.id === "string"
+    && (record.direction === undefined || isConversionDirection(record.direction))
     && typeof record.projectName === "string"
     && typeof record.inputPath === "string"
     && typeof record.outputPath === "string"
     && typeof record.date === "string"
     && (record.status === "success" || record.status === "failed")
     && typeof record.report === "string"
+    && (record.compatibilityWarnings === undefined
+      || (Array.isArray(record.compatibilityWarnings)
+        && record.compatibilityWarnings.every((warning) => typeof warning === "string")))
     && (record.stats === undefined || isConversionStats(record.stats))
 }
 
-function normalizeRecord(record: ConversionRecord | (Omit<ConversionRecord, "direction"> & { direction?: ConversionDirection })): ConversionRecord {
+function isConversionRecord(value: unknown): value is ConversionRecord {
+  return isStoredConversionRecord(value) && isConversionDirection(value.direction)
+}
+
+function normalizeRecord(record: StoredConversionRecord): ConversionRecord {
   return {
     ...record,
     direction: record.direction ?? "logic2ableton",
@@ -179,7 +210,7 @@ function readHistory(): ConversionRecord[] {
   try {
     const parsed = JSON.parse(readFileSync(historyPath, "utf-8"))
     if (!Array.isArray(parsed)) return []
-    const history = parsed.filter(isConversionRecord).map(normalizeRecord).slice(0, HISTORY_LIMIT)
+    const history = parsed.filter(isStoredConversionRecord).map(normalizeRecord).slice(0, HISTORY_LIMIT)
     for (const record of history) {
       if (record.status === "success") {
         approvePath(record.outputPath)
@@ -222,35 +253,29 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit()
 })
 
-ipcMain.handle("select-source", async (_, direction: ConversionDirection) => {
-  const pickingLogicProject = direction === "logic2ableton"
+ipcMain.handle("select-source", async () => {
   const isMac = process.platform === "darwin"
 
-  // A .logicx is a macOS package (selectable as a file) but a plain folder on
-  // Windows/Linux. Allow both file and directory selection on macOS so package
-  // and folder-style projects both work; the suffix check below guards the pick.
-  let properties: Array<"openFile" | "openDirectory">
-  if (pickingLogicProject) {
-    properties = isMac ? ["openFile", "openDirectory"] : ["openDirectory"]
-  } else {
-    properties = ["openFile"]
-  }
+  // Logic projects are macOS bundles, so the unified picker must permit both
+  // files and directories there. Other platforms only need file-based sessions.
+  const properties: Array<"openFile" | "openDirectory"> = isMac
+    ? ["openFile", "openDirectory"]
+    : ["openFile"]
 
   const result = await dialog.showOpenDialog({
     properties,
-    title: pickingLogicProject ? "Select a Logic Pro project" : "Select an Ableton Live Set",
+    title: "Select a session",
     filters: [
       {
-        name: pickingLogicProject ? "Logic Pro Project" : "Ableton Live Set",
-        extensions: [pickingLogicProject ? "logicx" : "als"],
+        name: "Logic, Ableton, or Pro Tools Session",
+        extensions: ["logicx", "als", "ptx", "pts"],
       },
     ],
   })
 
   if (result.canceled || result.filePaths.length === 0) return null
   const selected = result.filePaths[0]
-  const expectedExtension = pickingLogicProject ? ".logicx" : ".als"
-  if (!selected.toLowerCase().endsWith(expectedExtension)) return null
+  if (!SUPPORTED_SOURCE_EXTENSIONS.has(extname(selected).toLowerCase())) return null
   return selected
 })
 
@@ -263,12 +288,25 @@ ipcMain.handle("select-output-dir", async () => {
   return result.filePaths[0]
 })
 
-ipcMain.handle("start-conversion", async (event, direction: ConversionDirection, sourcePath: string, outputDir: string) => {
-  startJob("conversion", event, direction, sourcePath, outputDir)
+ipcMain.handle("start-conversion", async (
+  event,
+  direction: ConversionDirection,
+  sourcePath: string,
+  outputDir: string,
+  tempo?: number,
+) => {
+  if (!isConversionDirection(direction)) throw new Error("Unsupported conversion mode")
+  startJob("conversion", event, direction, sourcePath, outputDir, false, normalizeTempo(tempo))
 })
 
-ipcMain.handle("start-preview", async (event, direction: ConversionDirection, sourcePath: string) => {
-  startJob("preview", event, direction, sourcePath, previewOutputDir(direction), true)
+ipcMain.handle("start-preview", async (
+  event,
+  direction: ConversionDirection,
+  sourcePath: string,
+  tempo?: number,
+) => {
+  if (!isConversionDirection(direction)) throw new Error("Unsupported conversion mode")
+  startJob("preview", event, direction, sourcePath, previewOutputDir(direction), true, normalizeTempo(tempo))
 })
 
 ipcMain.handle("cancel-active-job", async () => {

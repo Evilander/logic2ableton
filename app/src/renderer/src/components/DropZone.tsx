@@ -1,76 +1,63 @@
 import { useCallback, useRef, useState } from "react"
+import { CloudArrowUp, FolderOpen } from "@phosphor-icons/react"
 import { motion } from "motion/react"
-import { ArrowsLeftRight, CloudArrowUp, FolderOpen } from "@phosphor-icons/react"
-import type { ConversionDirection } from "../hooks/useAppState"
+import { detectSourceFormat, FORMAT_META, SOURCE_FORMATS } from "../conversion"
+import DAWMark from "./DAWMark"
 
 interface DropZoneProps {
-  direction: ConversionDirection
-  onDirectionChange: (direction: ConversionDirection) => void
   onProjectSelected: (path: string) => void
 }
 
-const DIRECTION_COPY: Record<ConversionDirection, { title: string; extension: string; button: string; helper: string }> = {
-  logic2ableton: {
-    title: "Drop a .logicx project here",
-    extension: ".logicx",
-    button: "Browse Logic Project",
-    helper: "Use the toggle above to switch directions. The app will preview the session before it writes anything.",
-  },
-  ableton2logic: {
-    title: "Drop an .als Live Set here",
-    extension: ".als",
-    button: "Browse Live Set",
-    helper: "This lane creates a Logic import package with stems, clip exports, and an import guide. It does not generate a finished .logicx session.",
-  },
-}
-
-export default function DropZone({ direction, onDirectionChange, onProjectSelected }: DropZoneProps) {
+export default function DropZone({ onProjectSelected }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false)
   const [dropError, setDropError] = useState<string | null>(null)
   const dragCounter = useRef(0)
-  const copy = DIRECTION_COPY[direction]
 
-  const handleDragEnter = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
+  const handleDragEnter = useCallback((event: React.DragEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
     dragCounter.current += 1
     setDropError(null)
     setIsDragging(true)
   }, [])
 
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
+  const handleDragLeave = useCallback((event: React.DragEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
     dragCounter.current -= 1
     if (dragCounter.current === 0) setIsDragging(false)
   }, [])
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
+  const handleDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
   }, [])
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
+  const acceptPath = useCallback((path: string) => {
+    if (path && detectSourceFormat(path)) {
+      onProjectSelected(path)
+      return
+    }
+    setDropError("Choose a .logicx, .als, .ptx, or .pts session.")
+  }, [onProjectSelected])
+
+  const handleDrop = useCallback((event: React.DragEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
     dragCounter.current = 0
     setIsDragging(false)
     setDropError(null)
 
-    const files = e.dataTransfer.files
-    if (files.length === 0) return
-    // Electron removed File.path in v32; resolve the real path via webUtils.
-    const path = window.api.getPathForFile(files[0])
-    if (path && path.toLowerCase().endsWith(copy.extension)) {
-      onProjectSelected(path)
-    } else {
-      setDropError(`That doesn't look like a ${copy.extension} ${direction === "logic2ableton" ? "Logic project" : "Live Set"}.`)
-    }
-  }, [copy.extension, direction, onProjectSelected])
+    const file = event.dataTransfer.files[0]
+    if (!file) return
+    // Electron removed File.path in v32; webUtils resolves the native path.
+    acceptPath(window.api.getPathForFile(file))
+  }, [acceptPath])
 
   const handleBrowse = async () => {
-    const path = await window.api.selectSource(direction)
-    if (path) onProjectSelected(path)
+    setDropError(null)
+    const path = await window.api.selectSource()
+    if (path) acceptPath(path)
   }
 
   return (
@@ -82,71 +69,64 @@ export default function DropZone({ direction, onDirectionChange, onProjectSelect
       onDrop={handleDrop}
     >
       <motion.div
+        role="button"
+        tabIndex={0}
+        aria-label="Select a session to convert"
         animate={{
           borderColor: isDragging ? "#C4868E" : "#353340",
-          scale: isDragging ? 1.005 : 1,
+          scale: isDragging ? 1.008 : 1,
         }}
-        transition={{ type: "spring", stiffness: 400, damping: 30 }}
-        className="w-full max-w-xl border-2 border-dashed rounded-2xl p-12 flex flex-col items-center gap-5 cursor-pointer"
-        onClick={handleBrowse}
+        transition={{ type: "spring", stiffness: 380, damping: 30 }}
+        className="dropzone-texture relative isolate w-full max-w-2xl overflow-hidden rounded-3xl border-2 border-dashed px-10 py-14 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose"
+        onClick={() => void handleBrowse()}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault()
+            void handleBrowse()
+          }
+        }}
       >
-        <div className="flex items-center gap-2 p-1 rounded-full border border-border bg-surface">
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation()
-              onDirectionChange("logic2ableton")
-            }}
-            className={`px-4 py-2 rounded-full text-sm transition-colors cursor-pointer ${
-              direction === "logic2ableton" ? "bg-rose text-bg" : "text-text-secondary hover:text-text-primary"
-            }`}
+        <div className="relative z-10 flex flex-col items-center gap-6 text-center">
+          <motion.div
+            animate={{ y: isDragging ? -5 : 0, scale: isDragging ? 1.05 : 1 }}
+            transition={{ type: "spring", stiffness: 300, damping: 22 }}
+            className="grid size-16 place-items-center rounded-2xl border border-border bg-surface/90 text-stone shadow-[0_16px_45px_rgba(0,0,0,0.22)]"
           >
-            Logic to Ableton
-          </button>
+            <CloudArrowUp size={34} weight="duotone" />
+          </motion.div>
+
+          <div className="max-w-lg">
+            <h1 className="text-xl font-semibold tracking-[-0.02em]">Drop a session</h1>
+            <p className="mt-2 text-[13px] text-text-secondary">
+              We’ll detect the source, inspect the arrangement, then let you choose where it goes.
+            </p>
+            {dropError && <p className="mt-3 text-[13px] text-error">{dropError}</p>}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-center gap-2" aria-label="Supported formats">
+            {SOURCE_FORMATS.map((format) => (
+              <span
+                key={format}
+                className="inline-flex items-center gap-2 rounded-full border border-border bg-bg/75 px-3 py-2 text-[11px] text-text-secondary backdrop-blur-sm"
+              >
+                <DAWMark format={format} size={17} className="text-stone" />
+                <span className="font-medium text-text-primary">{FORMAT_META[format].shortName}</span>
+                <span>{FORMAT_META[format].extension}</span>
+              </span>
+            ))}
+          </div>
+
           <button
             type="button"
             onClick={(event) => {
               event.stopPropagation()
-              onDirectionChange("ableton2logic")
+              void handleBrowse()
             }}
-            className={`px-4 py-2 rounded-full text-sm transition-colors cursor-pointer ${
-              direction === "ableton2logic" ? "bg-rose text-bg" : "text-text-secondary hover:text-text-primary"
-            }`}
-          >
-            Ableton to Logic
-          </button>
-        </div>
-
-        <motion.div
-          animate={{ y: isDragging ? -4 : 0 }}
-          transition={{ type: "spring", stiffness: 300, damping: 20 }}
-        >
-          <CloudArrowUp size={48} weight="duotone" className="text-stone" />
-        </motion.div>
-
-        <div className="text-center max-w-md">
-          <p className="text-text-primary text-base font-medium mb-1">{copy.title}</p>
-          <p className="text-text-secondary text-sm">{copy.helper}</p>
-          {dropError && <p className="text-error text-sm mt-2">{dropError}</p>}
-        </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation()
-              handleBrowse()
-            }}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface hover:bg-surface-hover border border-border text-sm text-text-secondary hover:text-text-primary transition-colors"
+            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2.5 text-[13px] font-medium text-text-primary transition-colors hover:border-stone/50 hover:bg-surface-hover"
           >
             <FolderOpen size={16} />
-            {copy.button}
+            Browse sessions
           </button>
-
-          <div className="flex items-center gap-2 text-xs text-text-tertiary">
-            <ArrowsLeftRight size={14} />
-            Same desktop app, two transfer lanes
-          </div>
         </div>
       </motion.div>
     </div>

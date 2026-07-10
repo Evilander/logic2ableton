@@ -1,17 +1,15 @@
 import { useState } from "react"
+import type { ConversionDirection } from "../conversion"
 
-export type ConversionDirection = "logic2ableton" | "ableton2logic"
+export type { ConversionDirection, SourceFormat } from "../conversion"
 export type AppView = "empty" | "preview" | "converting" | "complete" | "error"
 
 export interface PreviewData {
-  direction: ConversionDirection
   projectName: string
   tracks: number
-  clips: number
+  clips?: number
   audioFiles: number
   plugins?: number
-  locators?: number
-  midiTracks?: number
   midiNotes?: number
   report: string
 }
@@ -23,9 +21,8 @@ export interface ConversionResult {
   tracks: number
   clips: number
   audioFiles: number
-  locators?: number
-  midiTracks?: number
   midiNotes?: number
+  compatibilityWarnings: string[]
 }
 
 export interface ConversionRecord {
@@ -37,11 +34,18 @@ export interface ConversionRecord {
   date: string
   status: "success" | "failed"
   report: string
-  stats?: { tracks: number; clips?: number; audioFiles: number; locators?: number }
+  compatibilityWarnings?: string[]
+  stats?: {
+    tracks: number
+    clips?: number
+    audioFiles: number
+    midiNotes?: number
+  }
 }
 
 export function useAppState() {
   const [direction, setDirection] = useState<ConversionDirection>("logic2ableton")
+  const [tempo, setTempo] = useState(120)
   const [view, setView] = useState<AppView>("empty")
   const [sourcePath, setSourcePath] = useState<string | null>(null)
   const [outputDir, setOutputDir] = useState<string | null>(null)
@@ -53,8 +57,9 @@ export function useAppState() {
   const [error, setError] = useState<string | null>(null)
   const [history, setHistory] = useState<ConversionRecord[]>([])
 
-  const reset = (nextDirection: ConversionDirection = direction) => {
-    setDirection(nextDirection)
+  const reset = () => {
+    setDirection("logic2ableton")
+    setTempo(120)
     setView("empty")
     setSourcePath(null)
     setOutputDir(null)
@@ -68,6 +73,7 @@ export function useAppState() {
 
   return {
     direction, setDirection,
+    tempo, setTempo,
     view, setView,
     sourcePath, setSourcePath,
     outputDir, setOutputDir,
