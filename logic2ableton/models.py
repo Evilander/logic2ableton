@@ -12,6 +12,10 @@ class AudioFileRef:
     comp_name: str          # e.g., "Comp A"
     file_path: Path         # Absolute path to the audio file in Media/
     start_position_samples: int = 0  # Region start position in samples
+    # Optional source trim (Pro Tools regions play a slice of their file).
+    content_offset_samples: int = 0        # Slice start within the source file
+    content_duration_samples: int | None = None  # Slice length; None = whole file
+    clip_name: str | None = None           # Display name; None = filename stem
 
 
 @dataclass

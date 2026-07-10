@@ -213,13 +213,26 @@ def _make_audio_clip_xml(
     during parsing and stored in AudioFileRef.start_position_samples.
     """
     # Get duration and sample rate from WAV header
-    duration_samples, file_sample_rate = _get_audio_info(ref.file_path)
+    file_duration_samples, file_sample_rate = _get_audio_info(ref.file_path)
     timeline_sample_rate = file_sample_rate if file_sample_rate > 0 else sample_rate
-    duration_beats = (duration_samples * tempo / (timeline_sample_rate * 60)) if duration_samples > 0 else 4.0
-    duration_secs = duration_samples / file_sample_rate if duration_samples > 0 else 2.0
+
+    def to_beats(samples: int) -> float:
+        return samples * tempo / (timeline_sample_rate * 60)
+
+    # Pro Tools-style regions play a slice of the source file; Logic clips
+    # play the whole file (offset 0, duration None).
+    offset_samples = max(0, ref.content_offset_samples)
+    content_samples = ref.content_duration_samples
+    if content_samples is None:
+        content_samples = max(0, file_duration_samples - offset_samples)
+
+    duration_samples = file_duration_samples
+    duration_beats = to_beats(content_samples) if content_samples > 0 else 4.0
+    duration_secs = duration_samples / file_sample_rate if duration_samples > 0 and file_sample_rate > 0 else 2.0
+    offset_beats = to_beats(offset_samples)
 
     # Calculate timeline position from BWF timestamp
-    start_beats = ref.start_position_samples * tempo / (timeline_sample_rate * 60)
+    start_beats = to_beats(ref.start_position_samples)
 
     clip = ET.Element("AudioClip")
     clip.set("Id", str(allocator.next()))
@@ -230,15 +243,15 @@ def _make_audio_clip_xml(
     _val(clip, "CurrentStart", str(start_beats))
     _val(clip, "CurrentEnd", str(start_beats + duration_beats))
 
-    # Loop — relative to audio content (not timeline)
+    # Loop — relative to audio content (not timeline). StartRelative selects
+    # where in the source the clip starts playing.
     loop = ET.SubElement(clip, "Loop")
-    _val(loop, "LoopStart", "0")
-    _val(loop, "LoopEnd", str(duration_beats))
-    _val(loop, "StartRelative", "0")
+    _val(loop, "LoopStart", _format_ableton_number(offset_beats))
+    _val(loop, "LoopEnd", _format_ableton_number(offset_beats + duration_beats))
+    _val(loop, "StartRelative", _format_ableton_number(offset_beats))
     _val(loop, "LoopOn", "false")
 
-    # Name (stem without extension)
-    clip_name = ref.filename.rsplit(".", 1)[0]
+    clip_name = ref.clip_name or ref.filename.rsplit(".", 1)[0]
     _val(clip, "Name", clip_name)
     # Match the clip color to its track so the arrangement reads cleanly.
     _val(clip, "Color", str(color))
@@ -335,7 +348,9 @@ def _pick_best_clip(clips: list[AudioFileRef]) -> AudioFileRef | None:
 
 
 def _get_clip_end_samples(ref: AudioFileRef, sample_rate: int) -> int:
-    """Get the end position of a clip in samples."""
+    """Get the end position of a clip in samples (honoring source trims)."""
+    if ref.content_duration_samples is not None:
+        return ref.start_position_samples + ref.content_duration_samples
     duration_samples, _ = _get_audio_info(ref.file_path)
     return ref.start_position_samples + duration_samples
 

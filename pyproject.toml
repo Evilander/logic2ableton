@@ -46,4 +46,5 @@ testpaths = ["tests"]
 markers = [
     "needs_test_project: test requires a local .logicx project",
     "needs_vst3: test requires local VST3 plugins",
+    "needs_ptx_fixture: test requires a local Pro Tools .ptx session",
 ]

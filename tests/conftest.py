@@ -11,16 +11,28 @@ HAS_TEST_PROJECT = TEST_PROJECT.exists() and (TEST_PROJECT / "Resources" / "Proj
 
 HAS_VST3 = Path(os.environ.get("VST3_PATH", "C:/Program Files/Common Files/VST3")).exists()
 
+PTX_FIXTURE = Path(
+    os.environ.get(
+        "L2A_PTX_FIXTURE",
+        "D:/New Mixes/Miley Cyrus - Flowers - Scratch tracks (No Band)/"
+        "MC - Flowers - Scratch tracks (No Band).ptx",
+    )
+)
+HAS_PTX_FIXTURE = PTX_FIXTURE.is_file()
+
 
 def pytest_collection_modifyitems(config, items):
     skip_no_project = pytest.mark.skip(reason="test .logicx project not available")
     skip_no_vst3 = pytest.mark.skip(reason="VST3 plugins not available")
+    skip_no_ptx = pytest.mark.skip(reason="local .ptx fixture not available")
 
     for item in items:
         if "needs_test_project" in item.keywords and not HAS_TEST_PROJECT:
             item.add_marker(skip_no_project)
         if "needs_vst3" in item.keywords and not HAS_VST3:
             item.add_marker(skip_no_vst3)
+        if "needs_ptx_fixture" in item.keywords and not HAS_PTX_FIXTURE:
+            item.add_marker(skip_no_ptx)
 
 
 def write_test_wav(path: Path, *, frames: int = 44100, sample_rate: int = 44100) -> Path:
