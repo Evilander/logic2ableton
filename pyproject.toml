@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "logic2ableton"
 dynamic = ["version"]
-description = "Bidirectional audio-first transfer between Logic Pro .logicx and Ableton Live .als projects"
+description = "Session transfer between Logic Pro, Ableton Live, and Pro Tools - six conversion lanes with evidence-first reports"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "evilander" }]
-keywords = ["logic-pro", "ableton", "daw", "converter", "music-production", "session-transfer"]
+keywords = ["logic-pro", "ableton", "pro-tools", "ptx", "daw", "converter", "music-production", "session-transfer"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",

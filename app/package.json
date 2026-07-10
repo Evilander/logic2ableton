@@ -1,7 +1,7 @@
 {
   "name": "logic2ableton",
-  "version": "2.0.3",
-  "description": "Bidirectional audio-first transfer between Logic Pro and Ableton Live",
+  "version": "2.1.0",
+  "description": "Session transfer between Logic Pro, Ableton Live, and Pro Tools",
   "main": "./out/main/index.js",
   "author": {
     "name": "evilander"
