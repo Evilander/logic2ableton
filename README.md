@@ -445,12 +445,16 @@ npm run dist:win
 
 GitHub Actions validates:
 
+- Ruff lint and the desktop app build
 - Python tests on Windows and macOS
 - Python package builds
-- Windows desktop smoke builds before release tags
+- A packaged-binary smoke run through four conversion lanes
 - Tagged release packaging for Windows and macOS
 
-Publishing a release is done by pushing a `v*` tag. The workflow uploads the generated installers to GitHub Releases automatically.
+Publishing a release is done by pushing a `v*` tag. The workflow uploads the
+generated installers to GitHub Releases automatically. The same workflow
+publishes the Python package to PyPI through a trusted publisher (environment
+`pypi`) once the repository variable `PYPI_PUBLISH` is set to `true`.
 
 ## Bug Reports
 
