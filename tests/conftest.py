@@ -7,8 +7,10 @@ import pytest
 
 from scripts.fixture_builders import write_test_wav
 
-TEST_PROJECT = Path("Might Last Forever.logicx")
-HAS_TEST_PROJECT = TEST_PROJECT.exists() and (TEST_PROJECT / "Resources" / "ProjectInformation.plist").exists()
+_LOGIC_FIXTURE_PATH = os.environ.get("L2A_LOGIC_FIXTURE")
+TEST_PROJECT = Path(_LOGIC_FIXTURE_PATH) if _LOGIC_FIXTURE_PATH else None
+TEST_PROJECT_NAME = TEST_PROJECT.stem if TEST_PROJECT is not None else ""
+HAS_TEST_PROJECT = TEST_PROJECT is not None and (TEST_PROJECT / "Resources" / "ProjectInformation.plist").is_file()
 
 HAS_VST3 = Path(os.environ.get("VST3_PATH", "C:/Program Files/Common Files/VST3")).exists()
 

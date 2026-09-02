@@ -12,10 +12,7 @@ test_output/
 !logic2ableton/data/DefaultLiveSet.als
 *.asd
 .env
-.mcp.json
-CLAUDE.local.md
 Logic Pro X.app/
-ableton-mcp/
 node_modules/
 *.spec.bak
 app/out/
@@ -24,15 +21,6 @@ app/dist/
 app/resources/logic2ableton*
 !app/resources/logic2ableton*.keep
 
-# Private working material: agent instructions, planning docs, session notes.
-# These are working files, not documentation anyone else should have to read.
-CLAUDE.md
-AGENTS.md
-codex.md
-HANDOFF.md
-.claude/
-.codex/
-.agents/
+# Local working notes.
 notes/
 todos/
-docs/superpowers/

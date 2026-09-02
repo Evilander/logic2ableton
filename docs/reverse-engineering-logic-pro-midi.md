@@ -127,16 +127,6 @@ The notes aren't just *present* — they're *musically coherent*. Solaris's kick
 
 If it decodes Apple's own files correctly, it decodes yours.
 
-## Where the AI work came in
-
-I'm not going to pretend I sat with a hex editor for a month. I leveraged an AI coding assistant aggressively, and *how* I used it is the actual skill:
-
-- **Pattern hypotheses at speed.** Feeding annotated hex windows to a model and asking "given that I know note 1 is pitch 61 velocity 99 at beat 0, where are those values and what's the stride to note 2?" collapses days of manual diffing into an afternoon of hypothesis-and-test.
-- **Building the ground-truth harness.** The generate-MIDI → automate-Logic → diff-bytes loop is itself a small system. Standing it up — SMF writer, GUI automation, byte differ — is exactly the kind of glue an AI assistant accelerates without me losing the thread of what's being tested.
-- **Keeping me honest.** Every hypothesis went straight into a test that either passed against real data or didn't. The AI proposes; the bytes decide.
-
-That's the way I work across all my projects: use AI to move fast on the mechanical parts, but anchor every claim to something verifiable. The model is a force multiplier on judgment, not a substitute for it.
-
 ## What this unlocks
 
 logic2ableton now moves MIDI in both directions — Logic notes out to Standard MIDI Files, and Ableton arrangement notes back into Logic-ready packages — on top of audio-timeline reconstruction, tempo, time signature, per-track colors, and plugin identification. It's a real tool people use, not a demo.

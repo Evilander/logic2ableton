@@ -1,7 +1,6 @@
 import subprocess
 import sys
 import json
-from pathlib import Path
 
 import pytest
 
@@ -9,7 +8,7 @@ from logic2ableton.cli import main
 from logic2ableton import __version__
 from logic2ableton.models import LogicProject
 
-TEST_PROJECT = Path("Might Last Forever.logicx")
+from conftest import TEST_PROJECT, TEST_PROJECT_NAME
 
 
 @pytest.mark.needs_test_project
@@ -20,7 +19,7 @@ def test_cli_report_only():
         text=True,
     )
     assert result.returncode == 0
-    assert "Might Last Forever" in result.stdout
+    assert TEST_PROJECT_NAME in result.stdout
     assert "TRACKS TRANSFERRED" in result.stdout
 
 
@@ -41,7 +40,7 @@ def test_cli_full_conversion(tmp_path):
         text=True,
     )
     assert result.returncode == 0
-    als_path = tmp_path / "output" / "Might Last Forever Project" / "Might Last Forever.als"
+    als_path = tmp_path / "output" / f"{TEST_PROJECT_NAME} Project" / f"{TEST_PROJECT_NAME}.als"
     assert als_path.exists()
 
 
@@ -345,7 +344,7 @@ def test_cli_template_flag(tmp_path):
         text=True,
     )
     assert result.returncode == 0
-    als_path = tmp_path / "output" / "Might Last Forever Project" / "Might Last Forever.als"
+    als_path = tmp_path / "output" / f"{TEST_PROJECT_NAME} Project" / f"{TEST_PROJECT_NAME}.als"
     assert als_path.exists()
 
 

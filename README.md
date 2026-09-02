@@ -378,8 +378,8 @@ Warnings generally mean one of two things:
 
 ## Development
 
-Feature phases and open reverse-engineering threads live in
-[ROADMAP.md](ROADMAP.md).
+The reverse-engineering write-ups in [docs/](docs/) explain how the Logic
+MIDI and Pro Tools session formats were decoded and what is still open.
 
 Run tests:
 
@@ -388,9 +388,9 @@ python -m pytest tests -q
 ruff check logic2ableton tests scripts
 ```
 
-Tests against a real Pro Tools session are optional and skipped by default. To
-run them, set `L2A_PTX_FIXTURE` to the absolute path of a local `.ptx` file
-before invoking pytest.
+Tests against real sessions are optional and skipped by default. To run them,
+point `L2A_LOGIC_FIXTURE` at a local `.logicx` package and `L2A_PTX_FIXTURE`
+at a local `.ptx` file before invoking pytest.
 
 Run the four-lane smoke check, which synthesizes a Logic project, a Live set,
 and a Pro Tools session and converts each through the CLI:

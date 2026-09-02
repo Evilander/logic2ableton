@@ -7,7 +7,8 @@ from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.plugin_matcher import match_plugins
 from logic2ableton.models import LogicProject, TrackMixerState
 
-TEST_PROJECT = Path("Might Last Forever.logicx")
+from conftest import TEST_PROJECT, TEST_PROJECT_NAME
+
 VST3_PATH = Path("C:/Program Files/Common Files/VST3")
 
 
@@ -17,7 +18,7 @@ def test_generate_report():
     project = parse_logic_project(TEST_PROJECT)
     matches = match_plugins(project.plugins, VST3_PATH)
     report = generate_report(project, matches)
-    assert "Might Last Forever" in report
+    assert TEST_PROJECT_NAME in report
     assert "120" in report
     assert "KICK IN" in report
     assert "PLUGINS FOUND" in report

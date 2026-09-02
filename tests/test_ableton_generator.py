@@ -9,9 +9,7 @@ from logic2ableton.ableton_generator import _BUNDLED_TEMPLATE, generate_als, _pi
 from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.models import AudioFileRef, LogicMidiNote, LogicMidiTrack, LogicProject, TrackMixerState
 
-from conftest import write_test_wav
-
-TEST_PROJECT = Path("Might Last Forever.logicx")
+from conftest import TEST_PROJECT, TEST_PROJECT_NAME, write_test_wav
 
 
 @pytest.mark.needs_test_project
@@ -20,7 +18,7 @@ def test_generate_als_creates_file(tmp_path):
     als_path = generate_als(project, tmp_path / "output", copy_audio=False)
     assert als_path.exists()
     assert als_path.suffix == ".als"
-    assert als_path.name == "Might Last Forever.als"
+    assert als_path.name == f"{TEST_PROJECT_NAME}.als"
 
 
 @pytest.mark.needs_test_project
@@ -61,7 +59,7 @@ def test_generate_als_copies_audio(tmp_path):
     project = parse_logic_project(TEST_PROJECT)
     output_dir = tmp_path / "output"
     generate_als(project, output_dir, copy_audio=True)
-    samples_dir = output_dir / "Might Last Forever Project" / "Samples" / "Imported"
+    samples_dir = output_dir / f"{TEST_PROJECT_NAME} Project" / "Samples" / "Imported"
     assert samples_dir.exists()
     wav_files = list(samples_dir.glob("*.wav"))
     assert len(wav_files) == len(project.audio_files)

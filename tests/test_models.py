@@ -39,14 +39,14 @@ def test_plugin_instance_creation():
 
 def test_logic_project_creation():
     project = LogicProject(
-        name="Might Last Forever",
+        name="Demo Song",
         tempo=120.0,
         time_sig_numerator=4,
         time_sig_denominator=4,
         sample_rate=44100,
         audio_files=[],
         plugins=[],
-        track_names=["KICK IN", "Tyler Amp"],
+        track_names=["KICK IN", "LEAD AMP"],
         alternative=0,
     )
     assert project.tempo == 120.0
@@ -60,8 +60,8 @@ def test_parse_take_filename():
 
 
 def test_parse_take_filename_high_number():
-    result = parse_audio_filename("Tyler Amp#03.wav")
-    assert result == ("Tyler Amp", 3, False, "")
+    result = parse_audio_filename("LEAD AMP#03.wav")
+    assert result == ("LEAD AMP", 3, False, "")
 
 
 def test_parse_comp_filename():
