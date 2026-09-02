@@ -23,7 +23,7 @@ jobs:
           node-version: "20"
 
       - name: Install Python lint tooling
-        run: python -m pip install --upgrade pip ruff
+        run: python -m pip install --upgrade pip "ruff==0.15.12"
 
       - name: Lint Python code
         run: ruff check logic2ableton tests scripts

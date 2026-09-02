@@ -45,6 +45,12 @@ logic2ableton = ["data/*.als"]
 [tool.setuptools.dynamic]
 version = { attr = "logic2ableton.__version__" }
 
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
