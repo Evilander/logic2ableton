@@ -24,7 +24,7 @@ function outputPathFromEvent(event: ProgressEvent, direction: ConversionDirectio
 }
 
 function nameFromPath(path: string): string {
-  return (path.split(/[/\\]/).pop() || "Unknown").replace(/\.(logicx|als|ptx|pts)$/i, "")
+  return (path.split(/[/\\]/).pop() || "Unknown").replace(/\.(logicx|als|ptx|pts|ptf)$/i, "")
 }
 
 export default function App() {

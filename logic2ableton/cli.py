@@ -115,9 +115,24 @@ def _export_logic_midi(project, project_folder: Path) -> int:
     return written
 
 
+_LEGACY_LOGIC_FORMATS = {
+    ".logic": "a Logic Pro 8 or 9 project",
+    ".lso": "a Logic 7 song file",
+}
+
+
 def _validate_logic_input(path: Path) -> str | None:
     """Return a human-readable reason the path is not a usable Logic project, or None."""
-    if path.suffix.lower() != ".logicx":
+    suffix = path.suffix.lower()
+    if suffix in _LEGACY_LOGIC_FORMATS:
+        return (
+            f"'{path.name}' is {_LEGACY_LOGIC_FORMATS[suffix]}. logic2ableton reads .logicx "
+            "packages, which Logic Pro X (10.0) and later save. Open the project in a current "
+            "Logic Pro, choose File > Save As, and convert the .logicx it writes."
+        )
+    if suffix != ".logicx":
+        if any(part.lower().endswith(".logicx") for part in path.parts[:-1]):
+            return f"'{path.name}' is inside a Logic project package. Pass the .logicx package itself."
         return (
             f"Expected a Logic Pro .logicx project but got '{path.name}'. "
             "Use ableton2logic for Ableton .als Live Sets."

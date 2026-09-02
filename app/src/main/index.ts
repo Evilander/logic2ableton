@@ -32,7 +32,6 @@ type StoredConversionRecord = Omit<ConversionRecord, "direction"> & {
 
 const HISTORY_LIMIT = 100
 const ALLOWED_OPEN_EXTENSIONS = new Set([".als", ".txt", ".md", ".json", ".csv"])
-const SUPPORTED_SOURCE_EXTENSIONS = new Set([".logicx", ".als", ".ptx", ".pts"])
 const CONVERSION_DIRECTION_SET = new Set<ConversionDirection>(CONVERSION_DIRECTIONS)
 
 let mainWindow: BrowserWindow | null = null
@@ -253,30 +252,47 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit()
 })
 
-ipcMain.handle("select-source", async () => {
+ipcMain.handle("select-source", async (_, kind: "file" | "folder") => {
+  if (kind !== "file" && kind !== "folder") {
+    throw new Error("Unsupported source picker kind")
+  }
+
   const isMac = process.platform === "darwin"
 
   // Logic projects are macOS bundles, so the unified picker must permit both
-  // files and directories there. Other platforms only need file-based sessions.
-  const properties: Array<"openFile" | "openDirectory"> = isMac
-    ? ["openFile", "openDirectory"]
-    : ["openFile"]
+  // files and directories there. Other platforms need a dedicated picker per kind
+  // since Electron only combines openFile and openDirectory on macOS.
+  const options: Electron.OpenDialogOptions = isMac
+    ? {
+        properties: ["openFile", "openDirectory"],
+        title: "Select a session",
+        filters: [
+          {
+            name: "Logic, Ableton, or Pro Tools Session",
+            extensions: ["logicx", "als", "ptx", "pts", "ptf"],
+          },
+        ],
+      }
+    : kind === "folder"
+      ? {
+          properties: ["openDirectory"],
+          title: "Select a Logic project folder",
+        }
+      : {
+          properties: ["openFile"],
+          title: "Select a session",
+          filters: [
+            {
+              name: "Ableton or Pro Tools Session",
+              extensions: ["als", "ptx", "pts", "ptf"],
+            },
+          ],
+        }
 
-  const result = await dialog.showOpenDialog({
-    properties,
-    title: "Select a session",
-    filters: [
-      {
-        name: "Logic, Ableton, or Pro Tools Session",
-        extensions: ["logicx", "als", "ptx", "pts"],
-      },
-    ],
-  })
+  const result = await dialog.showOpenDialog(options)
 
   if (result.canceled || result.filePaths.length === 0) return null
-  const selected = result.filePaths[0]
-  if (!SUPPORTED_SOURCE_EXTENSIONS.has(extname(selected).toLowerCase())) return null
-  return selected
+  return result.filePaths[0]
 })
 
 ipcMain.handle("select-output-dir", async () => {

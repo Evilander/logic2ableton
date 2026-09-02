@@ -10,6 +10,8 @@ export type ConversionDirection =
 
 export type SourceFormat = "logic" | "ableton" | "protools"
 
+export type SourceSelectionKind = "file" | "folder"
+
 export interface ProgressEvent {
   direction?: ConversionDirection
   stage: string
@@ -56,8 +58,9 @@ function subscribe<T>(channel: string, cb: (value: T) => void) {
 }
 
 const api = {
-  selectSource: (): Promise<string | null> => ipcRenderer.invoke("select-source"),
+  selectSource: (kind: SourceSelectionKind): Promise<string | null> => ipcRenderer.invoke("select-source", kind),
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  platform: process.platform,
   selectOutputDir: (): Promise<string | null> => ipcRenderer.invoke("select-output-dir"),
   startConversion: (
     direction: ConversionDirection,

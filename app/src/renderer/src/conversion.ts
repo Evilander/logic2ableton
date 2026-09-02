@@ -52,8 +52,36 @@ export function detectSourceFormat(path: string): SourceFormat | null {
   const normalized = path.trim().toLowerCase()
   if (normalized.endsWith(".logicx")) return "logic"
   if (normalized.endsWith(".als")) return "ableton"
-  if (normalized.endsWith(".ptx") || normalized.endsWith(".pts")) return "protools"
+  if (normalized.endsWith(".ptx") || normalized.endsWith(".pts") || normalized.endsWith(".ptf")) return "protools"
   return null
+}
+
+function basenameOf(path: string): string {
+  const trimmed = path.trim()
+  return trimmed.split(/[/\\]/).pop() || trimmed
+}
+
+export function describeUnsupportedSource(path: string): string {
+  const trimmed = path.trim()
+  const normalized = trimmed.toLowerCase()
+  const name = basenameOf(trimmed)
+
+  const insideLogicxPackage = normalized
+    .split(/[/\\]/)
+    .some((segment) => segment.endsWith(".logicx"))
+  if (insideLogicxPackage && !normalized.endsWith(".logicx")) {
+    return "Choose the .logicx package itself, not a file inside it."
+  }
+  if (normalized.endsWith(".logic")) {
+    return `“${name}” is a Logic Pro 8 or 9 project. This app reads .logicx packages, which Logic Pro X (10.0) and later save. Open the project in a current Logic Pro, choose File › Save As, and use the .logicx it writes.`
+  }
+  if (normalized.endsWith(".lso")) {
+    return `“${name}” is a Logic 7 song file. Open it in Logic Pro and save it as a .logicx package first.`
+  }
+  if (normalized.endsWith(".alp")) {
+    return `“${name}” is an Ableton Live Pack. Install it in Live first, then choose the .als set it contains.`
+  }
+  return `“${name}” isn’t a supported session. Choose a .logicx, .als, .ptx, .pts, or .ptf session.`
 }
 
 export function defaultDirectionForSource(source: SourceFormat): ConversionDirection {

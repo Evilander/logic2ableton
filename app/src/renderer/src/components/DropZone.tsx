@@ -1,12 +1,15 @@
 import { useCallback, useRef, useState } from "react"
 import { CloudArrowUp, FolderOpen } from "@phosphor-icons/react"
 import { motion } from "motion/react"
-import { detectSourceFormat, FORMAT_META, SOURCE_FORMATS } from "../conversion"
+import { describeUnsupportedSource, detectSourceFormat, FORMAT_META, SOURCE_FORMATS } from "../conversion"
 import DAWMark from "./DAWMark"
 
 interface DropZoneProps {
   onProjectSelected: (path: string) => void
 }
+
+const browseButtonClass =
+  "inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2.5 text-[13px] font-medium text-text-primary transition-colors hover:border-stone/50 hover:bg-surface-hover"
 
 export default function DropZone({ onProjectSelected }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false)
@@ -34,11 +37,11 @@ export default function DropZone({ onProjectSelected }: DropZoneProps) {
   }, [])
 
   const acceptPath = useCallback((path: string) => {
-    if (path && detectSourceFormat(path)) {
+    if (detectSourceFormat(path)) {
       onProjectSelected(path)
       return
     }
-    setDropError("Choose a .logicx, .als, .ptx, or .pts session.")
+    setDropError(describeUnsupportedSource(path))
   }, [onProjectSelected])
 
   const handleDrop = useCallback((event: React.DragEvent) => {
@@ -49,16 +52,21 @@ export default function DropZone({ onProjectSelected }: DropZoneProps) {
     setDropError(null)
 
     const file = event.dataTransfer.files[0]
-    if (!file) return
+    if (!file) {
+      setDropError("Drop a session file or a Logic project folder.")
+      return
+    }
     // Electron removed File.path in v32; webUtils resolves the native path.
     acceptPath(window.api.getPathForFile(file))
   }, [acceptPath])
 
-  const handleBrowse = async () => {
+  const handleBrowse = async (kind: "file" | "folder") => {
     setDropError(null)
-    const path = await window.api.selectSource()
+    const path = await window.api.selectSource(kind)
     if (path) acceptPath(path)
   }
+
+  const isMac = window.api.platform === "darwin"
 
   return (
     <div
@@ -78,11 +86,11 @@ export default function DropZone({ onProjectSelected }: DropZoneProps) {
         }}
         transition={{ type: "spring", stiffness: 380, damping: 30 }}
         className="dropzone-texture relative isolate w-full max-w-2xl overflow-hidden rounded-3xl border-2 border-dashed px-10 py-14 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose"
-        onClick={() => void handleBrowse()}
+        onClick={() => void handleBrowse("file")}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault()
-            void handleBrowse()
+            void handleBrowse("file")
           }
         }}
       >
@@ -98,7 +106,9 @@ export default function DropZone({ onProjectSelected }: DropZoneProps) {
           <div className="max-w-lg">
             <h1 className="text-xl font-semibold tracking-[-0.02em]">Drop a session</h1>
             <p className="mt-2 text-[13px] text-text-secondary">
-              We’ll detect the source, inspect the arrangement, then let you choose where it goes.
+              {isMac
+                ? "We’ll detect the source, inspect the arrangement, then let you choose where it goes."
+                : "Drop a .logicx folder or an .als, .ptx, .pts, or .ptf file. We’ll detect the source, inspect the arrangement, then let you choose where it goes."}
             </p>
             {dropError && <p className="mt-3 text-[13px] text-error">{dropError}</p>}
           </div>
@@ -116,17 +126,32 @@ export default function DropZone({ onProjectSelected }: DropZoneProps) {
             ))}
           </div>
 
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation()
-              void handleBrowse()
-            }}
-            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2.5 text-[13px] font-medium text-text-primary transition-colors hover:border-stone/50 hover:bg-surface-hover"
-          >
-            <FolderOpen size={16} />
-            Browse sessions
-          </button>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                void handleBrowse("file")
+              }}
+              className={browseButtonClass}
+            >
+              <FolderOpen size={16} />
+              Browse sessions
+            </button>
+            {!isMac && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void handleBrowse("folder")
+                }}
+                className={browseButtonClass}
+              >
+                <FolderOpen size={16} />
+                Browse Logic project
+              </button>
+            )}
+          </div>
         </div>
       </motion.div>
     </div>

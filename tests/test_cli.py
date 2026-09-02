@@ -271,6 +271,34 @@ def test_cli_forward_rejects_als_input(tmp_path, capsys):
     assert "Stage: validation" in report_path.read_text(encoding="utf-8")
 
 
+def test_cli_forward_explains_logic9_project(tmp_path, capsys):
+    project_path = tmp_path / "Old Song.logic"
+    (project_path / "Audio Files").mkdir(parents=True)
+    output_dir = tmp_path / "output"
+
+    exit_code = main([str(project_path), "--output", str(output_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "'Old Song.logic' is a Logic Pro 8 or 9 project" in captured.err
+    assert "Save As" in captured.err
+    report_path = output_dir / "Old Song_conversion_report.txt"
+    assert "Stage: validation" in report_path.read_text(encoding="utf-8")
+
+
+def test_cli_forward_rejects_file_inside_logicx(tmp_path, capsys):
+    project_data = tmp_path / "Song.logicx" / "Alternatives" / "000" / "ProjectData"
+    project_data.parent.mkdir(parents=True)
+    project_data.write_bytes(b"\x00")
+    output_dir = tmp_path / "output"
+
+    exit_code = main([str(project_data), "--output", str(output_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Pass the .logicx package itself" in captured.err
+
+
 def test_cli_forward_rejects_unstructured_logicx(tmp_path, capsys):
     project_path = tmp_path / "empty.logicx"
     project_path.mkdir()
