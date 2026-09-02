@@ -1,6 +1,6 @@
 {
   "name": "logic2ableton",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Session transfer between Logic Pro, Ableton Live, and Pro Tools",
   "main": "./out/main/index.js",
   "author": {
