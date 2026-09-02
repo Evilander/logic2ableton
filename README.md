@@ -103,7 +103,7 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 
 - The reverse lane does not synthesize a native `.logicx` package
 - MIDI note data transfers, but instruments, devices, racks, MIDI effects, and plugin state do not — reload those in Logic
-- Looping MIDI clips export only their first pass of notes; repeat them manually in Logic if needed
+- Looping MIDI clips are unrolled to their arrangement length, honoring the loop brace and start marker the way Live plays them (verified against Live 12.4's own Consolidate output); notes cut at a loop or clip boundary are shortened, not extended
 - Ableton devices, racks, plugin state, and return-bus processing are not transferred
 - Warped clips are exported with best-effort timing, but they still need review inside Logic before delivery
 - Tempo and markers are exported into the Logic Timeline MIDI file; do not assume time-signature changes are fully reconstructed unless you verify them in Logic

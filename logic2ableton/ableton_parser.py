@@ -194,6 +194,71 @@ def _parse_audio_tracks(live_set: ET.Element, als_path: Path, tempo: float) -> l
     return tracks
 
 
+_BEAT_EPSILON = 1e-9
+
+
+def _render_clip_notes(
+    events: list[tuple[int, float, float, int]],
+    *,
+    clip_start: float,
+    clip_end: float,
+    loop_start: float,
+    loop_end: float,
+    start_relative: float,
+    loop_on: bool,
+) -> list[AbletonMidiNote]:
+    """Place clip-content notes on the arrangement the way Live plays them.
+
+    Verified against Live 12.4.3 by consolidating clips with known notes:
+    playback starts at loop_start + start_relative and runs to loop_end, then
+    wraps to loop_start until the clip's arrangement length is used up (Live
+    wraps even when the loop switch is off). Notes are cut at the loop end and
+    at the clip end. With the loop switch on, notes that start outside the loop
+    brace never sound; otherwise a note already sounding at the start marker
+    plays from the clip start for its remaining length.
+    """
+    clip_length = clip_end - clip_start
+    loop_length = loop_end - loop_start
+    if clip_length <= _BEAT_EPSILON or loop_length <= _BEAT_EPSILON:
+        return []
+    play_start = loop_start + start_relative
+    if play_start < loop_start or play_start >= loop_end:
+        play_start = loop_start
+    if loop_on:
+        events = [event for event in events if loop_start <= event[1] < loop_end]
+
+    notes: list[AbletonMidiNote] = []
+    elapsed = 0.0
+    window_start = play_start
+    first_pass = True
+    while elapsed < clip_length - _BEAT_EPSILON:
+        window_length = min(loop_end - window_start, clip_length - elapsed)
+        window_end = window_start + window_length
+        for pitch, time, duration, velocity in events:
+            note_end = time + duration
+            if first_pass and time < window_start < note_end:
+                onset = window_start
+            elif window_start <= time < window_end - _BEAT_EPSILON:
+                onset = time
+            else:
+                continue
+            played = min(note_end, window_end) - onset
+            if played <= _BEAT_EPSILON:
+                continue
+            notes.append(
+                AbletonMidiNote(
+                    pitch=pitch,
+                    start_beats=clip_start + elapsed + (onset - window_start),
+                    duration_beats=played,
+                    velocity=velocity,
+                )
+            )
+        elapsed += window_length
+        first_pass = False
+        window_start = loop_start
+    return notes
+
+
 def _parse_midi_clip(clip: ET.Element, track_name: str, tempo: float) -> AbletonMidiClip | None:
     start_beats = _float_value(clip.find("CurrentStart"), _float_attr(clip, "Time", 0.0))
     end_beats = _float_value(clip.find("CurrentEnd"), start_beats)
@@ -201,9 +266,9 @@ def _parse_midi_clip(clip: ET.Element, track_name: str, tempo: float) -> Ableton
     clip_name = _value(clip.find("Name")) or f"{track_name} clip"
     is_disabled = _bool_value(clip.find("Disabled"))
     is_looping = _bool_value(clip.find("Loop/LoopOn"))
-    # Notes are timed relative to the clip's content origin (1.1.1 == 0 beats),
-    # so a note's arrangement position is the clip start plus the note's own time.
-    notes: list[AbletonMidiNote] = []
+    # Notes are timed relative to the clip's content origin (1.1.1 == 0 beats);
+    # the loop brace and start marker decide which of them play and where.
+    events: list[tuple[int, float, float, int]] = []
     for key_track in clip.findall(".//KeyTrack"):
         pitch = int(_float_value(key_track.find("MidiKey"), -1.0))
         if pitch < 0 or pitch > 127:
@@ -214,18 +279,20 @@ def _parse_midi_clip(clip: ET.Element, track_name: str, tempo: float) -> Ableton
             note_time = _float_attr(event, "Time", 0.0)
             duration = _float_attr(event, "Duration", 0.0)
             velocity = int(round(_float_attr(event, "Velocity", 100.0)))
-            absolute = start_beats + note_time
-            if absolute < 0 or duration <= 0:
+            if duration <= 0:
                 continue
-            notes.append(
-                AbletonMidiNote(
-                    pitch=pitch,
-                    start_beats=absolute,
-                    duration_beats=duration,
-                    velocity=max(1, min(127, velocity)),
-                )
-            )
+            events.append((pitch, note_time, duration, max(1, min(127, velocity))))
 
+    notes = _render_clip_notes(
+        events,
+        clip_start=start_beats,
+        clip_end=max(end_beats, start_beats),
+        loop_start=_float_value(clip.find("Loop/LoopStart"), 0.0),
+        loop_end=_float_value(clip.find("Loop/LoopEnd"), max(end_beats, start_beats) - start_beats),
+        start_relative=_float_value(clip.find("Loop/StartRelative"), 0.0),
+        loop_on=is_looping,
+    )
+    notes = [note for note in notes if note.start_beats >= 0]
     notes.sort(key=lambda note: (note.start_beats, note.pitch))
     return AbletonMidiClip(
         clip_name=clip_name,
@@ -287,21 +354,6 @@ def _build_compatibility_warnings(project: AbletonProject) -> list[str]:
 
     if not clips and not project.midi_tracks:
         warnings.append("No arrangement audio clips were found in the Live Set.")
-
-    looping_midi = [
-        clip
-        for track in project.midi_tracks
-        for clip in track.clips
-        if clip.is_looping and clip.notes
-    ]
-    if looping_midi:
-        examples = ", ".join(clip.clip_name for clip in looping_midi[:5])
-        if len(looping_midi) > 5:
-            examples += ", ..."
-        warnings.append(
-            f"{len(looping_midi)} MIDI clip(s) loop in Ableton; only the first pass of notes is "
-            f"exported, so repeat them manually in Logic if needed: {examples}"
-        )
 
     return warnings
 
