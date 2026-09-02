@@ -3,6 +3,12 @@
 import json
 from pathlib import Path
 
+from scripts.fixture_builders import (
+    build_logic_project_data,
+    build_synthetic_logicx,
+    build_synthetic_ptx,
+)
+
 from logic2ableton.cli import (
     ABLETON2PT_MODE,
     LOGIC2PT_MODE,
@@ -13,7 +19,6 @@ from logic2ableton.cli import (
 )
 
 from conftest import create_test_als, write_test_wav
-from test_protools_parser import build_synthetic_ptx
 
 
 def _json_lines(capsys):
@@ -94,11 +99,8 @@ def test_ableton2protools_creates_transfer_package(tmp_path, capsys):
 
 
 def test_logic2protools_report_only(tmp_path, capsys, monkeypatch):
-    # Reuse the synthesized minimal .logicx from the forward MIDI tests
-    from test_forward_midi import _make_logicx, _project_data
-
-    blob = _project_data([[(60, 100, 38400, 960)]])
-    logicx = _make_logicx(tmp_path, project_data=blob)
+    blob = build_logic_project_data([[(60, 100, 38400, 960)]])
+    logicx = build_synthetic_logicx(tmp_path, project_data=blob)
     out_dir = tmp_path / "out"
 
     rc = main(["logic2protools", str(logicx), "--output", str(out_dir), "--report-only", "--json-progress"])

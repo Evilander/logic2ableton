@@ -2,13 +2,14 @@ import gzip
 import wave
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from logic2ableton.ableton_generator import generate_als, _pick_best_clip, _find_template
+from logic2ableton.ableton_generator import _BUNDLED_TEMPLATE, generate_als, _pick_best_clip, _find_template
 from logic2ableton.logic_parser import parse_logic_project
-from logic2ableton.models import AudioFileRef, LogicProject, TrackMixerState
+from logic2ableton.models import AudioFileRef, LogicMidiNote, LogicMidiTrack, LogicProject, TrackMixerState
+
+from conftest import write_test_wav
 
 TEST_PROJECT = Path("Might Last Forever.logicx")
 
@@ -310,20 +311,72 @@ def test_generate_als_sample_ref_complete(tmp_path):
     assert sample_ref.find("DefaultSampleRate") is not None
 
 
-@pytest.mark.needs_test_project
-def test_generate_als_unique_critical_ids(tmp_path):
-    """AutomationTarget, ModulationTarget, Pointee IDs must be globally unique."""
-    project = parse_logic_project(TEST_PROJECT)
-    als_path = generate_als(project, tmp_path / "output", copy_audio=False)
-    with gzip.open(als_path, "rb") as f:
-        root = ET.fromstring(f.read())
+def _assert_unique_critical_ids(root: ET.Element) -> None:
+    critical_tags = {"AutomationTarget", "ModulationTarget", "Pointee"}
     critical_ids = {}
     for elem in root.iter():
-        if elem.tag in ("AutomationTarget", "ModulationTarget", "Pointee"):
+        if elem.tag in critical_tags:
             id_val = elem.get("Id")
             if id_val is not None:
                 assert id_val not in critical_ids, f"Duplicate {elem.tag} Id={id_val}"
                 critical_ids[id_val] = elem.tag
+    assert set(critical_ids.values()) == critical_tags
+
+
+@pytest.mark.needs_test_project
+def test_generate_als_unique_critical_ids(tmp_path):
+    project = parse_logic_project(TEST_PROJECT)
+    als_path = generate_als(project, tmp_path / "output", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+    _assert_unique_critical_ids(root)
+
+
+def test_generate_als_unique_critical_ids_synthetic(tmp_path):
+    """The global ID invariant must run in CI without a private Logic project."""
+    audio_path = write_test_wav(tmp_path / "media" / "Guitar.wav")
+    project = LogicProject(
+        name="Synthetic IDs",
+        tempo=120.0,
+        time_sig_numerator=4,
+        time_sig_denominator=4,
+        sample_rate=44_100,
+        audio_files=[
+            AudioFileRef(
+                filename="Guitar.wav",
+                track_name="Guitar",
+                take_number=0,
+                is_comp=False,
+                comp_name="",
+                file_path=audio_path,
+            )
+        ],
+        plugins=[],
+        track_names=["Guitar"],
+        alternative=0,
+        midi_tracks=[
+            LogicMidiTrack(
+                name="Keys",
+                notes=[
+                    LogicMidiNote(
+                        pitch=60,
+                        start_beats=4.0,
+                        duration_beats=1.0,
+                        velocity=100,
+                    )
+                ],
+            )
+        ],
+    )
+    als_path = generate_als(
+        project,
+        tmp_path / "output",
+        copy_audio=False,
+        template_path=_BUNDLED_TEMPLATE,
+    )
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+    _assert_unique_critical_ids(root)
 
 
 @pytest.mark.needs_test_project

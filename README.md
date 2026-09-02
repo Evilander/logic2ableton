@@ -378,14 +378,26 @@ Warnings generally mean one of two things:
 
 ## Development
 
-Known deficiencies, open reverse-engineering threads, and the prioritized
-improvement plan live in [HANDOFF.md](HANDOFF.md). Feature phases live in
+Feature phases and open reverse-engineering threads live in
 [ROADMAP.md](ROADMAP.md).
 
 Run tests:
 
 ```bash
 python -m pytest tests -q
+ruff check logic2ableton tests scripts
+```
+
+Tests against a real Pro Tools session are optional and skipped by default. To
+run them, set `L2A_PTX_FIXTURE` to the absolute path of a local `.ptx` file
+before invoking pytest.
+
+Run the four-lane smoke check, which synthesizes a Logic project, a Live set,
+and a Pro Tools session and converts each through the CLI:
+
+```bash
+python -m scripts.smoke_standalone --source
+python -m scripts.smoke_standalone dist/logic2ableton.exe   # against the packaged binary
 ```
 
 No third-party Python dependencies. The Ableton template is bundled, so no Ableton installation is needed to generate Live sets.

@@ -1,4 +1,5 @@
 import json
+import plistlib
 import struct
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from logic2ableton.models import AudioFileRef
 from logic2ableton.logic_parser import (
     _build_compatibility_warnings,
     _get_aiff_timestamp,
+    discover_alternatives,
     discover_audio_files,
     extract_plugins,
     extract_regions,
@@ -15,6 +17,7 @@ from logic2ableton.logic_parser import (
     parse_logic_project,
     parse_metadata,
     parse_project_info,
+    resolve_alternative,
 )
 
 TEST_PROJECT = Path("Might Last Forever.logicx")
@@ -231,11 +234,6 @@ def test_build_compatibility_warnings_for_missing_and_unpositioned_audio(tmp_pat
 
 
 # Alternative discovery tests
-import plistlib
-
-from logic2ableton.logic_parser import discover_alternatives, resolve_alternative
-
-
 def _make_logicx(tmp_path: Path, *, alternatives: list[int], active_variant: int) -> Path:
     logicx = tmp_path / "Sample.logicx"
     resources = logicx / "Resources"

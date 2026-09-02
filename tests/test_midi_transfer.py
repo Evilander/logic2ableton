@@ -6,12 +6,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from logic2ableton.ableton_parser import parse_ableton_project
-from logic2ableton.logic_transfer import (
-    MIDI_TICKS_PER_QUARTER,
-    _build_midi_note_file,
-    generate_logic_transfer,
-)
+from logic2ableton.logic_transfer import _build_midi_note_file, generate_logic_transfer
 from logic2ableton.models import AbletonMidiClip, AbletonMidiNote, AbletonMidiTrack
+from logic2ableton.smf import MIDI_TICKS_PER_QUARTER
 
 
 def _add_midi_clip(events, *, clip_start, clip_end, name, key_tracks, looping=False):

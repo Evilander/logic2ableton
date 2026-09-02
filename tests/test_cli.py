@@ -366,7 +366,7 @@ def test_cli_json_progress(tmp_path):
         text=True,
     )
     assert result.returncode == 0
-    lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
+    lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
     parsed = [json.loads(line) for line in lines]
     stages = [p["stage"] for p in parsed]
     assert "parsing" in stages
@@ -392,7 +392,7 @@ def test_cli_json_progress_report_only():
         text=True,
     )
     assert result.returncode == 0
-    lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
+    lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
     parsed = [json.loads(line) for line in lines]
     stages = [p["stage"] for p in parsed]
     assert "complete" in stages

@@ -1,10 +1,11 @@
 """Tests for the clean-room Pro Tools session parser and import mappers."""
 
 import os
-import struct
 from pathlib import Path
 
 import pytest
+
+from scripts.fixture_builders import build_synthetic_ptx
 
 from logic2ableton.protools_import import (
     build_protools_import_report,
@@ -12,147 +13,17 @@ from logic2ableton.protools_import import (
     protools_to_logic_project,
 )
 from logic2ableton.protools_parser import (
-    _PT_ZERO_TICKS,
     ProToolsMidiNote,
     ProToolsMidiTrack,
     ProToolsParseError,
     ProToolsRegion,
     ProToolsSession,
     ProToolsTrack,
-    PT_TICKS_PER_QUARTER,
-    _deobfuscate,
     parse_protools_session,
 )
 
-PTX_FIXTURE = Path(
-    os.environ.get(
-        "L2A_PTX_FIXTURE",
-        "D:/New Mixes/Miley Cyrus - Flowers - Scratch tracks (No Band)/"
-        "MC - Flowers - Scratch tracks (No Band).ptx",
-    )
-)
-
-
-# ---------------------------------------------------------------------------
-# Synthetic session builder: assembles the block structure byte-by-byte from
-# the documented format, then applies the (symmetric) XOR obfuscation.
-# ---------------------------------------------------------------------------
-
-def _blk(btype: int, ctype: int, payload: bytes) -> bytes:
-    return (
-        b"\x5a"
-        + struct.pack("<H", btype)
-        + struct.pack("<I", len(payload) + 2)
-        + struct.pack("<H", ctype)
-        + payload
-    )
-
-
-def _pstring(text: str) -> bytes:
-    raw = text.encode("utf-8")
-    return struct.pack("<I", len(raw)) + raw
-
-
-def _three_point(start: int, offset: int, length: int) -> bytes:
-    # descriptor: widths (4 bytes each) in the high nibbles of bytes 1..3
-    return bytes([0, 0x40, 0x40, 0x40, 0]) + struct.pack("<III", offset, length, start)
-
-
-def _midi_event(pos_ticks: int, note: int, length_ticks: int, velocity: int) -> bytes:
-    ev = bytearray(35)
-    ev[0:5] = pos_ticks.to_bytes(5, "little")
-    ev[8] = note
-    ev[9:14] = length_ticks.to_bytes(5, "little")
-    ev[17] = velocity
-    return bytes(ev)
-
-
-def build_synthetic_ptx(
-    tmp_path: Path,
-    *,
-    sample_rate: int = 48000,
-    wav_name: str = "Guitar.wav",
-    wav_frames: int = 44100,
-    region=(96000, 1000, 22050),  # (start, offset, length) in samples
-    track_name: str = "Guitar",
-    midi: bool = True,
-) -> Path:
-    start, offset, length = region
-
-    header = bytes([0x03]) + b"0010111100101011" + bytes([0x00, 0x05, 77])
-    assert len(header) == 20
-
-    first = _blk(1, 0x2206, b"\x00\x00")  # 11 bytes -> next block lands at 0x1F
-    version = _blk(1, 0x2067, b"\x00" * 18 + struct.pack("<I", 10))  # 2 + 10 = v12
-
-    rate = _blk(2, 0x1028, b"\x00\x00" + struct.pack("<I", sample_rate))
-
-    wav_entry = _pstring(wav_name) + b"WAVE" + b"\x00" * 5
-    wav_names = _blk(2, 0x103A, b"\x00" * 9 + wav_entry)
-    wav_meta = _blk(2, 0x1003, _blk(2, 0x1001, b"\x00" * 6 + struct.pack("<Q", wav_frames)))
-    wav_list = _blk(1, 0x1004, struct.pack("<I", 1) + wav_names + wav_meta)
-
-    inner = _blk(2, 0x2628, b"\x00\x00")
-    region_entry = _blk(
-        2,
-        0x2629,
-        b"\x00" * 9 + _pstring("Guitar-01") + _three_point(start, offset, length)
-        + inner
-        + struct.pack("<I", 0),  # wav index trailing the inner block
-    )
-    region_list = _blk(1, 0x262A, struct.pack("<I", 1) + region_entry)
-
-    placement = _blk(2, 0x104F, b"\x00\x00" + struct.pack("<I", 0) + b"\x00" + struct.pack("<I", start))
-    lane_entry_payload = bytearray(placement)
-    lane_entry_payload += b"\x00" * (45 - len(lane_entry_payload))  # fade byte at 44 stays 0
-    lane_entry = _blk(2, 0x1050, bytes(lane_entry_payload))
-    lane = _blk(2, 0x1052, _pstring(track_name) + lane_entry)
-    track_map = _blk(1, 0x1054, b"\x00\x00" + lane)
-
-    parts = [rate, wav_list, region_list, track_map]
-
-    if midi:
-        note_region_ticks = 4 * PT_TICKS_PER_QUARTER
-        # Event positions are absolute ticks; the first event's position doubles
-        # as the chunk's zero reference (there is no separate zero field).
-        zero = 500_000_000
-        events = _midi_event(zero, 60, 2 * PT_TICKS_PER_QUARTER, 100) + _midi_event(
-            zero + 2 * PT_TICKS_PER_QUARTER, 64, PT_TICKS_PER_QUARTER, 90
-        )
-        midi_block = _blk(
-            1,
-            0x2000,
-            b"MdNLB" + b"\x00" * 6 + struct.pack("<I", 2) + events,
-        )
-        midi_names = _blk(1, 0x2519, _blk(2, 0x251A, b"\x00\x00" + _pstring("Synth")))
-        mr_entry = _blk(2, 0x2628, b"\x00\x00")
-        midi_regions = _blk(
-            1, 0x2634, _blk(2, 0x2633, mr_entry + struct.pack("<I", 0))
-        )
-        midi_placement = _blk(
-            2,
-            0x104F,
-            b"\x00\x00" + struct.pack("<I", 0) + b"\x00"
-            + (_PT_ZERO_TICKS + note_region_ticks).to_bytes(5, "little"),
-        )
-        midi_lane = _blk(2, 0x1057, _blk(2, 0x1056, midi_placement))
-        midi_map = _blk(1, 0x1058, b"\x00\x00" + midi_lane)
-        parts += [midi_block, midi_names, midi_regions, midi_map]
-
-    # Pad past the first 4 KiB page so content is genuinely XOR-obfuscated
-    # (page 0's key byte is always zero).
-    plaintext = header + first + version
-    plaintext += b"\x00" * (4096 - len(plaintext))
-    plaintext += b"".join(parts)
-
-    # The XOR transform is symmetric: applying the deobfuscation routine to
-    # plaintext produces the obfuscated file.
-    obfuscated = _deobfuscate(plaintext)
-    assert obfuscated[0x1000:] != plaintext[0x1000:], "expected content pages to be obfuscated"
-
-    ptx = tmp_path / "Synthetic Session.ptx"
-    ptx.write_bytes(obfuscated)
-    return ptx
+_PTX_FIXTURE_PATH = os.environ.get("L2A_PTX_FIXTURE")
+PTX_FIXTURE = Path(_PTX_FIXTURE_PATH) if _PTX_FIXTURE_PATH else None
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +169,7 @@ def test_synthetic_ptx_to_als_round_trip(tmp_path):
 
 @pytest.mark.needs_ptx_fixture
 def test_parse_real_session_ground_truth():
+    assert PTX_FIXTURE is not None
     session = parse_protools_session(PTX_FIXTURE)
     assert session.version == 12
     assert session.sample_rate == 96000
@@ -315,6 +187,7 @@ def test_parse_real_session_ground_truth():
 
 @pytest.mark.needs_ptx_fixture
 def test_import_real_session_merges_lanes():
+    assert PTX_FIXTURE is not None
     session = parse_protools_session(PTX_FIXTURE)
     project = protools_to_logic_project(session, tempo=120.0)
     # Lane pairs merge to one track each; empty tracks are dropped.

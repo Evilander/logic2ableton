@@ -47,6 +47,7 @@ version = { attr = "logic2ableton.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
     "needs_test_project: test requires a local .logicx project",
     "needs_vst3: test requires local VST3 plugins",

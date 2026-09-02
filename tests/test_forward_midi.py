@@ -1,45 +1,19 @@
 """Tests for forward-lane MIDI extraction from Logic ProjectData and .mid export."""
 
-import plistlib
 import struct
 from pathlib import Path
 
-import pytest
+from scripts.fixture_builders import (
+    build_logic_project_data as _project_data,
+    build_synthetic_logicx as _make_logicx,
+)
 
-from logic2ableton.logic_parser import _MIDI_NOTE_SIGNATURE, extract_midi_notes, parse_logic_project
+from logic2ableton.logic_parser import extract_midi_notes, parse_logic_project
 from logic2ableton.models import LogicMidiNote, LogicMidiTrack, LogicProject
 from logic2ableton.cli import _export_logic_midi
 
 
-def _note_record(pitch: int, velocity: int, position_ticks: int, duration_ticks: int) -> bytes:
-    """Build a synthetic Logic note record matching the reverse-engineered layout.
-
-    Layout relative to the signature start S:
-      S-9..S-6 = position (LE32), S-5..S-3 = filler, S-2 = velocity, S-1 = pitch,
-      S..S+14 = signature, S+15..S+18 = duration (LE32).
-    """
-    return (
-        struct.pack("<I", position_ticks)
-        + b"\x00\x00\x00"
-        + bytes([velocity, pitch])
-        + _MIDI_NOTE_SIGNATURE
-        + struct.pack("<I", duration_ticks)
-    )
-
-
-def _project_data(sequences: list[list[tuple]]) -> bytes:
-    """sequences: list of sequences, each a list of (pitch, vel, pos_ticks, dur_ticks)."""
-    blob = b"HEADERPAD" * 4
-    for seq in sequences:
-        blob += b"qSvE" + b"\x00" * 8  # sequence chunk marker + small header
-        for pitch, vel, pos, dur in seq:
-            blob += _note_record(pitch, vel, pos, dur)
-        blob += b"\xf1\x00\x00\x00" + b"\x00" * 8  # end-of-sequence padding
-    return blob
-
-
 def test_extract_midi_notes_single_sequence():
-    PPQ = 960
     data = _project_data([[(61, 99, 38400, 960), (73, 77, 39360, 960), (85, 111, 40320, 1920)]])
     tracks = extract_midi_notes(Path("/x.logicx"), _data=data)
     assert len(tracks) == 1
@@ -93,25 +67,6 @@ def test_extract_midi_notes_relative_fallback_before_bar1_anchor():
     assert starts == [0.0, 2.0]
     assert len(warnings) == 1
     assert "relative to the earliest note" in warnings[0]
-
-
-def _make_logicx(tmp_path, *, project_data: bytes, sampler_files: list[str] | None = None) -> Path:
-    """Synthesize a minimal .logicx bundle for parser-level tests."""
-    root = tmp_path / "Synth.logicx"
-    (root / "Resources").mkdir(parents=True)
-    (root / "Alternatives" / "000").mkdir(parents=True)
-    with open(root / "Resources" / "ProjectInformation.plist", "wb") as f:
-        plistlib.dump({"VariantNames": {"0": "Synth"}, "ActiveVariant": 0}, f)
-    meta = {
-        "BeatsPerMinute": 120.0,
-        "SampleRate": 44100,
-        "NumberOfTracks": 0,
-        "SamplerInstrumentsFiles": sampler_files or [],
-    }
-    with open(root / "Alternatives" / "000" / "MetaData.plist", "wb") as f:
-        plistlib.dump(meta, f)
-    (root / "Alternatives" / "000" / "ProjectData").write_bytes(project_data)
-    return root
 
 
 def test_parse_warns_when_instruments_present_but_midi_undecodable(tmp_path):

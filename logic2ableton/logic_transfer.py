@@ -15,7 +15,6 @@ from pathlib import Path
 
 from logic2ableton.models import AbletonAudioClip, AbletonMidiTrack, AbletonProject, AbletonTrack
 from logic2ableton.smf import (
-    MIDI_TICKS_PER_QUARTER,
     beats_to_ticks,
     build_midi_note_file,
     tempo_meta,
