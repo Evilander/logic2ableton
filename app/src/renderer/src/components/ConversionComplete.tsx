@@ -29,6 +29,7 @@ export default function ConversionComplete({
   onConvertAnother,
 }: ConversionCompleteProps) {
   const [showReport, setShowReport] = useState(false)
+  const [openError, setOpenError] = useState<string | null>(null)
   const routeDirection = result?.direction ?? direction
 
   if (error) {
@@ -121,13 +122,19 @@ export default function ConversionComplete({
             </div>
           )}
 
+          {openError && <p role="alert" className="mt-4 select-text text-[12px] text-error">{openError}</p>}
           <div className="mt-5 grid grid-cols-2 gap-2">
             <motion.button
               type="button"
               whileHover={{ scale: 1.01 }}
               whileTap={{ scale: 0.99 }}
               transition={SPRING}
-              onClick={() => window.api.showInFolder(result.artifactPath)}
+              onClick={() => {
+                setOpenError(null)
+                void window.api.showInFolder(result.artifactPath).catch((error) => {
+                  setOpenError(error instanceof Error ? error.message : String(error))
+                })
+              }}
               className="flex items-center justify-center gap-2 rounded-xl bg-rose px-4 py-2.5 text-[13px] font-semibold text-bg transition-colors hover:bg-rose-hover"
             >
               <FolderOpen size={16} weight="fill" />

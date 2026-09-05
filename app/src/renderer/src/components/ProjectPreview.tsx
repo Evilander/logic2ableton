@@ -55,7 +55,7 @@ export default function ProjectPreview({
 
   const commitTempo = () => {
     const parsed = Number(tempoDraft)
-    if (!Number.isFinite(parsed)) {
+    if (!tempoDraft.trim() || !Number.isFinite(parsed)) {
       setTempoDraft(String(tempo))
       return
     }

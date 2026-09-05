@@ -109,6 +109,17 @@ def run_smoke(converter: list[str]) -> None:
         _require(protools_transfer_output, "**/IMPORT GUIDE.txt")
         _require(protools_transfer_output, "**/*_protools_transfer_report.txt")
 
+        for mode, source, manifest, guide in (
+            ("protools2logic", protools_session, "timeline_manifest.json", "IMPORT_TO_LOGIC.md"),
+            ("logic2protools", logic_project, "manifest.json", "IMPORT GUIDE.txt"),
+        ):
+            output = root / mode
+            _run_converter(converter, mode=mode, source=source, output_dir=output)
+            _require(output, f"**/{manifest}")
+            _require(output, f"**/{guide}")
+            _require(output, "**/Audio Files/**/*.wav")
+            _require(output, "**/*.mid")
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -131,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("provide a standalone converter path or use --source")
 
     run_smoke(converter)
-    print("Standalone smoke passed: four representative conversion lanes")
+    print("Standalone smoke passed: all six conversion lanes")
     return 0
 
 

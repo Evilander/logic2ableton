@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from logic2ableton.audio import AUDIO_SUFFIXES
+
 from logic2ableton.models import (
     AbletonAudioClip,
     AbletonMidiClip,
@@ -80,6 +82,19 @@ def _resolve_audio_dir(session: ProToolsSession) -> Path:
     return session.path.parent / "Audio Files"
 
 
+def _source_audio_path(directory: Path, filename: str, warnings: list[str]) -> Path | None:
+    candidate = (directory / filename.replace("\\", "/")).resolve()
+    if not candidate.is_relative_to(directory.resolve()):
+        warning = f"Blocked source audio reference outside the session folder: {filename}"
+    elif candidate.suffix.lower() not in AUDIO_SUFFIXES:
+        warning = f"Unsupported source audio format '{candidate.suffix or '(none)'}', clip skipped: {filename}"
+    else:
+        return candidate
+    if warning not in warnings:
+        warnings.append(warning)
+    return None
+
+
 def _tempo_warning(tempo: float) -> str:
     return (
         f"Pro Tools session tempo is not recoverable from .ptx yet; positions were "
@@ -110,7 +125,9 @@ def protools_to_logic_project(
         for region in track.regions:
             if not region.filename:
                 continue
-            file_path = audio_dir / region.filename
+            file_path = _source_audio_path(audio_dir, region.filename, warnings)
+            if file_path is None:
+                continue
             if not file_path.exists():
                 missing.append(region.filename)
             audio_refs.append(
@@ -125,6 +142,7 @@ def protools_to_logic_project(
                     content_offset_samples=region.offset_samples,
                     content_duration_samples=region.length_samples,
                     clip_name=region.name,
+                    timeline_sample_rate=session.sample_rate,
                 )
             )
 
@@ -194,7 +212,9 @@ def protools_to_ableton_project(
         for region in track.regions:
             if not region.filename:
                 continue
-            file_path = audio_dir / region.filename
+            file_path = _source_audio_path(audio_dir, region.filename, warnings)
+            if file_path is None:
+                continue
             source_issue = None
             if not file_path.exists():
                 missing.append(region.filename)

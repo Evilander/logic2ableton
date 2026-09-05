@@ -47,12 +47,9 @@ def create_test_als(
 
     root = ET.Element("Ableton")
     live_set = ET.SubElement(root, "LiveSet")
-    transport = ET.SubElement(live_set, "Transport")
-    tempo = ET.SubElement(ET.SubElement(transport, "Tempo"), "Manual")
-    tempo.set("Value", "128")
-    ts = ET.SubElement(ET.SubElement(transport, "TimeSignatures"), "RemoteableTimeSignature")
-    ET.SubElement(ts, "Numerator").set("Value", "4")
-    ET.SubElement(ts, "Denominator").set("Value", "4")
+    mixer = ET.SubElement(ET.SubElement(ET.SubElement(live_set, "MainTrack"), "DeviceChain"), "Mixer")
+    ET.SubElement(ET.SubElement(mixer, "Tempo"), "Manual").set("Value", "128")
+    ET.SubElement(ET.SubElement(mixer, "TimeSignature"), "Manual").set("Value", "201")
 
     locators = ET.SubElement(ET.SubElement(live_set, "Locators"), "Locators")
     locator = ET.SubElement(locators, "Locator")

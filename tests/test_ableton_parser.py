@@ -37,7 +37,8 @@ def test_parse_ableton_project_preserves_clip_positions(tmp_path):
     clips = {clip.clip_name: clip for clip in project.clips}
     assert clips["Kick Loop"].start_beats == 1.0
     assert clips["Kick Loop"].end_beats == 5.0
-    assert clips["Lead Vox"].source_in_beats == 0.5
+    assert clips["Lead Vox"].source_in_seconds == 0.5
+    assert clips["Lead Vox"].source_in_beats == 0.5 * project.tempo / 60
 
 
 def test_parse_ableton_project_falls_back_to_relative_paths_when_absolute_is_stale(tmp_path):

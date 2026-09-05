@@ -48,6 +48,7 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Timeline placement from bundled WAV BWF timestamps and Logic AIFF `MARK` chunks
 - Tempo and time signature
 - Overlap resolution for takes and comp bounces
+- Audio membership follows the selected Logic alternative; unused and unreferenced takes are excluded
 - Distinct per-track colors, with arrangement clips matching their track color
 - MIDI notes decoded from Logic's binary project data land as **native Ableton MIDI tracks** inside the `.als` (and as Standard MIDI file exports), placed at their absolute arrangement positions
 - Optional mixer overrides from JSON
@@ -98,6 +99,7 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Plugin parameters are not recreated
 - Imported audio without embedded timestamps defaults to bar 1
 - Media outside `Media/Audio Files` is not copied automatically
+- WAV duration detection includes IEEE float recordings. Sources whose duration cannot be read are skipped with a report warning
 
 ### Ableton to Logic
 
@@ -106,8 +108,10 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Looping MIDI clips are unrolled to their arrangement length, honoring the loop brace and start marker the way Live plays them (verified against Live 12.4's own Consolidate output); notes cut at a loop or clip boundary are shortened, not extended
 - Ableton devices, racks, plugin state, and return-bus processing are not transferred
 - Warped clips are exported with best-effort timing, but they still need review inside Logic before delivery
-- Tempo and markers are exported into the Logic Timeline MIDI file; do not assume time-signature changes are fully reconstructed unless you verify them in Logic
+- The base tempo, meter, and markers are exported into the Logic Timeline MIDI file. Later tempo and meter changes are reported but are not reconstructed
 - Non-PCM sources that cannot be rendered to timestamped WAV in-process are copied as references and flagged in the report/manifest
+- Media references outside the Ableton project folder are blocked. Use Live's **Collect All and Save** before transferring a set that relies on external files
+- PCM and float audio are rendered in chunks. Individual rendered WAVs are limited to the RIFF format's 4 GiB size limit
 - The transfer package covers audio and MIDI; use the stems and MIDI files first, then clip exports and the manifest if you need finer reconstruction
 
 ### Pro Tools lanes
@@ -275,7 +279,7 @@ ableton2logic "/path/to/MySet.als" --output ./output --json-progress
 | `--mode` | Force any of the six lane names (`logic2ableton`, `ableton2logic`, `protools2ableton`, `protools2logic`, `ableton2protools`, `logic2protools`) |
 | `--output`, `-o` | Output directory |
 | `--report-only` | Write the transfer report without generating output files |
-| `--no-copy` | Do not copy audio files into the generated project/package |
+| `--no-copy` | Do not copy audio. Generated Live sets reference the original files; transfer packages contain metadata and MIDI only |
 | `--json-progress` | Emit JSON progress lines for GUI or automation use |
 
 ### Logic to Ableton Only
@@ -295,6 +299,10 @@ ableton2logic "/path/to/MySet.als" --output ./output --json-progress
 | `--tempo` | Tempo (BPM) used to convert sample positions to beats; `.ptx` does not expose its tempo yet (default 120) |
 
 ## Output Layout
+
+Each conversion creates a fresh project or transfer folder. If the name already
+exists, the new folder gets a suffix such as `(2)`, preserving the earlier export.
+Project and track names are made safe for filenames on Windows and macOS.
 
 ### Logic (or Pro Tools) to Ableton
 
@@ -392,7 +400,7 @@ Tests against real sessions are optional and skipped by default. To run them,
 point `L2A_LOGIC_FIXTURE` at a local `.logicx` package and `L2A_PTX_FIXTURE`
 at a local `.ptx` file before invoking pytest.
 
-Run the four-lane smoke check, which synthesizes a Logic project, a Live set,
+Run the six-lane smoke check, which synthesizes a Logic project, a Live set,
 and a Pro Tools session and converts each through the CLI:
 
 ```bash
@@ -429,7 +437,12 @@ Build the desktop app:
 cd app
 npm ci
 npm run build
+npm run typecheck
+npm test
 ```
+
+The desktop bundles Geist Sans directly; its font license is included in
+`app/src/renderer/public/Geist-LICENSE.txt` and copied into the built app.
 
 Build the Windows release artifacts locally:
 
@@ -448,7 +461,7 @@ GitHub Actions validates:
 - Ruff lint and the desktop app build
 - Python tests on Windows and macOS
 - Python package builds
-- A packaged-binary smoke run through four conversion lanes
+- A packaged-binary smoke run through all six conversion lanes
 - Tagged release packaging for Windows and macOS
 
 Publishing a release is done by pushing a `v*` tag. The workflow uploads the

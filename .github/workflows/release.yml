@@ -36,6 +36,12 @@ jobs:
         working-directory: app
         run: npm run build
 
+      - name: Check TypeScript and desktop behavior
+        working-directory: app
+        run: |
+          npm run typecheck
+          npm test
+
   test:
     needs: lint
     strategy:

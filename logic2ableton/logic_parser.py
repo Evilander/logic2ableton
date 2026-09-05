@@ -51,6 +51,7 @@ def parse_metadata(logicx_path: Path, alternative: int = 0) -> dict:
         "song_gender_key": data.get("SongGenderKey", ""),
         "audio_files": [f.replace("Audio Files/", "") for f in data.get("AudioFiles", [])],
         "unused_audio_files": [f.replace("Audio Files/", "") for f in data.get("UnusedAudioFiles", [])],
+        "has_audio_membership": "AudioFiles" in data,
         "software_instrument_files": software_instrument_files,
     }
 
@@ -197,7 +198,7 @@ def extract_midi_notes(
     i = 0
     while (i := data.find(_MIDI_NOTE_SIGNATURE, i)) >= 0:
         i += 15
-        if i < 24:
+        if i < 24 or i + 4 > len(data):
             continue
         velocity = data[i - 17]
         pitch = data[i - 16]
@@ -254,16 +255,25 @@ def _get_bwf_time_reference(file_path: Path) -> int | None:
             if riff != b"RIFF":
                 return None
             file_size = struct.unpack("<I", f.read(4))[0]
-            f.read(4)  # WAVE
-            while f.tell() < file_size + 8:
+            if f.read(4) != b"WAVE":
+                return None
+            file_end = min(file_size + 8, file_path.stat().st_size)
+            while f.tell() + 8 <= file_end:
                 chunk_id = f.read(4)
                 if len(chunk_id) < 4:
                     break
                 chunk_size = struct.unpack("<I", f.read(4))[0]
+                if f.tell() + chunk_size > file_end:
+                    return None
                 if chunk_id == b"bext" and chunk_size >= 346:
-                    chunk_data = f.read(chunk_size)
+                    chunk_data = f.read(346)
                     return struct.unpack_from("<Q", chunk_data, 338)[0]
-                f.seek(chunk_size + (chunk_size % 2), 1)
+                f.seek(chunk_size, 1)
+                if chunk_size % 2 and f.tell() < file_end:
+                    # Logic sometimes omits odd-byte padding before cue/bext.
+                    # The same convention occurs in its AIFF recordings.
+                    if f.read(1) != b"\x00":
+                        f.seek(-1, 1)
     except Exception:
         pass
     return None
@@ -508,6 +518,8 @@ def discover_audio_files(logicx_path: Path) -> list[AudioFileRef]:
     for audio_file in sorted(audio_dir.iterdir()):
         if not audio_file.is_file():
             continue
+        if not audio_file.resolve().is_relative_to(logicx_path.resolve()):
+            continue
         if audio_file.suffix.lower() not in (".wav", ".aif", ".aiff", ".mp3", ".m4a"):
             continue
         track_name, take_number, is_comp, comp_name = parse_audio_filename(audio_file.name)
@@ -596,6 +608,13 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
     alternative = resolve_alternative(logicx_path, alternative, info.get("active_variant"))
     meta = parse_metadata(logicx_path, alternative=alternative)
     audio_files = discover_audio_files(logicx_path)
+    discovered_count = len(audio_files)
+    active_names = set(meta["audio_files"])
+    unused_names = set(meta["unused_audio_files"])
+    audio_files = [
+        ref for ref in audio_files
+        if (ref.filename in active_names if meta["has_audio_membership"] else ref.filename not in unused_names)
+    ]
 
     # Read ProjectData once, share across extractors.
     project_data = _read_project_data(logicx_path, alternative)
@@ -614,10 +633,15 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
             track_names.append(ref.track_name)
 
     compatibility_warnings = _build_compatibility_warnings(meta, audio_files, regions, midi_tracks)
+    excluded_count = discovered_count - len(audio_files)
+    if excluded_count:
+        compatibility_warnings.append(
+            f"Excluded {excluded_count} unused or unreferenced audio file(s) from the selected Logic alternative."
+        )
     compatibility_warnings.extend(midi_warnings)
 
     return LogicProject(
-        name=info["name"],
+        name=info["variant_names"].get(str(alternative), logicx_path.stem),
         tempo=meta["tempo"],
         time_sig_numerator=meta["time_sig_numerator"],
         time_sig_denominator=meta["time_sig_denominator"],

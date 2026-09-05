@@ -13,11 +13,14 @@ import gzip
 import io
 import math
 import shutil
-import struct
 import sys
-import wave
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from dataclasses import replace
+
+from logic2ableton.audio import read_audio_info
+from logic2ableton.ableton_metadata import encode_meter, set_global_parameter
+from logic2ableton.paths import create_output_directory, safe_name
 
 from logic2ableton.models import AudioFileRef, LogicMidiTrack, LogicProject, TrackMixerState
 
@@ -74,50 +77,12 @@ def _format_ableton_number(value: float) -> str:
 
 
 def _get_audio_info(file_path: Path) -> tuple[int, int]:
-    """Read audio file header. Returns (nframes, sample_rate).
-
-    Supports both WAV (RIFF) and AIFF (FORM/AIFF) formats.
-    """
-    ext = file_path.suffix.lower()
-
-    # Try WAV first
-    if ext == ".wav":
-        try:
-            with wave.open(str(file_path), "rb") as w:
-                return w.getnframes(), w.getframerate()
-        except Exception:
-            return 0, 44100
-
-    # AIFF: parse COMM chunk for nframes and sample rate
-    if ext in (".aif", ".aiff"):
-        try:
-            with open(file_path, "rb") as f:
-                form = f.read(4)
-                if form != b"FORM":
-                    return 0, 44100
-                file_size = struct.unpack(">I", f.read(4))[0]
-                f.read(4)  # AIFF or AIFC
-                while f.tell() < file_size + 8:
-                    chunk_id = f.read(4)
-                    if len(chunk_id) < 4:
-                        break
-                    chunk_size = struct.unpack(">I", f.read(4))[0]
-                    if chunk_id == b"COMM":
-                        data = f.read(chunk_size)
-                        nframes = struct.unpack(">I", data[2:6])[0]
-                        # Decode 80-bit IEEE 754 extended float for sample rate
-                        sr_bytes = data[8:18]
-                        exponent = ((sr_bytes[0] & 0x7F) << 8) | sr_bytes[1]
-                        mantissa = int.from_bytes(sr_bytes[2:10], "big")
-                        sample_rate = mantissa * (2.0 ** (exponent - 16383 - 63))
-                        return nframes, int(sample_rate)
-                    else:
-                        f.seek(chunk_size + (chunk_size % 2), 1)
-        except Exception:
-            pass
-        return 0, 44100
-
-    return 0, 44100
+    """Return source frames and rate, or zeros when the header is unsupported."""
+    try:
+        info = read_audio_info(file_path)
+        return info.frame_count, info.sample_rate
+    except (OSError, ValueError):
+        return 0, 0
 
 
 class _IdAllocator:
@@ -214,7 +179,8 @@ def _make_audio_clip_xml(
     """
     # Get duration and sample rate from WAV header
     file_duration_samples, file_sample_rate = _get_audio_info(ref.file_path)
-    timeline_sample_rate = file_sample_rate if file_sample_rate > 0 else sample_rate
+    timeline_sample_rate = ref.timeline_sample_rate or file_sample_rate or sample_rate
+    source_sample_rate = file_sample_rate or sample_rate
 
     def to_beats(samples: int) -> float:
         return samples * tempo / (timeline_sample_rate * 60)
@@ -227,8 +193,11 @@ def _make_audio_clip_xml(
         content_samples = max(0, file_duration_samples - offset_samples)
 
     duration_samples = file_duration_samples
-    duration_beats = to_beats(content_samples) if content_samples > 0 else 4.0
-    duration_secs = duration_samples / file_sample_rate if duration_samples > 0 and file_sample_rate > 0 else 2.0
+    if content_samples <= 0:
+        raise ValueError(f"Cannot determine audio duration: {ref.filename}")
+    duration_beats = to_beats(content_samples)
+    duration_secs = (duration_samples / source_sample_rate if duration_samples > 0
+                     else (offset_samples + content_samples) / timeline_sample_rate)
     offset_beats = to_beats(offset_samples)
 
     # Calculate timeline position from BWF timestamp
@@ -248,7 +217,7 @@ def _make_audio_clip_xml(
     loop = ET.SubElement(clip, "Loop")
     _val(loop, "LoopStart", _format_ableton_number(offset_beats))
     _val(loop, "LoopEnd", _format_ableton_number(offset_beats + duration_beats))
-    _val(loop, "StartRelative", _format_ableton_number(offset_beats))
+    _val(loop, "StartRelative", "0")
     _val(loop, "LoopOn", "false")
 
     clip_name = ref.clip_name or ref.filename.rsplit(".", 1)[0]
@@ -283,7 +252,7 @@ def _make_audio_clip_xml(
     wm_end = ET.SubElement(warp_markers, "WarpMarker")
     wm_end.set("Id", str(allocator.next()))
     wm_end.set("SecTime", str(duration_secs))
-    wm_end.set("BeatTime", str(duration_beats))
+    wm_end.set("BeatTime", str(duration_secs * tempo / 60))
 
     # WarpMode: 0 = Beats (default for arrangement clips)
     _val(clip, "WarpMode", "0")
@@ -291,13 +260,11 @@ def _make_audio_clip_xml(
     # SampleRef — use absolute path so Ableton can find the audio
     sample_ref = ET.SubElement(clip, "SampleRef")
     file_ref = ET.SubElement(sample_ref, "FileRef")
-    _val(file_ref, "RelativePathType", "1")
-    _val(file_ref, "RelativePath", f"Samples/Imported/{ref.filename}")
-    if project_folder:
-        abs_path = (project_folder / "Samples" / "Imported" / ref.filename).resolve()
-        _val(file_ref, "Path", str(abs_path).replace("\\", "/"))
-    else:
-        _val(file_ref, "Path", "")
+    _val(file_ref, "RelativePathType", "1" if project_folder else "0")
+    _val(file_ref, "RelativePath", f"Samples/Imported/{ref.filename}" if project_folder else "")
+    abs_path = ((project_folder / "Samples" / "Imported" / ref.filename)
+                if project_folder else ref.file_path).resolve()
+    _val(file_ref, "Path", str(abs_path).replace("\\", "/"))
     _val(file_ref, "Type", "1")
     _val(file_ref, "LivePackName", "")
     _val(file_ref, "LivePackId", "")
@@ -314,7 +281,7 @@ def _make_audio_clip_xml(
     ET.SubElement(sample_ref, "SourceContext")
     _val(sample_ref, "SampleUsageHint", "0")
     _val(sample_ref, "DefaultDuration", str(duration_samples))
-    _val(sample_ref, "DefaultSampleRate", str(file_sample_rate))
+    _val(sample_ref, "DefaultSampleRate", str(source_sample_rate))
 
     # Envelopes
     envelopes = ET.SubElement(clip, "Envelopes")
@@ -366,6 +333,12 @@ def _resolve_overlaps(clips: list[AudioFileRef], tempo: float, sample_rate: int)
         return []
     if len(clips) == 1:
         return clips
+
+    # Explicit arrangement regions are edits, not alternate Logic takes.
+    placed = [clip for clip in clips if clip.content_duration_samples is not None]
+    if placed:
+        takes = [clip for clip in clips if clip.content_duration_samples is None]
+        return sorted(placed + _resolve_overlaps(takes, tempo, sample_rate), key=lambda clip: clip.start_position_samples)
 
     # Sort by start position
     sorted_clips = sorted(clips, key=lambda c: c.start_position_samples)
@@ -669,8 +642,9 @@ def generate_als(
         Path to the created .als file.
     """
     output_dir = Path(output_dir)
-    project_folder = output_dir / f"{project.name} Project"
-    project_folder.mkdir(parents=True, exist_ok=True)
+    if not math.isfinite(project.tempo) or project.tempo <= 0:
+        raise ValueError("Project tempo must be finite and positive")
+    meter = encode_meter(project.time_sig_numerator, project.time_sig_denominator)
 
     # Load the real Ableton template
     resolved_template = _find_template(template_path)
@@ -680,7 +654,9 @@ def generate_als(
             "Ensure Ableton Live 12 is installed."
         )
 
-    tree = ET.parse(gzip.open(resolved_template))
+    project_folder = create_output_directory(output_dir, f"{project.name} Project")
+    with gzip.open(resolved_template) as template:
+        tree = ET.parse(template)
     root = tree.getroot()
     live_set = root.find("LiveSet")
 
@@ -711,8 +687,32 @@ def generate_als(
 
     # Group audio files by track name
     clips_by_track: dict[str, list[AudioFileRef]] = {}
+    export_refs: list[AudioFileRef] = []
+    source_names: dict[Path, str] = {}
+    used_names: set[str] = set()
     for ref in project.audio_files:
-        clips_by_track.setdefault(ref.track_name, []).append(ref)
+        frames, _ = _get_audio_info(ref.file_path)
+        content = ref.content_duration_samples
+        if content is None:
+            content = frames - max(0, ref.content_offset_samples)
+        if content <= 0:
+            warning = f"Skipped {ref.filename}: audio duration could not be read (missing or unsupported source)."
+            if warning not in project.compatibility_warnings:
+                project.compatibility_warnings.append(warning)
+            continue
+        source = ref.file_path.resolve()
+        if source not in source_names:
+            base = safe_name(Path(ref.filename.replace("\\", "/")).stem) + ref.file_path.suffix.lower()
+            name = base
+            number = 2
+            while name.casefold() in used_names:
+                name = f"{Path(base).stem} ({number}){Path(base).suffix}"
+                number += 1
+            source_names[source] = name
+            used_names.add(name.casefold())
+        exported = replace(ref, filename=source_names[source])
+        export_refs.append(exported)
+        clips_by_track.setdefault(ref.track_name, []).append(exported)
 
     # Create one audio track per Logic track
     for i, track_name in enumerate(project.track_names):
@@ -729,7 +729,7 @@ def generate_als(
             project.sample_rate,
             project.time_sig_numerator,
             project.time_sig_denominator,
-            project_folder,
+            project_folder if copy_audio else None,
             color=color,
         )
 
@@ -769,29 +769,8 @@ def generate_als(
     if next_id_elem is not None:
         next_id_elem.set("Value", str(allocator.current))
 
-    # Set tempo on MainTrack mixer
-    main_track = live_set.find("MainTrack")
-    if main_track is not None:
-        tempo_elem = main_track.find(".//Tempo/Manual")
-        if tempo_elem is not None:
-            tempo_elem.set("Value", _format_ableton_number(project.tempo))
-
-    # Set tempo in Transport
-    transport = live_set.find("Transport")
-    if transport is not None:
-        tempo_manual = transport.find(".//Tempo/Manual")
-        if tempo_manual is not None:
-            tempo_manual.set("Value", _format_ableton_number(project.tempo))
-
-        # Set time signature
-        ts = transport.find(".//TimeSignatures/RemoteableTimeSignature")
-        if ts is not None:
-            num = ts.find("Numerator")
-            if num is not None:
-                num.set("Value", str(project.time_sig_numerator))
-            den = ts.find("Denominator")
-            if den is not None:
-                den.set("Value", str(project.time_sig_denominator))
+    set_global_parameter(live_set, "Tempo", _format_ableton_number(project.tempo))
+    set_global_parameter(live_set, "TimeSignature", str(meter))
 
     # Update the Creator attribute
     root.set("Creator", "logic2ableton converter")
@@ -801,7 +780,7 @@ def generate_als(
     tree.write(buffer, encoding="UTF-8", xml_declaration=True)
     xml_bytes = buffer.getvalue()
 
-    als_path = project_folder / f"{project.name}.als"
+    als_path = project_folder / f"{safe_name(project.name)}.als"
     with gzip.open(als_path, "wb") as f:
         f.write(xml_bytes)
 
@@ -809,7 +788,7 @@ def generate_als(
     if copy_audio:
         samples_dir = project_folder / "Samples" / "Imported"
         samples_dir.mkdir(parents=True, exist_ok=True)
-        for audio_ref in project.audio_files:
+        for audio_ref in export_refs:
             dest = samples_dir / audio_ref.filename
             if audio_ref.file_path.exists():
                 shutil.copy2(audio_ref.file_path, dest)

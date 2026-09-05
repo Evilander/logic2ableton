@@ -2,7 +2,7 @@
 
 @font-face {
   font-family: "Geist Sans";
-  src: url("../../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2") format("woff2");
+  src: url("./fonts/Geist-Variable.woff2") format("woff2");
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
@@ -309,4 +309,9 @@ button {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-tertiary);
+}
+
+/* Reports and diagnostic details should remain selectable for sharing. */
+pre, [role="alert"] {
+  user-select: text;
 }

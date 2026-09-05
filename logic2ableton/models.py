@@ -16,6 +16,7 @@ class AudioFileRef:
     content_offset_samples: int = 0        # Slice start within the source file
     content_duration_samples: int | None = None  # Slice length; None = whole file
     clip_name: str | None = None           # Display name; None = filename stem
+    timeline_sample_rate: int | None = None  # Explicit arrangement sample clock (Pro Tools)
 
 
 @dataclass
@@ -103,6 +104,7 @@ class AbletonAudioClip:
     is_warped: bool = False
     is_disabled: bool = False
     source_issue: str | None = None
+    source_in_seconds: float | None = None  # Source-file coordinate, independent of project tempo
 
     @property
     def duration_beats(self) -> float:

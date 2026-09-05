@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import gzip
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from logic2ableton.audio import AUDIO_SUFFIXES
+from logic2ableton.ableton_metadata import decode_meter, has_global_changes, read_global_parameter
 
 from logic2ableton.models import (
     AbletonAudioClip,
@@ -37,18 +41,24 @@ def _value(element: ET.Element | None, default: str = "") -> str:
 
 def _float_value(element: ET.Element | None, default: float = 0.0) -> float:
     try:
-        return float(_value(element, str(default)))
+        value = float(_value(element, str(default)))
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(value):
+        raise ValueError("Non-finite number in Live Set")
+    return value
 
 
 def _float_attr(element: ET.Element | None, name: str, default: float = 0.0) -> float:
     if element is None:
         return default
     try:
-        return float(element.get(name, str(default)))
+        value = float(element.get(name, str(default)))
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(value):
+        raise ValueError("Non-finite number in Live Set")
+    return value
 
 
 def _bool_value(element: ET.Element | None, default: bool = False) -> bool:
@@ -80,7 +90,7 @@ def _project_name(als_path: Path, live_set: ET.Element) -> str:
 
 def _is_within_project(project_root: Path, candidate: Path) -> bool:
     try:
-        candidate.resolve().relative_to(project_root.resolve())
+        candidate.relative_to(project_root)
         return True
     except ValueError:
         return False
@@ -101,6 +111,7 @@ def _resolve_source_path(als_path: Path, file_ref: ET.Element | None) -> tuple[P
         absolute_candidate = Path(absolute_path).expanduser().resolve()
         if not _is_within_project(project_root, absolute_candidate):
             saw_blocked_candidate = True
+            absolute_candidate = None
 
     if relative_path:
         normalized = relative_path.replace("\\", "/")
@@ -112,7 +123,9 @@ def _resolve_source_path(als_path: Path, file_ref: ET.Element | None) -> tuple[P
             relative_candidate = None
 
     for candidate in (relative_candidate, absolute_candidate):
-        if candidate is not None and candidate.exists():
+        if candidate is not None and candidate.is_file():
+            if candidate.suffix.lower() not in AUDIO_SUFFIXES:
+                return None, relative_path or None, "unsupported-media-type"
             return candidate, relative_path or None, None
 
     for candidate in (relative_candidate, absolute_candidate):
@@ -145,10 +158,19 @@ def _parse_locators(live_set: ET.Element) -> list[AbletonLocator]:
     return locators
 
 
-def _parse_clip(clip: ET.Element, als_path: Path, track_name: str, tempo: float) -> AbletonAudioClip | None:
+def _parse_clip(
+    clip: ET.Element, als_path: Path, track_name: str, tempo: float,
+    source_cache: dict[tuple[str, str], tuple[Path | None, str | None, str | None]] | None = None,
+) -> AbletonAudioClip | None:
     sample_ref = clip.find("SampleRef")
     file_ref = sample_ref.find("FileRef") if sample_ref is not None else None
-    source_path, relative_source_path, source_issue = _resolve_source_path(als_path, file_ref)
+    source_key = (_value(file_ref.find("Path")), _value(file_ref.find("RelativePath"))) if file_ref is not None else ("", "")
+    if source_cache is None:
+        source_path, relative_source_path, source_issue = _resolve_source_path(als_path, file_ref)
+    else:
+        if source_key not in source_cache:
+            source_cache[source_key] = _resolve_source_path(als_path, file_ref)
+        source_path, relative_source_path, source_issue = source_cache[source_key]
 
     start_beats = _float_value(clip.find("CurrentStart"), _float_attr(clip, "Time", 0.0))
     end_beats = _float_value(clip.find("CurrentEnd"), start_beats)
@@ -165,7 +187,26 @@ def _parse_clip(clip: ET.Element, als_path: Path, track_name: str, tempo: float)
     if not clip_name:
         clip_name = f"{track_name} clip"
 
-    source_in_beats = _float_value(clip.find("Loop/StartRelative"), 0.0)
+    is_warped = _bool_value(clip.find("IsWarped"))
+    source_start = _float_value(clip.find("Loop/LoopStart")) + _float_value(clip.find("Loop/StartRelative"))
+    source_in_seconds = source_start
+    if is_warped:
+        # Warp markers map content beats to source-file seconds. Interpolate
+        # the start marker even when subsequent time stretching is approximate.
+        markers = sorted({
+            (_float_attr(marker, "BeatTime"), _float_attr(marker, "SecTime"))
+            for marker in clip.findall("WarpMarkers/WarpMarker")
+        })
+        source_in_seconds = source_start * 60 / tempo
+        if markers:
+            source_in_seconds = markers[0][1] + (source_start - markers[0][0]) * 60 / tempo
+        for left, right in zip(markers, markers[1:]):
+            if right[0] <= left[0]:
+                continue
+            source_in_seconds = left[1] + (source_start - left[0]) * (right[1] - left[1]) / (right[0] - left[0])
+            if source_start <= right[0]:
+                break
+    source_in_beats = source_start if is_warped else source_in_seconds * tempo / 60
 
     return AbletonAudioClip(
         clip_name=clip_name,
@@ -175,7 +216,8 @@ def _parse_clip(clip: ET.Element, als_path: Path, track_name: str, tempo: float)
         start_beats=start_beats,
         end_beats=end_beats,
         source_in_beats=source_in_beats,
-        is_warped=_bool_value(clip.find("IsWarped")),
+        source_in_seconds=max(0.0, source_in_seconds),
+        is_warped=is_warped,
         is_disabled=_bool_value(clip.find("Disabled")),
         source_issue=source_issue,
     )
@@ -183,11 +225,12 @@ def _parse_clip(clip: ET.Element, als_path: Path, track_name: str, tempo: float)
 
 def _parse_audio_tracks(live_set: ET.Element, als_path: Path, tempo: float) -> list[AbletonTrack]:
     tracks: list[AbletonTrack] = []
+    source_cache: dict[tuple[str, str], tuple[Path | None, str | None, str | None]] = {}
     for track in live_set.findall(".//Tracks/AudioTrack"):
         track_name = _value(track.find("Name/EffectiveName"), "Audio Track")
         clips: list[AbletonAudioClip] = []
         for clip in track.findall(".//MainSequencer/Sample/ArrangerAutomation/Events/AudioClip"):
-            parsed = _parse_clip(clip, als_path, track_name, tempo)
+            parsed = _parse_clip(clip, als_path, track_name, tempo, source_cache)
             if parsed is not None and not parsed.is_disabled:
                 clips.append(parsed)
         tracks.append(AbletonTrack(name=track_name, clips=clips))
@@ -343,13 +386,17 @@ def _build_compatibility_warnings(project: AbletonProject) -> list[str]:
             f"{len(blocked_external)} clip(s) referenced audio outside the Ableton project folder and were blocked for safety: {examples}"
         )
 
+    unsupported = [clip for clip in clips if clip.source_issue == "unsupported-media-type"]
+    if unsupported:
+        warnings.append(f"{len(unsupported)} clip(s) referenced unsupported media types and were not copied.")
+
     warped = [clip for clip in clips if clip.is_warped]
     if warped:
         examples = ", ".join(clip.clip_name for clip in warped[:5])
         if len(warped) > 5:
             examples += ", ..."
         warnings.append(
-            f"{len(warped)} clip(s) use Ableton warping; source files will be copied as references, but warp rendering must be recreated manually in Logic: {examples}"
+            f"{len(warped)} clip(s) use Ableton warping; source start offsets are preserved, but time stretching and loop playback require review in the destination DAW: {examples}"
         )
 
     if not clips and not project.midi_tracks:
@@ -364,16 +411,27 @@ def parse_ableton_project(als_path: Path) -> AbletonProject:
     root = _read_set_root(als_path)
     live_set = _live_set(root)
 
-    tempo = _float_value(live_set.find(".//Transport//Tempo/Manual"), 120.0)
+    tempo = read_global_parameter(live_set, "Tempo", 120.0)
+    if not math.isfinite(tempo) or tempo <= 0:
+        raise ValueError("The Live Set has an invalid tempo")
     time_sig = live_set.find(".//Transport//TimeSignatures/RemoteableTimeSignature")
+    numerator, denominator = decode_meter(int(read_global_parameter(live_set, "TimeSignature", 201)))
+    if time_sig is not None and live_set.find("MainTrack") is None and live_set.find("MasterTrack") is None:
+        numerator = int(_float_value(time_sig.find("Numerator"), 4))
+        denominator = int(_float_value(time_sig.find("Denominator"), 4))
     project = AbletonProject(
         name=_project_name(als_path, live_set),
         tempo=tempo,
-        time_sig_numerator=int(_float_value(time_sig.find("Numerator") if time_sig is not None else None, 4.0)),
-        time_sig_denominator=int(_float_value(time_sig.find("Denominator") if time_sig is not None else None, 4.0)),
+        time_sig_numerator=numerator,
+        time_sig_denominator=denominator,
         audio_tracks=_parse_audio_tracks(live_set, als_path, tempo),
         locators=_parse_locators(live_set),
         midi_tracks=_parse_midi_tracks(live_set, tempo),
     )
     project.compatibility_warnings = _build_compatibility_warnings(project)
+    for parameter in ("Tempo", "TimeSignature"):
+        if has_global_changes(live_set, parameter):
+            project.compatibility_warnings.append(
+                f"Arrangement {parameter} changes are not transferred; only the value at project start is used."
+            )
     return project

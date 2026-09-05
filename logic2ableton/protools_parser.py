@@ -463,7 +463,7 @@ def _parse_midi(reader: _SessionReader, blocks: list[_Block]) -> list[ProToolsMi
     return tracks
 
 
-def parse_protools_session(ptx_path: Path) -> ProToolsSession:
+def _parse_protools_session(ptx_path: Path) -> ProToolsSession:
     """Parse a Pro Tools session file into a ProToolsSession model."""
     ptx_path = Path(ptx_path)
     raw = ptx_path.read_bytes()
@@ -513,3 +513,13 @@ def parse_protools_session(ptx_path: Path) -> ProToolsSession:
         midi_tracks=midi_tracks,
         compatibility_warnings=warnings,
     )
+
+
+def parse_protools_session(ptx_path: Path) -> ProToolsSession:
+    """Parse a session, consistently reporting corrupt binary structures."""
+    try:
+        return _parse_protools_session(ptx_path)
+    except ProToolsParseError:
+        raise
+    except (IndexError, struct.error, RecursionError, ValueError, OverflowError) as exc:
+        raise ProToolsParseError(f"Malformed Pro Tools session '{Path(ptx_path).name}': {exc}") from exc

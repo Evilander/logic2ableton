@@ -13,6 +13,8 @@ MIDI_TICKS_PER_QUARTER = 960
 
 
 def write_var_len(value: int) -> bytes:
+    if not 0 <= value <= 0x0fffffff:
+        raise ValueError("MIDI variable-length values must be between 0 and 0x0fffffff")
     buffer = value & 0x7F
     encoded = bytearray([buffer])
     value >>= 7

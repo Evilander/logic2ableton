@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import io
 import json
 import shutil
-import struct
-import wave
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterable
+
+from logic2ableton.audio import write_pcm_wav
 
 from logic2ableton.logic_transfer import (
     DecodedAudio,
@@ -17,7 +17,7 @@ from logic2ableton.logic_transfer import (
     _clip_export_name,
     _midi_track_name,
     _read_decoded_audio,
-    _render_clip_pcm,
+    _iter_clip_pcm,
     _safe_name,
     _supports_pcm_render,
 )
@@ -29,6 +29,7 @@ from logic2ableton.models import (
     samples_to_beats,
 )
 from logic2ableton.smf import build_midi_note_file
+from logic2ableton.paths import create_output_directory
 
 TransferProject = AbletonProject | LogicProject
 
@@ -43,51 +44,14 @@ class ProToolsTransferResult:
     transferred_midi_notes: int = 0
 
 
-def _build_pt_bext_chunk(time_reference_samples: int) -> bytes:
-    """Build a bext (Broadcast Wave) chunk stamped for a Pro Tools session.
-
-    TimeReference is a pure from-zero sample count with no SMPTE offset,
-    because a fresh Pro Tools session starts at 00:00:00:00 - unlike Logic's
-    default 01:00:00:00 session start, which the Logic-bound lane accounts
-    for separately when it parses Logic's own audio files.
-    """
-    description = b"Pro Tools Transfer timestamp".ljust(256, b"\x00")
-    originator = b"logic2ableton".ljust(32, b"\x00")
-    originator_reference = b"protools_transfer".ljust(32, b"\x00")
-    origination_date = b"2026-07-10"
-    origination_time = b"00:00:00"
-    payload = bytearray(346)
-    payload[0:256] = description
-    payload[256:288] = originator
-    payload[288:320] = originator_reference
-    payload[320:330] = origination_date
-    payload[330:338] = origination_time
-    struct.pack_into("<Q", payload, 338, max(0, time_reference_samples))
-    return bytes(payload)
-
-
 def _write_pt_wav_with_bext(
-    destination: Path,
-    *,
-    sample_rate: int,
-    channels: int,
-    sample_width: int,
-    frames: bytes,
-    time_reference_samples: int,
+    destination: Path, *, sample_rate: int, channels: int, sample_width: int,
+    frames: bytes | Iterable[bytes], time_reference_samples: int,
 ) -> None:
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as handle:
-        handle.setnchannels(channels)
-        handle.setsampwidth(sample_width)
-        handle.setframerate(sample_rate)
-        handle.writeframes(frames)
-
-    base = buffer.getvalue()
-    bext_payload = _build_pt_bext_chunk(time_reference_samples)
-    bext_chunk = b"bext" + struct.pack("<I", len(bext_payload)) + bext_payload
-    riff_size = len(base) - 8 + len(bext_chunk)
-    rebuilt = b"RIFF" + struct.pack("<I", riff_size) + b"WAVE" + bext_chunk + base[12:]
-    destination.write_bytes(rebuilt)
+    write_pcm_wav(
+        destination, sample_rate=sample_rate, channels=channels, sample_width=sample_width,
+        frames=frames, time_reference_samples=time_reference_samples, originator_reference="protools_transfer",
+    )
 
 
 def _representative_sample_rate(rates: list[int], default: int = 44100) -> int:
@@ -116,17 +80,7 @@ def _render_protools_clip_export(
         shutil.copy2(clip.source_path, destination)
         return "copied-source", None
 
-    rendered = _render_clip_pcm(
-        clip,
-        tempo=tempo,
-        out_rate=decoded.frame_rate,
-        out_channels=decoded.channels,
-        out_width=decoded.sample_width,
-        cache=cache,
-    )
-    if rendered is None:
-        shutil.copy2(clip.source_path, destination)
-        return "copied-source", None
+    rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache)
 
     time_reference = _beats_to_frames(clip.start_beats, tempo, decoded.frame_rate)
     _write_pt_wav_with_bext(
@@ -173,7 +127,7 @@ def _render_protools_logic_audio_export(
         sample_rate=decoded.frame_rate,
         channels=decoded.channels,
         sample_width=decoded.sample_width,
-        frames=decoded.frames,
+        frames=decoded.iter_frames(),
         time_reference_samples=ref.start_position_samples,
     )
     return "timestamped-wav", ref.start_position_samples
@@ -214,6 +168,10 @@ def _export_ableton_audio(
                     decoded = cache.get(clip.source_path)
                     if decoded is not None:
                         decoded_rates.append(decoded.frame_rate)
+                if export_mode == "copied-source":
+                    project.compatibility_warnings.append(
+                        f"Clip '{clip.clip_name}' was copied without PCM rendering; recreate its trim and placement manually."
+                    )
 
             manifest_clips.append(
                 {
@@ -222,6 +180,7 @@ def _export_ableton_audio(
                     "export_name": export_name,
                     "start_beats": round(clip.start_beats, 6),
                     "duration_beats": round(clip.duration_beats, 6),
+                    "source_in_seconds": clip.source_in_seconds,
                     "is_warped": clip.is_warped,
                     "export_mode": export_mode,
                     "time_reference_samples": time_reference_samples,
@@ -271,6 +230,10 @@ def _export_logic_audio(
                 )
                 if export_mode != "reference-only":
                     copied_audio_files += 1
+                if export_mode == "copied-source":
+                    project.compatibility_warnings.append(
+                        f"Audio '{ref.filename}' was copied without a new timestamp; place it using the manifest."
+                    )
 
             manifest_files.append(
                 {
@@ -473,7 +436,7 @@ def generate_protools_transfer(
 ) -> ProToolsTransferResult:
     """Create a Pro Tools-ready import package from a parsed Ableton project."""
     output_dir = Path(output_dir)
-    package_path = output_dir / f"{project.name} Pro Tools Transfer"
+    package_path = create_output_directory(output_dir, f"{project.name} Pro Tools Transfer")
     audio_root = package_path / "Audio Files"
     package_path.mkdir(parents=True, exist_ok=True)
     audio_root.mkdir(parents=True, exist_ok=True)
@@ -528,7 +491,7 @@ def generate_protools_transfer_from_logic(
 ) -> ProToolsTransferResult:
     """Create a Pro Tools-ready import package from a parsed Logic project."""
     output_dir = Path(output_dir)
-    package_path = output_dir / f"{project.name} Pro Tools Transfer"
+    package_path = create_output_directory(output_dir, f"{project.name} Pro Tools Transfer")
     audio_root = package_path / "Audio Files"
     package_path.mkdir(parents=True, exist_ok=True)
     audio_root.mkdir(parents=True, exist_ok=True)

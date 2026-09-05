@@ -1,6 +1,6 @@
 {
   "name": "logic2ableton",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Session transfer between Logic Pro, Ableton Live, and Pro Tools",
   "main": "./out/main/index.js",
   "author": {
@@ -17,11 +17,12 @@
     "prepare:mac-icon": "node ./scripts/generate-mac-icon.mjs",
     "dist": "npm run build && npm run prepare:mac-icon && electron-builder --config electron-builder.yml",
     "dist:win": "electron-vite build && electron-builder --win --config electron-builder.yml",
-    "dist:mac": "npm run build && npm run prepare:mac-icon && electron-builder --mac --config electron-builder.yml"
+    "dist:mac": "npm run build && npm run prepare:mac-icon && electron-builder --mac --config electron-builder.yml",
+    "test": "node --test",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
-    "geist": "^1.7.0",
     "motion": "^12.34.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

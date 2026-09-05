@@ -90,7 +90,7 @@ export default function ConversionProgress({
             <span className="text-[11px] uppercase tracking-[0.12em] text-text-tertiary">Converter log</span>
             <span className="size-1.5 rounded-full bg-gold/70" />
           </div>
-          <div className="max-h-44 min-h-24 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-relaxed text-text-secondary">
+          <div className="select-text max-h-44 min-h-24 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-relaxed text-text-secondary">
             {logs.length > 0 ? (
               logs.slice(-10).map((log, index) => <div key={`${index}-${log}`}>{log}</div>)
             ) : (

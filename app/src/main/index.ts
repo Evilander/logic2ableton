@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process"
 import type { IpcMainInvokeEvent } from "electron"
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron"
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, extname, join, normalize } from "node:path"
 import type { ConversionDirection, ProgressEvent } from "./converter"
 import { CONVERSION_DIRECTIONS, runConversion } from "./converter"
@@ -35,7 +35,15 @@ const ALLOWED_OPEN_EXTENSIONS = new Set([".als", ".txt", ".md", ".json", ".csv"]
 const CONVERSION_DIRECTION_SET = new Set<ConversionDirection>(CONVERSION_DIRECTIONS)
 
 let mainWindow: BrowserWindow | null = null
-let activeJob: { kind: "conversion" | "preview"; child: ChildProcess } | null = null
+interface ActiveJob {
+  kind: "conversion" | "preview"
+  child: ChildProcess | null
+  cancelled: boolean
+  done: Promise<void>
+  finish: () => void
+}
+
+let activeJob: ActiveJob | null = null
 const approvedPaths = new Set<string>()
 
 function createWindow(): void {
@@ -99,30 +107,45 @@ function approvePath(filePath: string | null | undefined): void {
   approvedPaths.add(normalizePathInput(filePath))
 }
 
-function assertApprovedPath(filePath: string): string {
+function assertApprovedPath(filePath: string, opening = false): string {
   const normalized = normalizePathInput(filePath)
   if (!approvedPaths.has(normalized)) {
     throw new Error("Path is not available for this operation")
   }
   const extension = extname(normalized).toLowerCase()
-  if (extension && !ALLOWED_OPEN_EXTENSIONS.has(extension)) {
+  if (opening && !statSync(normalized).isDirectory() && !ALLOWED_OPEN_EXTENSIONS.has(extension)) {
     throw new Error("Unsupported file type")
   }
   return normalized
 }
 
-function clearActiveJob(child?: ChildProcess | null): void {
-  if (!activeJob) return
-  if (!child || activeJob.child.pid === child.pid) {
-    activeJob = null
-  }
-}
-
-function stopActiveJob(): void {
+async function stopActiveJob(): Promise<void> {
   const current = activeJob
-  activeJob = null
-  if (!current || current.child.killed) return
-  current.child.kill()
+  if (!current) return
+  current.cancelled = true
+  const child = current.child
+  if (!child || child.exitCode !== null || child.signalCode !== null) current.finish()
+  else child.once("exit", current.finish)
+  if (current.child && !current.child.killed) current.child.kill()
+  const forceKill = setTimeout(() => {
+    try { current.child?.kill("SIGKILL") } catch { /* The deadline reports a failed cancellation. */ }
+  }, 5000)
+  forceKill.unref()
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      current.done,
+      new Promise<never>((_, reject) => {
+        deadline = setTimeout(() => reject(new Error("The converter did not stop. Try canceling again.")), 10000)
+        deadline.unref()
+      }),
+    ])
+    if (activeJob === current) activeJob = null
+  } finally {
+    clearTimeout(forceKill)
+    clearTimeout(deadline)
+    child?.removeListener("exit", current.finish)
+  }
 }
 
 function startJob(
@@ -142,29 +165,43 @@ function startJob(
   const errorChannel = kind === "preview" ? "preview-error" : "conversion-error"
   const exitChannel = kind === "preview" ? "preview-exit" : "conversion-exit"
 
-  let child: ChildProcess | null = null
-  child = runConversion(
-    direction,
-    normalizePathInput(sourcePath),
-    normalizePathInput(outputDir),
-    (progress: ProgressEvent) => {
-      approvePath(progress.als_path)
-      approvePath(progress.artifact_path)
-      approvePath(progress.package_path)
-      approvePath(progress.report_path)
-      event.sender.send(progressChannel, progress)
-    },
-    (error) => event.sender.send(errorChannel, error),
-    (code) => {
-      clearActiveJob(child)
-      event.sender.send(exitChannel, code)
-    },
-    reportOnly,
-    tempo,
-  )
-
-  if (!child) return
-  activeJob = { kind, child }
+  let finish!: () => void
+  const done = new Promise<void>((resolve) => { finish = resolve })
+  const job: ActiveJob = { kind, child: null, cancelled: false, done, finish }
+  activeJob = job
+  const send = (channel: string, data: unknown) => {
+    if (!job.cancelled && !event.sender.isDestroyed()) event.sender.send(channel, data)
+  }
+  const complete = () => {
+    if (activeJob === job) activeJob = null
+    job.finish()
+  }
+  try {
+    job.child = runConversion(
+      direction,
+      normalizePathInput(sourcePath),
+      normalizePathInput(outputDir),
+      (progress: ProgressEvent) => {
+        if (job.cancelled) return
+        approvePath(progress.als_path)
+        approvePath(progress.artifact_path)
+        approvePath(progress.package_path)
+        approvePath(progress.report_path)
+        send(progressChannel, progress)
+      },
+      (error) => send(errorChannel, error),
+      (code) => {
+        complete()
+        send(exitChannel, code)
+      },
+      reportOnly,
+      tempo,
+    )
+    if (!job.child) complete()
+  } catch (error) {
+    complete()
+    throw error
+  }
 }
 
 function isConversionStats(value: unknown): value is ConversionStats {
@@ -244,8 +281,20 @@ app.whenReady().then(() => {
   })
 })
 
-app.on("before-quit", () => {
-  stopActiveJob()
+let quitRequested = false
+app.on("before-quit", (event) => {
+  const current = activeJob
+  if (!current) return
+  event.preventDefault()
+  if (quitRequested) return
+  quitRequested = true
+  // Wait for actual process termination, including when a cancellation times
+  // out, so a second quit request cannot orphan a running conversion.
+  void current.done.then(() => {
+    if (activeJob === current) activeJob = null
+    app.quit()
+  })
+  void stopActiveJob().catch(() => {})
 })
 
 app.on("window-all-closed", () => {
@@ -326,11 +375,11 @@ ipcMain.handle("start-preview", async (
 })
 
 ipcMain.handle("cancel-active-job", async () => {
-  stopActiveJob()
+  await stopActiveJob()
 })
 
 ipcMain.handle("open-file", async (_, filePath: string) => {
-  return shell.openPath(assertApprovedPath(filePath))
+  return shell.openPath(assertApprovedPath(filePath, true))
 })
 
 ipcMain.handle("show-in-folder", async (_, filePath: string) => {

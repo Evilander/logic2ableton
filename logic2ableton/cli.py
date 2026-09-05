@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
+import gzip
+import math
+import xml.etree.ElementTree as ET
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+from logic2ableton.paths import output_path, safe_name
 
 from logic2ableton import __version__
 from logic2ableton.ableton_generator import generate_als
@@ -75,8 +79,8 @@ def _report_path(
     project_name: str | None = None,
     suffix: str = "_conversion_report.txt",
 ) -> Path:
-    report_name = project_name or input_path.stem or "project"
-    return output_dir / f"{report_name}{suffix}"
+    report_name = safe_name(project_name or input_path.stem or "project")
+    return output_path(output_dir, f"{report_name}{suffix}")
 
 
 def _build_failure_report(mode: str, input_path: Path, stage: str, error: str) -> str:
@@ -100,18 +104,25 @@ def _export_logic_midi(project, project_folder: Path) -> int:
     if not tracks:
         return 0
     midi_dir = project_folder / "MIDI"
-    midi_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        midi_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        project.compatibility_warnings.append(f"MIDI files could not be exported: {exc}")
+        return 0
     written = 0
     for index, track in enumerate(tracks, start=1):
-        safe = re.sub(r"[^\w.\- ]+", "_", track.name).strip() or f"midi_{index:02d}"
+        safe = safe_name(track.name, f"midi_{index:02d}")
         data = build_midi_note_file(
             track,
             tempo=project.tempo,
             numerator=project.time_sig_numerator,
             denominator=project.time_sig_denominator,
         )
-        (midi_dir / f"{index:02d} - {safe}.mid").write_bytes(data)
-        written += 1
+        try:
+            (midi_dir / f"{index:02d} - {safe}.mid").write_bytes(data)
+            written += 1
+        except OSError as exc:
+            project.compatibility_warnings.append(f"MIDI export failed for {track.name}: {exc}")
     return written
 
 
@@ -191,6 +202,34 @@ def _persist_report_with_note(report_path: Path, report: str) -> tuple[bool, str
         return True, f" Report saved to {report_path}"
     except OSError as exc:
         return False, f" Could not save report to {report_path}: {exc}"
+
+
+def _finalize_report(report_path: Path, report: str, warnings: list[str]) -> tuple[str, bool, str | None]:
+    extra = [warning for warning in warnings if warning not in report]
+    if extra:
+        report += "\n\nCONVERSION NOTES:\n" + "\n".join(f"  - {warning}" for warning in extra)
+    saved, note = _persist_report_with_note(report_path, report)
+    warning = None
+    if not saved:
+        warning = f"Conversion completed, but the report could not be written.{note}"
+        warnings.append(warning)
+        report += "\n\n" + warning
+    return report, saved, warning
+
+
+def _als_audio_counts(path: Path) -> tuple[int, int]:
+    with gzip.open(path) as handle:
+        root = ET.parse(handle).getroot()
+    clips = root.findall(".//AudioClip")
+    sources = {clip.find("SampleRef/FileRef/Path").get("Value") for clip in clips}
+    return len(clips), len(sources)
+
+
+def _tempo_argument(value: str) -> float:
+    tempo = float(value)
+    if not math.isfinite(tempo) or not 20 <= tempo <= 999:
+        raise argparse.ArgumentTypeError("Tempo must be a number between 20 and 999 BPM")
+    return tempo
 
 
 def _emit_failure(
@@ -281,7 +320,7 @@ def _build_protools_import_parser(mode: str) -> argparse.ArgumentParser:
     parser.add_argument("--output", "-o", default=".", help="Output directory")
     parser.add_argument(
         "--tempo",
-        type=float,
+        type=_tempo_argument,
         default=None,
         help=(
             "Tempo (BPM) used to convert sample positions to beats; the session "
@@ -323,9 +362,16 @@ def _build_protools_export_parser(mode: str) -> argparse.ArgumentParser:
 
 def _detect_mode(program_name: str, remaining_args: list[str]) -> str:
     stem = Path(program_name).stem.lower()
-    if stem in SUPPORTED_MODES:
+    if stem in SUPPORTED_MODES and stem != FORWARD_MODE:
         return stem
+    skip_value = False
     for token in remaining_args:
+        if skip_value:
+            skip_value = False
+            continue
+        if token in {"--output", "-o", "--alternative", "-a", "--tempo", "--template", "--vst3-path", "--mixer"}:
+            skip_value = True
+            continue
         if token.startswith("-"):
             continue
         lowered = token.lower()
@@ -423,7 +469,7 @@ def _run_forward(args: argparse.Namespace) -> int:
             }
             for track_name in project.track_names
         }
-        mixer_path = output_dir / "mixer_overrides.json"
+        mixer_path = output_path(output_dir, "mixer_overrides.json")
         mixer_path.parent.mkdir(parents=True, exist_ok=True)
         mixer_path.write_text(json.dumps(template, indent=2), encoding="utf-8")
         if not jp:
@@ -541,11 +587,10 @@ def _run_forward(args: argparse.Namespace) -> int:
             compatibility_warnings=project.compatibility_warnings,
         )
 
-    midi_files = 0
-    try:
-        midi_files = _export_logic_midi(project, als_path.parent)
-    except OSError:
-        midi_files = 0
+    midi_files = _export_logic_midi(project, als_path.parent)
+    report = generate_report(project, plugin_matches)
+    report, saved, warning = _finalize_report(report_path, report, project.compatibility_warnings)
+    clip_count, audio_count = _als_audio_counts(als_path)
 
     if jp:
         _emit(
@@ -558,11 +603,12 @@ def _run_forward(args: argparse.Namespace) -> int:
             report=report,
             report_path=str(report_path),
             tracks=len(project.track_names),
-            clips=len(project.audio_files),
-            audio_files=len(project.audio_files),
+            clips=clip_count,
+            audio_files=audio_count,
             midi_tracks=midi_files,
             midi_notes=project.total_midi_notes,
             compatibility_warnings=project.compatibility_warnings,
+            **({"warning": warning} if warning else {}),
         )
     else:
         print(f"  Created: {als_path}")
@@ -572,27 +618,8 @@ def _run_forward(args: argparse.Namespace) -> int:
                 f"created in the set + .mid exports in {als_path.parent / 'MIDI'}"
             )
 
-    saved, report_note = _persist_report_with_note(report_path, report)
-    if not saved:
-        warning = f"Conversion completed, but the report could not be written.{report_note}"
-        if jp:
-            _emit(
-                "complete",
-                1.0,
-                warning,
-                direction=FORWARD_MODE,
-                als_path=str(als_path),
-                artifact_path=str(als_path),
-                report=report,
-                report_path=str(report_path),
-                tracks=len(project.track_names),
-                clips=len(project.audio_files),
-                audio_files=len(project.audio_files),
-                compatibility_warnings=project.compatibility_warnings,
-                warning=warning,
-            )
-        else:
-            print(f"Warning: {warning}", file=sys.stderr)
+    if warning and not jp:
+        print(f"Warning: {warning}", file=sys.stderr)
 
     if not jp:
         if saved:
@@ -747,6 +774,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
             report_suffix="_logic_transfer_report.txt",
         )
 
+    report = build_logic_transfer_report(project)
     if jp:
         _emit(
             "complete",
@@ -924,13 +952,11 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
                 report_suffix=report_suffix,
             )
 
-        midi_files = 0
-        try:
-            midi_files = _export_logic_midi(project, als_path.parent)
-        except OSError:
-            midi_files = 0
-
-        saved, report_note = _persist_report_with_note(report_path, report)
+        midi_files = _export_logic_midi(project, als_path.parent)
+        report, saved, warning = _finalize_report(report_path, report, project.compatibility_warnings)
+        clip_count, audio_count = _als_audio_counts(als_path)
+        if warning and not jp:
+            print(f"Warning: {warning}", file=sys.stderr)
         if jp:
             _emit(
                 "complete",
@@ -942,11 +968,12 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
                 report=report,
                 report_path=str(report_path),
                 tracks=len(project.track_names),
-                clips=len(project.audio_files),
-                audio_files=len(project.audio_files),
+                clips=clip_count,
+                audio_files=audio_count,
                 midi_tracks=midi_files,
                 midi_notes=project.total_midi_notes,
                 compatibility_warnings=project.compatibility_warnings,
+                **({"warning": warning} if warning else {}),
             )
         else:
             print(f"  Created: {als_path}")
@@ -977,7 +1004,11 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
             report_suffix=report_suffix,
         )
 
-    _persist_report_with_note(report_path, report)
+    report, _, outer_warning = _finalize_report(report_path, report, project.compatibility_warnings)
+    report, _, package_warning = _finalize_report(transfer.report_path, report, project.compatibility_warnings)
+    warning = outer_warning or package_warning
+    if warning and not jp:
+        print(f"Warning: {warning}", file=sys.stderr)
     if jp:
         _emit(
             "complete",
@@ -1158,6 +1189,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
             report_suffix=report_suffix,
         )
 
+    report = build_protools_transfer_report(project)
     if jp:
         _emit(
             "complete",

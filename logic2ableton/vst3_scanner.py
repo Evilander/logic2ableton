@@ -222,10 +222,24 @@ def _vst3_search_paths(vst3_path: Path) -> list[Path]:
 
 def scan_vst3_plugins(vst3_path: Path) -> list[VST3Plugin]:
     plugins = []
+    visited: set[Path] = set()
+
+    def visit(directory: Path) -> None:
+        resolved = directory.resolve()
+        if resolved in visited:
+            return
+        visited.add(resolved)
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if entry.suffix.lower() == ".vst3":
+                name = entry.stem
+                plugins.append(VST3Plugin(name=name, path=entry, category=_categorize_plugin(name)))
+            elif entry.is_dir():
+                visit(entry)
+
     for search_path in _vst3_search_paths(vst3_path):
-        if not search_path.exists():
-            continue
-        for entry in sorted(search_path.iterdir()):
-            name = entry.stem
-            plugins.append(VST3Plugin(name=name, path=entry, category=_categorize_plugin(name)))
+        visit(search_path)
     return plugins

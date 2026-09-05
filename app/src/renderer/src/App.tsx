@@ -36,6 +36,7 @@ export default function App() {
   const previewCleanupRef = useRef<(() => void) | null>(null)
   const conversionCleanupRef = useRef<(() => void) | null>(null)
   const previewRequestRef = useRef(0)
+  const conversionStartingRef = useRef(false)
   const logsRef = useRef<string[]>([])
 
   const cleanupListeners = (ref: CleanupRef) => {
@@ -60,7 +61,7 @@ export default function App() {
     previewRequestRef.current += 1
     cleanupListeners(previewCleanupRef)
     cleanupListeners(conversionCleanupRef)
-    void window.api.cancelActiveJob()
+    void window.api.cancelActiveJob().catch(() => {})
   }
 
   useEffect(() => {
@@ -72,7 +73,7 @@ export default function App() {
       previewRequestRef.current += 1
       cleanupListeners(previewCleanupRef)
       cleanupListeners(conversionCleanupRef)
-      void window.api.cancelActiveJob()
+      void window.api.cancelActiveJob().catch(() => {})
     }
   }, [])
 
@@ -80,7 +81,16 @@ export default function App() {
     const requestId = previewRequestRef.current + 1
     previewRequestRef.current = requestId
     cleanupListeners(previewCleanupRef)
-    await window.api.cancelActiveJob()
+    try {
+      await window.api.cancelActiveJob()
+    } catch (error) {
+      if (previewRequestRef.current === requestId) {
+        state.setError(error instanceof Error ? error.message : String(error))
+        state.setView("error")
+        setPreviewLoading(false)
+      }
+      return
+    }
     if (previewRequestRef.current !== requestId) return
 
     state.setPreview(null)
@@ -181,7 +191,8 @@ export default function App() {
   }
 
   const handleConvert = async () => {
-    if (!state.sourcePath || !state.outputDir || conversionCleanupRef.current) return
+    if (!state.sourcePath || !state.outputDir || conversionCleanupRef.current || conversionStartingRef.current) return
+    conversionStartingRef.current = true
 
     const direction = state.direction
     const sourcePath = state.sourcePath
@@ -189,9 +200,20 @@ export default function App() {
     const projectName = state.preview?.projectName || nameFromPath(sourcePath)
     const tempo = state.tempo
 
-    previewRequestRef.current += 1
+    const requestId = ++previewRequestRef.current
     cleanupListeners(previewCleanupRef)
-    await window.api.cancelActiveJob()
+    try {
+      await window.api.cancelActiveJob()
+    } catch (error) {
+      if (previewRequestRef.current === requestId) {
+        state.setError(error instanceof Error ? error.message : String(error))
+        state.setView("error")
+      }
+      return
+    } finally {
+      conversionStartingRef.current = false
+    }
+    if (previewRequestRef.current !== requestId) return
 
     state.setView("converting")
     state.setProgress(0)
