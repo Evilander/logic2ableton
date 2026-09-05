@@ -38,7 +38,6 @@ portable:
 mac:
   target:
     - target: dmg
-      arch: [x64, arm64]
   icon: resources/icon.icns
   category: public.app-category.music
 
