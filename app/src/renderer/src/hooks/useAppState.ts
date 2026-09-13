@@ -46,6 +46,9 @@ export interface ConversionRecord {
 export function useAppState() {
   const [direction, setDirection] = useState<ConversionDirection>("logic2ableton")
   const [tempo, setTempo] = useState(120)
+  const [smpteStart, setSmpteStart] = useState("01:00:00:00")
+  const [keepUnwarped, setKeepUnwarped] = useState("")
+  const [timelinePath, setTimelinePath] = useState<string | null>(null)
   const [view, setView] = useState<AppView>("empty")
   const [sourcePath, setSourcePath] = useState<string | null>(null)
   const [outputDir, setOutputDir] = useState<string | null>(null)
@@ -60,6 +63,9 @@ export function useAppState() {
   const reset = () => {
     setDirection("logic2ableton")
     setTempo(120)
+    setSmpteStart("01:00:00:00")
+    setKeepUnwarped("")
+    setTimelinePath(null)
     setView("empty")
     setSourcePath(null)
     setOutputDir(null)
@@ -74,6 +80,9 @@ export function useAppState() {
   return {
     direction, setDirection,
     tempo, setTempo,
+    smpteStart, setSmpteStart,
+    keepUnwarped, setKeepUnwarped,
+    timelinePath, setTimelinePath,
     view, setView,
     sourcePath, setSourcePath,
     outputDir, setOutputDir,

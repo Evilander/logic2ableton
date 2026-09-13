@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ArrowRight, FolderOpen, MusicNote, MusicNotes, Plugs, Waveform } from "@phosphor-icons/react"
+import { ArrowRight, FolderOpen, MusicNote, MusicNotes, Plugs, Waveform, X } from "@phosphor-icons/react"
 import { motion } from "motion/react"
 import type { ConversionDirection } from "../conversion"
 import {
@@ -21,8 +21,15 @@ interface ProjectPreviewProps {
   preview: PreviewData | null
   outputDir: string | null
   tempo: number
+  smpteStart: string
+  keepUnwarped: string
+  timelinePath: string | null
   onDirectionChange: (direction: ConversionDirection) => void
   onTempoChange: (tempo: number) => void
+  onSmpteStartChange: (smpteStart: string) => void
+  onKeepUnwarpedChange: (keepUnwarped: string) => void
+  onSelectTimelineJson: () => void
+  onClearTimelinePath: () => void
   onSelectOutputDir: () => void
   onConvert: () => void
   loading: boolean
@@ -40,18 +47,31 @@ export default function ProjectPreview({
   preview,
   outputDir,
   tempo,
+  smpteStart,
+  keepUnwarped,
+  timelinePath,
   onDirectionChange,
   onTempoChange,
+  onSmpteStartChange,
+  onKeepUnwarpedChange,
+  onSelectTimelineJson,
+  onClearTimelinePath,
   onSelectOutputDir,
   onConvert,
   loading,
 }: ProjectPreviewProps) {
   const [tempoDraft, setTempoDraft] = useState(String(tempo))
+  const [smpteDraft, setSmpteDraft] = useState(smpteStart)
+  const [keepUnwarpedDraft, setKeepUnwarpedDraft] = useState(keepUnwarped)
   const source = sourceForDirection(direction)
   const destination = destinationForDirection(direction)
   const projectName = preview?.projectName || basename(sourcePath).replace(/\.(logicx|als|ptx|pts|ptf)$/i, "")
+  const showTempoField = isProToolsSource(direction)
+  const showSmpteField = source === "logic"
 
   useEffect(() => setTempoDraft(String(tempo)), [tempo])
+  useEffect(() => setSmpteDraft(smpteStart), [smpteStart])
+  useEffect(() => setKeepUnwarpedDraft(keepUnwarped), [keepUnwarped])
 
   const commitTempo = () => {
     const parsed = Number(tempoDraft)
@@ -62,6 +82,22 @@ export default function ProjectPreview({
     const normalized = Math.min(999, Math.max(20, parsed))
     setTempoDraft(String(normalized))
     if (normalized !== tempo) onTempoChange(normalized)
+  }
+
+  const commitSmpteStart = () => {
+    const trimmed = smpteDraft.trim()
+    if (!trimmed) {
+      setSmpteDraft(smpteStart)
+      return
+    }
+    setSmpteDraft(trimmed)
+    if (trimmed !== smpteStart) onSmpteStartChange(trimmed)
+  }
+
+  const commitKeepUnwarped = () => {
+    const trimmed = keepUnwarpedDraft.trim()
+    setKeepUnwarpedDraft(trimmed)
+    if (trimmed !== keepUnwarped) onKeepUnwarpedChange(trimmed)
   }
 
   const cards = preview
@@ -100,7 +136,7 @@ export default function ProjectPreview({
         <section className="route-console rounded-2xl border border-border bg-surface p-5">
           <SignalPath direction={direction} />
 
-          <div className={`mt-5 grid gap-4 ${isProToolsSource(direction) ? "grid-cols-[1fr_220px]" : "grid-cols-1"}`}>
+          <div className={`mt-5 grid gap-4 ${showTempoField || showSmpteField ? "grid-cols-[1fr_220px]" : "grid-cols-1"}`}>
             <div>
               <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
                 Destination
@@ -133,7 +169,7 @@ export default function ProjectPreview({
               </div>
             </div>
 
-            {isProToolsSource(direction) && (
+            {showTempoField && (
               <div>
                 <label htmlFor="conversion-tempo" className="mb-2 block text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
                   Conversion tempo
@@ -157,12 +193,91 @@ export default function ProjectPreview({
                 </div>
               </div>
             )}
+
+            {showSmpteField && (
+              <div>
+                <label htmlFor="smpte-start" className="mb-2 block text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
+                  SMPTE start
+                </label>
+                <div className="flex items-center rounded-xl border border-border bg-bg px-3 focus-within:border-rose/60">
+                  <input
+                    id="smpte-start"
+                    type="text"
+                    value={smpteDraft}
+                    onChange={(event) => setSmpteDraft(event.target.value)}
+                    onBlur={commitSmpteStart}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur()
+                    }}
+                    className="min-w-0 flex-1 bg-transparent py-2.5 font-mono text-[15px] text-text-primary outline-none"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
-          {isProToolsSource(direction) && (
+          {showTempoField && (
             <p className="mt-3 text-[11px] leading-relaxed text-text-secondary">
               Pro Tools sessions don't expose their tempo to the parser yet - clips are placed using this BPM.
             </p>
+          )}
+
+          {showSmpteField && (
+            <p className="mt-3 text-[11px] leading-relaxed text-text-secondary">
+              Bar 1 plays at this SMPTE time; use auto for one-hour-per-song setups
+            </p>
+          )}
+
+          {direction === "logic2ableton" && (
+            <div className="mt-5 grid grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="keep-unwarped" className="mb-2 block text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
+                  Keep unwarped
+                </label>
+                <div className="flex items-center rounded-xl border border-border bg-bg px-3 focus-within:border-rose/60">
+                  <input
+                    id="keep-unwarped"
+                    type="text"
+                    value={keepUnwarpedDraft}
+                    onChange={(event) => setKeepUnwarpedDraft(event.target.value)}
+                    onBlur={commitKeepUnwarped}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur()
+                    }}
+                    placeholder="LTC*, Pilot*"
+                    className="min-w-0 flex-1 bg-transparent py-2.5 font-mono text-[13px] text-text-primary outline-none"
+                  />
+                </div>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-text-tertiary">
+                  Matching tracks won't stretch when the Live tempo changes.
+                </p>
+              </div>
+
+              <div>
+                <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
+                  Timeline JSON
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onSelectTimelineJson}
+                    className="min-w-0 flex-1 truncate rounded-xl border border-border bg-bg px-3 py-2.5 text-left font-mono text-[13px] text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary"
+                  >
+                    {timelinePath ? basename(timelinePath) : "Choose a timeline JSON file"}
+                  </button>
+                  {timelinePath && (
+                    <button
+                      type="button"
+                      onClick={onClearTimelinePath}
+                      aria-label="Clear timeline JSON"
+                      className="shrink-0 rounded-lg border border-border bg-bg p-2.5 text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary"
+                    >
+                      <X size={15} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
         </section>
 

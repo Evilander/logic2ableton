@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import gzip
 import math
@@ -11,12 +12,12 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from logic2ableton.paths import output_path, safe_name
+from logic2ableton.paths import output_path, safe_name, unique_output_path
 
 from logic2ableton import __version__
-from logic2ableton.ableton_generator import generate_als
+from logic2ableton.ableton_generator import generate_als, unmatched_keep_unwarped_warnings
 from logic2ableton.ableton_parser import parse_ableton_project
-from logic2ableton.logic_parser import load_mixer_overrides, parse_logic_project
+from logic2ableton.logic_parser import load_mixer_overrides, parse_logic_project, parse_smpte_start
 from logic2ableton.logic_transfer import build_logic_transfer_report, generate_logic_transfer
 from logic2ableton.plugin_matcher import match_plugins
 from logic2ableton.protools_import import (
@@ -33,6 +34,7 @@ from logic2ableton.protools_transfer import (
 )
 from logic2ableton.report import generate_report
 from logic2ableton.smf import build_midi_note_file
+from logic2ableton.timeline import load_timeline
 from logic2ableton.vst3_scanner import default_vst3_path
 
 FORWARD_MODE = "logic2ableton"
@@ -78,8 +80,11 @@ def _report_path(
     *,
     project_name: str | None = None,
     suffix: str = "_conversion_report.txt",
+    unique: bool = False,
 ) -> Path:
     report_name = safe_name(project_name or input_path.stem or "project")
+    if unique:
+        return unique_output_path(output_dir, report_name, suffix)
     return output_path(output_dir, f"{report_name}{suffix}")
 
 
@@ -187,6 +192,7 @@ def _progress_for_stage(stage: str) -> float:
     return {
         "validation": 0.05,
         "parsing": 0.1,
+        "timeline": 0.2,
         "mixer": 0.3,
         "plugins": 0.4,
         "report": 0.45,
@@ -232,6 +238,13 @@ def _tempo_argument(value: str) -> float:
     return tempo
 
 
+def _smpte_start_argument(value: str) -> float | None:
+    try:
+        return parse_smpte_start(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def _emit_failure(
     *,
     mode: str,
@@ -244,13 +257,17 @@ def _emit_failure(
     report: str | None = None,
     compatibility_warnings: list[str] | None = None,
     report_suffix: str = "_conversion_report.txt",
+    unique: bool = False,
 ) -> int:
-    report_path = _report_path(output_dir, input_path, project_name=project_name, suffix=report_suffix)
+    report_path = _report_path(
+        output_dir, input_path, project_name=project_name, suffix=report_suffix, unique=unique
+    )
     report_text = report or _build_failure_report(mode, input_path, stage, error)
     _, report_note = _persist_report_with_note(report_path, report_text)
     message = f"Failed during {stage}: {error}.{report_note}"
     payload: dict[str, object] = {
         "direction": mode,
+        "input": str(input_path),
         "report": report_text,
         "report_path": str(report_path),
         "artifact_path": str(report_path),
@@ -267,8 +284,15 @@ def _emit_failure(
 def _build_forward_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Convert Logic Pro .logicx projects to Ableton Live .als files",
+        epilog=(
+            "--timeline JSON shape:\n"
+            '  {"tempo": [{"bar": 9, "bpm": 132}], "markers": [{"bar": 9, "name": "Chorus"}]}\n'
+            'Positions are 1-based bars, with an optional "beat" (also 1-based), or an absolute\n'
+            '"beats" value counted in quarter notes from bar 1 (bar 1 is 0) instead of "bar"/"beat".'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("input", help="Path to .logicx project")
+    parser.add_argument("input", nargs="+", help="Path(s) to .logicx project(s)")
     parser.add_argument("--output", "-o", default=".", help="Output directory")
     parser.add_argument(
         "--alternative",
@@ -288,14 +312,39 @@ def _build_forward_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mixer",
         default=None,
-        help="Path to mixer_overrides.json with per-track volume/pan/mute/solo values",
+        help="Path to mixer_overrides.json with per-track volume/pan/mute/solo values (applied to each input)",
     )
     parser.add_argument(
         "--generate-mixer-template",
         action="store_true",
-        help="Generate a mixer_overrides.json template with all track names",
+        help="Generate a mixer_overrides.json template with all track names (written for each input)",
+    )
+    parser.add_argument(
+        "--smpte-start",
+        type=_smpte_start_argument,
+        default="01:00:00:00",
+        metavar="HH:MM:SS[:FF]|SECONDS|auto",
+        help=(
+            "SMPTE time at which bar 1 plays in the Logic project (default 01:00:00:00). "
+            "Pass 'auto' to assume one whole SMPTE hour per song."
+        ),
+    )
+    parser.add_argument(
+        "--keep-unwarped",
+        action="append",
+        metavar="PATTERN",
+        help=(
+            "Track-name glob, case-insensitive, repeatable; matching tracks are written as "
+            "unwarped Live clips so they never stretch when the tempo changes, e.g. LTC* or Pilot*"
+        ),
+    )
+    parser.add_argument(
+        "--timeline",
+        metavar="PATH",
+        help="JSON file with a tempo map and markers to apply on top of the Logic project (see below)",
     )
     parser.add_argument("--json-progress", action="store_true", help="Output machine-readable JSON progress lines")
+    parser.set_defaults(unique_reports=False)
     return parser
 
 
@@ -303,11 +352,12 @@ def _build_reverse_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Convert Ableton Live .als projects into a Logic-ready transfer package",
     )
-    parser.add_argument("input", help="Path to .als Live Set")
+    parser.add_argument("input", nargs="+", help="Path(s) to .als Live Set(s)")
     parser.add_argument("--output", "-o", default=".", help="Output directory")
     parser.add_argument("--no-copy", action="store_true", help="Do not copy audio files into the transfer package")
     parser.add_argument("--report-only", action="store_true", help="Write only the transfer report")
     parser.add_argument("--json-progress", action="store_true", help="Output machine-readable JSON progress lines")
+    parser.set_defaults(unique_reports=False)
     return parser
 
 
@@ -316,7 +366,7 @@ def _build_protools_import_parser(mode: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=f"Convert a Pro Tools session (.ptx) into {destination}",
     )
-    parser.add_argument("input", help="Path to .ptx/.pts Pro Tools session")
+    parser.add_argument("input", nargs="+", help="Path(s) to .ptx/.pts Pro Tools session(s)")
     parser.add_argument("--output", "-o", default=".", help="Output directory")
     parser.add_argument(
         "--tempo",
@@ -336,6 +386,7 @@ def _build_protools_import_parser(mode: str) -> argparse.ArgumentParser:
             help="Path to Ableton DefaultLiveSet.als template (auto-detected if omitted)",
         )
     parser.add_argument("--json-progress", action="store_true", help="Output machine-readable JSON progress lines")
+    parser.set_defaults(unique_reports=False)
     return parser
 
 
@@ -344,7 +395,7 @@ def _build_protools_export_parser(mode: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=f"Convert {source} into a Pro Tools-ready transfer package",
     )
-    parser.add_argument("input", help="Path to the source project")
+    parser.add_argument("input", nargs="+", help="Path(s) to the source project(s)")
     parser.add_argument("--output", "-o", default=".", help="Output directory")
     if mode == LOGIC2PT_MODE:
         parser.add_argument(
@@ -354,9 +405,20 @@ def _build_protools_export_parser(mode: str) -> argparse.ArgumentParser:
             default=None,
             help="Logic alternative index to convert (auto-detects the active alternative if omitted)",
         )
+    parser.add_argument(
+        "--smpte-start",
+        type=_smpte_start_argument,
+        default="01:00:00:00",
+        metavar="HH:MM:SS[:FF]|SECONDS|auto",
+        help=(
+            "SMPTE time at which bar 1 plays in the Logic project (default 01:00:00:00); "
+            "pass 'auto' to assume one whole SMPTE hour per song. Ignored for an Ableton source."
+        ),
+    )
     parser.add_argument("--no-copy", action="store_true", help="Do not copy audio files into the transfer package")
     parser.add_argument("--report-only", action="store_true", help="Write only the transfer report")
     parser.add_argument("--json-progress", action="store_true", help="Output machine-readable JSON progress lines")
+    parser.set_defaults(unique_reports=False)
     return parser
 
 
@@ -369,7 +431,10 @@ def _detect_mode(program_name: str, remaining_args: list[str]) -> str:
         if skip_value:
             skip_value = False
             continue
-        if token in {"--output", "-o", "--alternative", "-a", "--tempo", "--template", "--vst3-path", "--mixer"}:
+        if token in {
+            "--output", "-o", "--alternative", "-a", "--tempo", "--template", "--vst3-path", "--mixer",
+            "--smpte-start", "--keep-unwarped", "--timeline",
+        }:
             skip_value = True
             continue
         if token.startswith("-"):
@@ -410,7 +475,7 @@ def _run_forward(args: argparse.Namespace) -> int:
     if not logicx_path.exists():
         message = f"{logicx_path} not found"
         if jp:
-            _emit("error", 0, message, direction=FORWARD_MODE)
+            _emit("error", 0, message, direction=FORWARD_MODE, input=str(logicx_path))
             return 1
         print(f"Error: {message}", file=sys.stderr)
         return 1
@@ -424,15 +489,16 @@ def _run_forward(args: argparse.Namespace) -> int:
             stage="validation",
             error=validation_error,
             jp=jp,
+            unique=args.unique_reports,
         )
 
     if jp:
-        _emit("parsing", 0.1, f"Parsing {logicx_path.name}...", direction=FORWARD_MODE)
+        _emit("parsing", 0.1, f"Parsing {logicx_path.name}...", direction=FORWARD_MODE, input=str(logicx_path))
     else:
         print(f"Parsing {logicx_path.name}...")
 
     try:
-        project = parse_logic_project(logicx_path, alternative=args.alternative)
+        project = parse_logic_project(logicx_path, alternative=args.alternative, smpte_start_seconds=args.smpte_start)
     except Exception as exc:
         return _emit_failure(
             mode=FORWARD_MODE,
@@ -441,7 +507,28 @@ def _run_forward(args: argparse.Namespace) -> int:
             stage="parsing",
             error=f"Failed to parse {logicx_path.name}: {exc}",
             jp=jp,
+            unique=args.unique_reports,
         )
+
+    if args.timeline:
+        try:
+            project.timeline = load_timeline(
+                Path(args.timeline),
+                numerator=project.time_sig_numerator,
+                denominator=project.time_sig_denominator,
+                base_tempo=project.tempo,
+            )
+        except (OSError, ValueError) as exc:
+            return _emit_failure(
+                mode=FORWARD_MODE,
+                output_dir=output_dir,
+                input_path=logicx_path,
+                stage="timeline",
+                error=str(exc),
+                jp=jp,
+                unique=args.unique_reports,
+                project_name=project.name,
+            )
 
     if args.mixer:
         try:
@@ -454,6 +541,7 @@ def _run_forward(args: argparse.Namespace) -> int:
                 stage="mixer",
                 error=str(exc),
                 jp=jp,
+                unique=args.unique_reports,
                 project_name=project.name,
             )
         if not jp:
@@ -469,7 +557,11 @@ def _run_forward(args: argparse.Namespace) -> int:
             }
             for track_name in project.track_names
         }
-        mixer_path = output_path(output_dir, "mixer_overrides.json")
+        # Overwrite on repeat single runs; number only when several inputs share one output dir.
+        if args.unique_reports:
+            mixer_path = unique_output_path(output_dir, "mixer_overrides", ".json")
+        else:
+            mixer_path = output_path(output_dir, "mixer_overrides.json")
         mixer_path.parent.mkdir(parents=True, exist_ok=True)
         mixer_path.write_text(json.dumps(template, indent=2), encoding="utf-8")
         if not jp:
@@ -481,6 +573,7 @@ def _run_forward(args: argparse.Namespace) -> int:
             0.3,
             f"Found {len(project.track_names)} tracks, {len(project.audio_files)} audio files, {len(project.plugins)} plugins",
             direction=FORWARD_MODE,
+            input=str(logicx_path),
         )
     else:
         print(
@@ -492,7 +585,7 @@ def _run_forward(args: argparse.Namespace) -> int:
     vst3_path = Path(args.vst3_path) if args.vst3_path else default_vst3_path()
 
     if jp:
-        _emit("plugins", 0.4, "Matching plugins...", direction=FORWARD_MODE)
+        _emit("plugins", 0.4, "Matching plugins...", direction=FORWARD_MODE, input=str(logicx_path))
 
     try:
         plugin_matches = match_plugins(project.plugins, vst3_path)
@@ -504,12 +597,19 @@ def _run_forward(args: argparse.Namespace) -> int:
             stage="plugins",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=project.name,
             compatibility_warnings=project.compatibility_warnings,
         )
 
+    if args.report_only:
+        # generate_als adds this diagnostic itself; a report-only run never gets there.
+        project.compatibility_warnings.extend(
+            unmatched_keep_unwarped_warnings(project.track_names, args.keep_unwarped)
+        )
+
     try:
-        report = generate_report(project, plugin_matches)
+        report = generate_report(project, plugin_matches, keep_unwarped=args.keep_unwarped)
     except Exception as exc:
         return _emit_failure(
             mode=FORWARD_MODE,
@@ -518,11 +618,14 @@ def _run_forward(args: argparse.Namespace) -> int:
             stage="report",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=project.name,
             compatibility_warnings=project.compatibility_warnings,
         )
 
-    report_path = _report_path(output_dir, logicx_path, project_name=project.name)
+    report_path = _report_path(
+        output_dir, logicx_path, project_name=project.name, unique=args.unique_reports
+    )
 
     if not jp:
         print(report)
@@ -538,6 +641,7 @@ def _run_forward(args: argparse.Namespace) -> int:
                 stage="report-write",
                 error=str(exc),
                 jp=jp,
+                unique=args.unique_reports,
                 project_name=project.name,
                 report=report,
                 compatibility_warnings=project.compatibility_warnings,
@@ -548,6 +652,7 @@ def _run_forward(args: argparse.Namespace) -> int:
                 1.0,
                 "Report generated",
                 direction=FORWARD_MODE,
+                input=str(logicx_path),
                 artifact_path=str(report_path),
                 report=report,
                 report_path=str(report_path),
@@ -563,7 +668,7 @@ def _run_forward(args: argparse.Namespace) -> int:
     template_path = Path(args.template) if args.template else None
 
     if jp:
-        _emit("generating", 0.55, "Generating Ableton session...", direction=FORWARD_MODE)
+        _emit("generating", 0.55, "Generating Ableton session...", direction=FORWARD_MODE, input=str(logicx_path))
     else:
         print(f"\nGenerating Ableton project in {output_dir}...")
 
@@ -573,6 +678,7 @@ def _run_forward(args: argparse.Namespace) -> int:
             output_dir,
             copy_audio=not args.no_copy,
             template_path=template_path,
+            keep_unwarped=args.keep_unwarped,
         )
     except Exception as exc:
         return _emit_failure(
@@ -582,13 +688,14 @@ def _run_forward(args: argparse.Namespace) -> int:
             stage="generating",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=project.name,
             report=report,
             compatibility_warnings=project.compatibility_warnings,
         )
 
     midi_files = _export_logic_midi(project, als_path.parent)
-    report = generate_report(project, plugin_matches)
+    report = generate_report(project, plugin_matches, keep_unwarped=args.keep_unwarped)
     report, saved, warning = _finalize_report(report_path, report, project.compatibility_warnings)
     clip_count, audio_count = _als_audio_counts(als_path)
 
@@ -598,6 +705,7 @@ def _run_forward(args: argparse.Namespace) -> int:
             1.0,
             "Conversion complete",
             direction=FORWARD_MODE,
+            input=str(logicx_path),
             als_path=str(als_path),
             artifact_path=str(als_path),
             report=report,
@@ -637,7 +745,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
     if not als_path.exists():
         message = f"{als_path} not found"
         if jp:
-            _emit("error", 0, message, direction=REVERSE_MODE)
+            _emit("error", 0, message, direction=REVERSE_MODE, input=str(als_path))
             return 1
         print(f"Error: {message}", file=sys.stderr)
         return 1
@@ -651,11 +759,12 @@ def _run_reverse(args: argparse.Namespace) -> int:
             stage="validation",
             error=validation_error,
             jp=jp,
+            unique=args.unique_reports,
             report_suffix="_logic_transfer_report.txt",
         )
 
     if jp:
-        _emit("parsing", 0.1, f"Parsing {als_path.name}...", direction=REVERSE_MODE)
+        _emit("parsing", 0.1, f"Parsing {als_path.name}...", direction=REVERSE_MODE, input=str(als_path))
     else:
         print(f"Parsing {als_path.name}...")
 
@@ -669,6 +778,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
             stage="parsing",
             error=f"Failed to parse {als_path.name}: {exc}",
             jp=jp,
+            unique=args.unique_reports,
             report_suffix="_logic_transfer_report.txt",
         )
 
@@ -680,6 +790,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
             f"Found {len(project.audio_tracks)} audio tracks, {len(project.clips)} clips, "
             f"{midi_track_count} MIDI tracks ({project.total_midi_notes} notes), {len(project.locators)} locators",
             direction=REVERSE_MODE,
+            input=str(als_path),
             midi_tracks=midi_track_count,
             midi_notes=project.total_midi_notes,
         )
@@ -701,6 +812,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
             stage="report",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=project.name,
             compatibility_warnings=project.compatibility_warnings,
             report_suffix="_logic_transfer_report.txt",
@@ -711,6 +823,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
         als_path,
         project_name=project.name,
         suffix="_logic_transfer_report.txt",
+        unique=args.unique_reports,
     )
 
     if not jp:
@@ -727,6 +840,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
                 stage="report-write",
                 error=str(exc),
                 jp=jp,
+                unique=args.unique_reports,
                 project_name=project.name,
                 report=report,
                 compatibility_warnings=project.compatibility_warnings,
@@ -738,6 +852,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
                 1.0,
                 "Transfer report generated",
                 direction=REVERSE_MODE,
+                input=str(als_path),
                 artifact_path=str(report_path),
                 report=report,
                 report_path=str(report_path),
@@ -754,7 +869,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
         return 0
 
     if jp:
-        _emit("generating", 0.55, "Generating Logic transfer package...", direction=REVERSE_MODE)
+        _emit("generating", 0.55, "Generating Logic transfer package...", direction=REVERSE_MODE, input=str(als_path))
     else:
         print(f"\nGenerating Logic transfer package in {output_dir}...")
 
@@ -768,6 +883,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
             stage="generating",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=project.name,
             report=report,
             compatibility_warnings=project.compatibility_warnings,
@@ -781,6 +897,7 @@ def _run_reverse(args: argparse.Namespace) -> int:
             1.0,
             "Logic transfer package created",
             direction=REVERSE_MODE,
+            input=str(als_path),
             artifact_path=str(transfer.artifact_path),
             package_path=str(transfer.package_path),
             report=report,
@@ -815,7 +932,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
     if not ptx_path.exists():
         message = f"{ptx_path} not found"
         if jp:
-            _emit("error", 0, message, direction=mode)
+            _emit("error", 0, message, direction=mode, input=str(ptx_path))
             return 1
         print(f"Error: {message}", file=sys.stderr)
         return 1
@@ -829,11 +946,12 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
             stage="validation",
             error=validation_error,
             jp=jp,
+            unique=args.unique_reports,
             report_suffix=report_suffix,
         )
 
     if jp:
-        _emit("parsing", 0.1, f"Parsing {ptx_path.name}...", direction=mode)
+        _emit("parsing", 0.1, f"Parsing {ptx_path.name}...", direction=mode, input=str(ptx_path))
     else:
         print(f"Parsing {ptx_path.name}...")
 
@@ -847,6 +965,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
             stage="parsing",
             error=f"Failed to parse {ptx_path.name}: {exc}",
             jp=jp,
+            unique=args.unique_reports,
             report_suffix=report_suffix,
         )
 
@@ -860,6 +979,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
             f"Found {len(session.tracks)} track lane(s), {session.total_regions} clip(s), "
             f"{len(session.midi_tracks)} MIDI track(s) ({session.total_midi_notes} notes)",
             direction=mode,
+            input=str(ptx_path),
             midi_tracks=len(session.midi_tracks),
             midi_notes=session.total_midi_notes,
         )
@@ -879,11 +999,18 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
             stage="report",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=session.name,
             report_suffix=report_suffix,
         )
 
-    report_path = _report_path(output_dir, ptx_path, project_name=session.name, suffix=report_suffix)
+    report_path = _report_path(
+        output_dir,
+        ptx_path,
+        project_name=session.name,
+        suffix=report_suffix,
+        unique=args.unique_reports,
+    )
 
     if not jp:
         print(report)
@@ -899,6 +1026,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
                 stage="report-write",
                 error=str(exc),
                 jp=jp,
+                unique=args.unique_reports,
                 project_name=session.name,
                 report=report,
                 report_suffix=report_suffix,
@@ -909,6 +1037,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
                 1.0,
                 "Report generated",
                 direction=mode,
+                input=str(ptx_path),
                 artifact_path=str(report_path),
                 report=report,
                 report_path=str(report_path),
@@ -924,7 +1053,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
         return 0
 
     if jp:
-        _emit("generating", 0.55, f"Generating {destination} output...", direction=mode)
+        _emit("generating", 0.55, f"Generating {destination} output...", direction=mode, input=str(ptx_path))
     else:
         print(f"\nGenerating {destination} output in {output_dir}...")
 
@@ -946,6 +1075,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
                 stage="generating",
                 error=str(exc),
                 jp=jp,
+                unique=args.unique_reports,
                 project_name=session.name,
                 report=report,
                 compatibility_warnings=project.compatibility_warnings,
@@ -963,6 +1093,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
                 1.0,
                 "Conversion complete",
                 direction=mode,
+                input=str(ptx_path),
                 als_path=str(als_path),
                 artifact_path=str(als_path),
                 report=report,
@@ -998,6 +1129,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
             stage="generating",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=session.name,
             report=report,
             compatibility_warnings=project.compatibility_warnings,
@@ -1015,6 +1147,7 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
             1.0,
             "Logic transfer package created",
             direction=mode,
+            input=str(ptx_path),
             artifact_path=str(transfer.artifact_path),
             package_path=str(transfer.package_path),
             report=report,
@@ -1045,7 +1178,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
     if not input_path.exists():
         message = f"{input_path} not found"
         if jp:
-            _emit("error", 0, message, direction=mode)
+            _emit("error", 0, message, direction=mode, input=str(input_path))
             return 1
         print(f"Error: {message}", file=sys.stderr)
         return 1
@@ -1061,11 +1194,12 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
             stage="validation",
             error=validation_error,
             jp=jp,
+            unique=args.unique_reports,
             report_suffix=report_suffix,
         )
 
     if jp:
-        _emit("parsing", 0.1, f"Parsing {input_path.name}...", direction=mode)
+        _emit("parsing", 0.1, f"Parsing {input_path.name}...", direction=mode, input=str(input_path))
     else:
         print(f"Parsing {input_path.name}...")
 
@@ -1073,7 +1207,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
         if from_ableton:
             project = parse_ableton_project(input_path)
         else:
-            project = parse_logic_project(input_path, alternative=args.alternative)
+            project = parse_logic_project(input_path, alternative=args.alternative, smpte_start_seconds=args.smpte_start)
     except Exception as exc:
         return _emit_failure(
             mode=mode,
@@ -1082,6 +1216,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
             stage="parsing",
             error=f"Failed to parse {input_path.name}: {exc}",
             jp=jp,
+            unique=args.unique_reports,
             report_suffix=report_suffix,
         )
 
@@ -1100,6 +1235,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
             f"Found {track_count} audio tracks, {clip_count} clips, "
             f"{midi_track_count} MIDI tracks ({project.total_midi_notes} notes)",
             direction=mode,
+            input=str(input_path),
             midi_tracks=midi_track_count,
             midi_notes=project.total_midi_notes,
         )
@@ -1119,12 +1255,19 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
             stage="report",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=project.name,
             compatibility_warnings=project.compatibility_warnings,
             report_suffix=report_suffix,
         )
 
-    report_path = _report_path(output_dir, input_path, project_name=project.name, suffix=report_suffix)
+    report_path = _report_path(
+        output_dir,
+        input_path,
+        project_name=project.name,
+        suffix=report_suffix,
+        unique=args.unique_reports,
+    )
 
     if not jp:
         print(report)
@@ -1140,6 +1283,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
                 stage="report-write",
                 error=str(exc),
                 jp=jp,
+                unique=args.unique_reports,
                 project_name=project.name,
                 report=report,
                 compatibility_warnings=project.compatibility_warnings,
@@ -1151,6 +1295,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
                 1.0,
                 "Transfer report generated",
                 direction=mode,
+                input=str(input_path),
                 artifact_path=str(report_path),
                 report=report,
                 report_path=str(report_path),
@@ -1166,7 +1311,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
         return 0
 
     if jp:
-        _emit("generating", 0.55, "Generating Pro Tools transfer package...", direction=mode)
+        _emit("generating", 0.55, "Generating Pro Tools transfer package...", direction=mode, input=str(input_path))
     else:
         print(f"\nGenerating Pro Tools transfer package in {output_dir}...")
 
@@ -1183,6 +1328,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
             stage="generating",
             error=str(exc),
             jp=jp,
+            unique=args.unique_reports,
             project_name=project.name,
             report=report,
             compatibility_warnings=project.compatibility_warnings,
@@ -1196,6 +1342,7 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
             1.0,
             "Pro Tools transfer package created",
             direction=mode,
+            input=str(input_path),
             artifact_path=str(transfer.artifact_path),
             package_path=str(transfer.package_path),
             report=report,
@@ -1226,15 +1373,42 @@ def main(argv: list[str] | None = None) -> int:
     mode, remaining = resolved
     if mode == REVERSE_MODE:
         args = _build_reverse_parser().parse_args(remaining)
-        return _run_reverse(args)
-    if mode in (PT2ABLETON_MODE, PT2LOGIC_MODE):
+        runner = _run_reverse
+    elif mode in (PT2ABLETON_MODE, PT2LOGIC_MODE):
         args = _build_protools_import_parser(mode).parse_args(remaining)
-        return _run_protools_import(args, mode)
-    if mode in (ABLETON2PT_MODE, LOGIC2PT_MODE):
+
+        def runner(run_args: argparse.Namespace) -> int:
+            return _run_protools_import(run_args, mode)
+    elif mode in (ABLETON2PT_MODE, LOGIC2PT_MODE):
         args = _build_protools_export_parser(mode).parse_args(remaining)
-        return _run_protools_export(args, mode)
-    args = _build_forward_parser().parse_args(remaining)
-    return _run_forward(args)
+
+        def runner(run_args: argparse.Namespace) -> int:
+            return _run_protools_export(run_args, mode)
+    else:
+        args = _build_forward_parser().parse_args(remaining)
+        runner = _run_forward
+
+    inputs = args.input
+    human_mode = not args.json_progress and len(inputs) > 1
+    unique_reports = len(inputs) > 1
+
+    converted = 0
+    failed = 0
+    for index, single_input in enumerate(inputs, start=1):
+        run_args = copy.copy(args)
+        run_args.input = single_input
+        run_args.unique_reports = unique_reports
+        if human_mode:
+            print(f"[{index}/{len(inputs)}] {single_input}")
+        if runner(run_args) == 0:
+            converted += 1
+        else:
+            failed += 1
+
+    if human_mode:
+        print(f"\n{converted} converted, {failed} failed")
+
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

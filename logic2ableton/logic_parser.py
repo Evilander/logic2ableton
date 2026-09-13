@@ -1,4 +1,5 @@
 import json
+import math
 import plistlib
 import re
 import struct
@@ -437,15 +438,136 @@ def _get_audio_time_reference(file_path: Path) -> int | None:
     return None
 
 
-def extract_regions(logicx_path: Path, alternative: int = 0, *, _data: bytes | None = None) -> dict[str, int]:
+_SMPTE_TIMECODE_RE = re.compile(r"^(\d+):([0-5]?\d):([0-5]?\d)(?:[:;](\d{1,2}))?$")
+
+
+def parse_smpte_start(text: str, *, fps: float = 30.0) -> float | None:
+    """Parse a --smpte-start value into seconds from SMPTE midnight.
+
+    Accepts 'auto' (returns None, meaning "infer automatically"),
+    'HH:MM:SS', 'HH:MM:SS:FF', 'HH:MM:SS;FF' (drop-frame separator, treated
+    the same as ':'), or a bare number of seconds. Raises ValueError for
+    anything else.
+    """
+    stripped = text.strip()
+    if stripped.lower() == "auto":
+        return None
+
+    match = _SMPTE_TIMECODE_RE.match(stripped)
+    if match:
+        hours, minutes, seconds, frames = match.groups()
+        total = int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+        if frames is not None:
+            frame_count = int(frames)
+            if frame_count >= fps:
+                raise ValueError(f"Invalid SMPTE start time {text!r}: frame {frame_count} is not less than fps {fps}")
+            total += frame_count / fps
+        return float(total)
+
+    try:
+        value = float(stripped)
+    except ValueError:
+        raise ValueError(f"Invalid SMPTE start time: {text!r}") from None
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"Invalid SMPTE start time: {text!r}")
+    return value
+
+
+def format_smpte(seconds: float, *, fps: float = 30.0) -> str:
+    """Format a seconds-from-SMPTE-midnight value as 'HH:MM:SS:FF'."""
+    frames_per_second = round(fps)
+    total_frames = round(seconds * fps)
+    frame = total_frames % frames_per_second
+    total_seconds = total_frames // frames_per_second
+    secs = total_seconds % 60
+    minutes = (total_seconds // 60) % 60
+    hours = total_seconds // 3600
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}:{frame:02d}"
+
+
+def resolve_audio_dir(logicx_path: Path) -> tuple[Path | None, str]:
+    """Locate a project's bundled audio directory and identify its layout.
+
+    Package-saved Logic projects store audio under
+    ``<logicx>/Media/Audio Files``. Folder-saved projects (File > Project
+    Management > Save As, "Include Assets" with a project folder) keep the
+    .logicx package alongside a sibling ``Audio Files`` folder instead - or,
+    less commonly, a sibling ``Media/Audio Files``. The package location
+    wins when both exist.
+    """
+    package_dir = logicx_path / "Media" / "Audio Files"
+    if package_dir.is_dir():
+        return package_dir, "package"
+
+    folder_dir = logicx_path.parent / "Audio Files"
+    if folder_dir.is_dir():
+        return folder_dir, "folder"
+
+    folder_media_dir = logicx_path.parent / "Media" / "Audio Files"
+    if folder_media_dir.is_dir():
+        return folder_media_dir, "folder"
+
+    return None, "missing"
+
+
+_TIMESTAMPABLE_AUDIO_SUFFIXES = (".wav", ".aif", ".aiff")
+
+
+def _iter_timestamped_audio_files(audio_dir: Path, *, default_sample_rate: int = 44100):
+    """Yield (audio_file, time_reference_samples, sample_rate) for each timestamped file in a directory.
+
+    Skips non-files, unsupported extensions, and files with no embedded timeline
+    timestamp (see _get_audio_time_reference).
+    """
+    for audio_file in audio_dir.iterdir():
+        if not audio_file.is_file() or audio_file.suffix.lower() not in _TIMESTAMPABLE_AUDIO_SUFFIXES:
+            continue
+        time_ref = _get_audio_time_reference(audio_file)
+        if time_ref is None:
+            continue
+        file_sample_rate = _get_audio_sample_rate(audio_file, default=default_sample_rate)
+        yield audio_file, time_ref, file_sample_rate
+
+
+def _infer_smpte_start(audio_dir: Path | None) -> float | None:
+    """Infer a project's SMPTE start from its earliest timestamped audio file.
+
+    Touring convention places one SMPTE hour per song, so the inferred start
+    is the whole hour at or below the earliest embedded timestamp. Returns
+    None when no bundled audio file carries a usable timestamp.
+    """
+    if audio_dir is None or not audio_dir.is_dir():
+        return None
+
+    earliest_seconds: float | None = None
+    for _audio_file, time_ref, file_sample_rate in _iter_timestamped_audio_files(audio_dir):
+        file_seconds = time_ref / file_sample_rate
+        if earliest_seconds is None or file_seconds < earliest_seconds:
+            earliest_seconds = file_seconds
+
+    if earliest_seconds is None:
+        return None
+    return math.floor(earliest_seconds / 3600) * 3600.0
+
+
+def extract_regions(
+    logicx_path: Path,
+    alternative: int = 0,
+    *,
+    _data: bytes | None = None,
+    smpte_start_seconds: float = 3600.0,
+    clamped: list[str] | None = None,
+) -> dict[str, int]:
     """Extract audio region start positions from audio file timestamps.
 
     For WAV files: reads BWF bext chunk TimeReference.
     For AIFF files: reads Timestamp + Start markers from MARK chunk.
 
-    All timestamps are relative to SMPTE midnight. Logic's default SMPTE
-    start is 01:00:00:00 (1 hour), so we subtract 3600 * sample_rate
-    to get the position relative to bar 1.
+    All timestamps are relative to SMPTE midnight. ``smpte_start_seconds``
+    (Logic's default is 01:00:00:00, i.e. 3600 seconds) is subtracted to get
+    the position relative to bar 1. Files whose timestamp precedes the SMPTE
+    start land at 0 and have their filename appended to ``clamped`` (when
+    supplied) so callers can warn about a likely SMPTE-start mismatch.
 
     Imported files (MP3, non-timestamped audio) default to 0.
 
@@ -454,8 +576,8 @@ def extract_regions(logicx_path: Path, alternative: int = 0, *, _data: bytes | N
     """
     del _data  # Kept for API compatibility with shared ProjectData pattern.
 
-    audio_dir = logicx_path / "Media" / "Audio Files"
-    if not audio_dir.exists():
+    audio_dir, _layout = resolve_audio_dir(logicx_path)
+    if audio_dir is None:
         return {}
 
     # Fallback sample rate from project metadata.
@@ -469,15 +591,14 @@ def extract_regions(logicx_path: Path, alternative: int = 0, *, _data: bytes | N
         pass
 
     regions: dict[str, int] = {}
-    for audio_file in audio_dir.iterdir():
-        if not audio_file.is_file() or audio_file.suffix.lower() not in (".wav", ".aif", ".aiff"):
-            continue
-        time_ref = _get_audio_time_reference(audio_file)
-        if time_ref is None:
-            continue
-        file_sample_rate = _get_audio_sample_rate(audio_file, default=sample_rate)
-        smpte_offset = 3600 * file_sample_rate  # 1 hour at the file's own sample rate
-        regions[audio_file.name] = max(0, time_ref - smpte_offset)
+    for audio_file, time_ref, file_sample_rate in _iter_timestamped_audio_files(audio_dir, default_sample_rate=sample_rate):
+        smpte_offset = round(smpte_start_seconds * file_sample_rate)
+        position = time_ref - smpte_offset
+        if position < 0:
+            if clamped is not None:
+                clamped.append(audio_file.name)
+            position = 0
+        regions[audio_file.name] = position
 
     return regions
 
@@ -495,30 +616,44 @@ def load_mixer_overrides(json_path: Path) -> dict[str, TrackMixerState]:
     if not isinstance(data, dict):
         return {}
 
-    result: dict[str, TrackMixerState] = {}
-    for track_name, values in data.items():
-        if not isinstance(track_name, str) or not isinstance(values, dict):
+    overrides: dict[str, TrackMixerState] = {}
+    for track_name, raw_state in data.items():
+        if not isinstance(track_name, str) or not isinstance(raw_state, dict):
             continue
-        result[track_name] = TrackMixerState(
-            volume_db=float(values.get("volume_db", 0.0)),
-            pan=float(values.get("pan", 0.0)),
-            is_muted=bool(values.get("is_muted", False)),
-            is_soloed=bool(values.get("is_soloed", False)),
+        overrides[track_name] = TrackMixerState(
+            volume_db=float(raw_state.get("volume_db", 0.0)),
+            pan=float(raw_state.get("pan", 0.0)),
+            is_muted=bool(raw_state.get("is_muted", False)),
+            is_soloed=bool(raw_state.get("is_soloed", False)),
         )
-    return result
+    return overrides
 
 
 def discover_audio_files(logicx_path: Path) -> list[AudioFileRef]:
-    """Discover all audio files in Media/Audio Files/."""
-    audio_dir = logicx_path / "Media" / "Audio Files"
-    if not audio_dir.exists():
+    """Discover all audio files in the project's resolved audio directory.
+
+    Package-saved projects keep audio under Media/Audio Files inside the
+    .logicx; folder-saved projects keep a sibling Audio Files folder. See
+    resolve_audio_dir().
+    """
+    audio_dir, layout = resolve_audio_dir(logicx_path)
+    if audio_dir is None:
         return []
 
+    # Containment is checked against the project root, not just the audio
+    # directory itself: if audio_dir is a symlink/junction pointing outside
+    # the project, resolving against it alone would follow the link and
+    # accept whatever the attacker placed at the target.
+    project_root = (logicx_path if layout == "package" else logicx_path.parent).resolve()
+    resolved_audio_dir = audio_dir.resolve()
     refs = []
     for audio_file in sorted(audio_dir.iterdir()):
         if not audio_file.is_file():
             continue
-        if not audio_file.resolve().is_relative_to(logicx_path.resolve()):
+        resolved_audio_file = audio_file.resolve()
+        if not resolved_audio_file.is_relative_to(resolved_audio_dir):
+            continue
+        if not resolved_audio_file.is_relative_to(project_root):
             continue
         if audio_file.suffix.lower() not in (".wav", ".aif", ".aiff", ".mp3", ".m4a"):
             continue
@@ -529,7 +664,7 @@ def discover_audio_files(logicx_path: Path) -> list[AudioFileRef]:
             take_number=take_number,
             is_comp=is_comp,
             comp_name=comp_name,
-            file_path=audio_file.resolve(),
+            file_path=resolved_audio_file,
         ))
     return refs
 
@@ -539,6 +674,10 @@ def _build_compatibility_warnings(
     audio_files: list[AudioFileRef],
     regions: dict[str, int],
     midi_tracks: list[LogicMidiTrack],
+    *,
+    clamped_files: list[str] | None = None,
+    smpte_start_seconds: float = 3600.0,
+    smpte_start_inferred: bool = False,
 ) -> list[str]:
     """Summarize bundle conditions that are likely to produce incomplete conversions."""
     warnings: list[str] = []
@@ -575,9 +714,26 @@ def _build_compatibility_warnings(
 
     if not audio_files:
         warnings.append(
-            "No bundled audio files were discovered under Media/Audio Files; this project may "
+            "No bundled audio files were discovered under Media/Audio Files (package-saved) or "
+            "a sibling Audio Files folder next to the .logicx (folder-saved); this project may "
             "depend on external media, aliases, or unsupported content types"
         )
+
+    if clamped_files:
+        examples = ", ".join(clamped_files[:5])
+        if len(clamped_files) > 5:
+            examples += ", ..."
+        warnings.append(
+            f"{len(clamped_files)} audio file(s) start before the SMPTE start used "
+            f"({format_smpte(smpte_start_seconds)}) and were placed at bar 1: {examples}"
+        )
+        if not smpte_start_inferred and len(clamped_files) == len(regions):
+            warnings.append(
+                f"Every timestamped audio file starts before the SMPTE start used "
+                f"({format_smpte(smpte_start_seconds)}); this project probably uses a different "
+                "SMPTE start (File > Project Settings > Synchronization) - pass --smpte-start "
+                "(or auto) to fix it."
+            )
 
     instrument_files = meta.get("software_instrument_files", 0)
     total_midi_notes = sum(track.note_count for track in midi_tracks)
@@ -597,16 +753,26 @@ def _build_compatibility_warnings(
     return warnings
 
 
-def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> LogicProject:
+def parse_logic_project(
+    logicx_path: Path,
+    alternative: int | None = None,
+    *,
+    smpte_start_seconds: float | None = 3600.0,
+) -> LogicProject:
     """Parse a complete Logic Pro project into a LogicProject dataclass.
 
     ``alternative`` defaults to ``None``, which auto-detects the active
     alternative. Pass an explicit index to force a specific one.
+
+    ``smpte_start_seconds`` defaults to Logic's own default (3600, i.e.
+    01:00:00:00). Pass ``None`` to infer it automatically from the earliest
+    timestamped audio file instead (see ``_infer_smpte_start``).
     """
     logicx_path = Path(logicx_path)
     info = parse_project_info(logicx_path)
     alternative = resolve_alternative(logicx_path, alternative, info.get("active_variant"))
     meta = parse_metadata(logicx_path, alternative=alternative)
+    audio_dir, audio_layout = resolve_audio_dir(logicx_path)
     audio_files = discover_audio_files(logicx_path)
     discovered_count = len(audio_files)
     active_names = set(meta["audio_files"])
@@ -616,12 +782,26 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
         if (ref.filename in active_names if meta["has_audio_membership"] else ref.filename not in unused_names)
     ]
 
+    smpte_start_inferred = smpte_start_seconds is None
+    if smpte_start_inferred:
+        inferred = _infer_smpte_start(audio_dir)
+        effective_smpte_start = inferred if inferred is not None else 3600.0
+    else:
+        effective_smpte_start = smpte_start_seconds
+
     # Read ProjectData once, share across extractors.
     project_data = _read_project_data(logicx_path, alternative)
     plugins = extract_plugins(logicx_path, alternative, _data=project_data)
     midi_warnings: list[str] = []
     midi_tracks = extract_midi_notes(logicx_path, alternative, _data=project_data, warnings=midi_warnings)
-    regions = extract_regions(logicx_path, alternative, _data=project_data)
+    clamped_files: list[str] = []
+    regions = extract_regions(
+        logicx_path,
+        alternative,
+        _data=project_data,
+        smpte_start_seconds=effective_smpte_start,
+        clamped=clamped_files,
+    )
     for ref in audio_files:
         ref.start_position_samples = regions.get(ref.filename, 0)
 
@@ -632,7 +812,15 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
             seen.add(ref.track_name)
             track_names.append(ref.track_name)
 
-    compatibility_warnings = _build_compatibility_warnings(meta, audio_files, regions, midi_tracks)
+    compatibility_warnings = _build_compatibility_warnings(
+        meta,
+        audio_files,
+        regions,
+        midi_tracks,
+        clamped_files=clamped_files,
+        smpte_start_seconds=effective_smpte_start,
+        smpte_start_inferred=smpte_start_inferred,
+    )
     excluded_count = discovered_count - len(audio_files)
     if excluded_count:
         compatibility_warnings.append(
@@ -655,4 +843,8 @@ def parse_logic_project(logicx_path: Path, alternative: int | None = None) -> Lo
         software_instrument_files=meta["software_instrument_files"],
         midi_tracks=midi_tracks,
         compatibility_warnings=compatibility_warnings,
+        smpte_start_seconds=effective_smpte_start,
+        smpte_start_inferred=smpte_start_inferred,
+        audio_dir=audio_dir,
+        audio_layout=audio_layout,
     )

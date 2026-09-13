@@ -51,6 +51,11 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Audio membership follows the selected Logic alternative; unused and unreferenced takes are excluded
 - Distinct per-track colors, with arrangement clips matching their track color
 - MIDI notes decoded from Logic's binary project data land as **native Ableton MIDI tracks** inside the `.als` (and as Standard MIDI file exports), placed at their absolute arrangement positions
+- `--smpte-start` sets the SMPTE time bar 1 plays at (or infers it with `auto`), for projects synced to timecode
+- `--timeline` supplies a tempo map and markers Logic's project file doesn't expose yet; they become Live tempo automation, locators, and warp markers that follow the map (verified by opening the generated set in Live 12.4.3 and reading back its values)
+- `--keep-unwarped` keeps matching tracks (sync tone, pilot tracks, timecode) as unwarped Live clips so they never stretch when the tempo changes
+- Folder-saved Logic projects (a `.logicx` package next to a sibling `Audio Files` folder) are read the same as package-saved ones
+- Multiple `.logicx` inputs in one run, converted and reported one after another
 - Optional mixer overrides from JSON
 - Plugin identification with VST3 suggestions in the report
 
@@ -94,6 +99,8 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - MIDI tracks are named `MIDI 1`, `MIDI 2`, ... (binding Logic's track names to its binary note sequences is still being reverse-engineered)
 - Notes placed before Logic's bar-1 anchor fall back to relative placement, with a warning in the report
 - Older Logic save formats store notes in a binary variant this project cannot decode yet; the report says so explicitly instead of pretending
+- Logic's tempo track and markers are not decoded from the project file yet; supply them with `--timeline`
+- `--smpte-start` must match the project's own synchronization setting (default `01:00:00:00`); the report lists any files it placed at bar 1 because their timestamp precedes it
 - Automation is not recreated
 - Bus and send routing are not recreated
 - Plugin parameters are not recreated
@@ -140,14 +147,15 @@ For `ableton2logic`, the cleanest path is:
 | **PyPI** | `pip install logic2ableton` | CLI tool, any platform with Python 3.11+ |
 | Windows | [Installer](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app, standard Windows installer |
 | Windows | [Portable](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app, single exe, no install needed |
-| macOS (Apple Silicon) | [DMG (arm64)](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app for M1/M2/M3/M4 Macs |
+| macOS (Apple Silicon) | [DMG (arm64)](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app for M1/M2/M3/M4 Macs on macOS 12 or newer |
+| macOS (Apple Silicon, Big Sur) | [DMG (arm64, macOS 11)](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app for M1/M2/M3/M4 Macs still on macOS 11 |
 
 ### Desktop App
 
 Download the latest installer or portable build from GitHub Releases:
 
 - Windows: NSIS installer and portable `.exe`
-- macOS: Apple Silicon `.dmg`
+- macOS: Apple Silicon `.dmg`, plus a second Apple Silicon `.dmg` (filename ending `-arm64-macos11.dmg`) for macOS 11 Big Sur
 
 Notes:
 
@@ -159,6 +167,7 @@ Notes:
 
   Alternatively, right-click the app and choose **Open**, then confirm in the dialog.
 - Intel macOS users currently need a self-hosted packaging flow or a local source build (release DMGs are Apple Silicon only).
+- The regular macOS DMG needs macOS 12 or newer. The macOS 11 DMG is built against Electron 37.10.3 instead of the current Electron release, because current Electron requires macOS 12+. Electron 37 has been end-of-life since 2026-01-13 and gets no further security updates, so use the regular DMG unless you're actually still on Big Sur.
 - The desktop app bundles the converter binary, so end users do not need Python installed.
 
 ### Install from PyPI
@@ -202,6 +211,18 @@ Logic to Ableton:
 
 ```bash
 logic2ableton "/path/to/MySong.logicx" --output ./output
+```
+
+Logic to Ableton for a SMPTE-synced live show: infer the timecode hour, keep the sync and pilot tracks from stretching, and apply a tempo map with markers:
+
+```bash
+logic2ableton "Song.logicx" --output ./out --smpte-start auto --keep-unwarped "LTC*" --keep-unwarped "Pilot*" --timeline timeline.json
+```
+
+Batch convert several Logic projects in one run:
+
+```bash
+logic2ableton "Song1.logicx" "Song2.logicx" "Song3.logicx" --output ./output
 ```
 
 Ableton to Logic:
@@ -271,6 +292,10 @@ ableton2logic "/path/to/MySet.als" --output ./output --json-progress
 
 ## CLI Options
 
+Every lane's input argument accepts one or more paths. Pass several to convert
+each in turn; the CLI prints a per-file progress line and a converted/failed
+summary at the end.
+
 ### Shared
 
 | Option | Description |
@@ -291,6 +316,28 @@ ableton2logic "/path/to/MySet.als" --output ./output --json-progress
 | `--vst3-path` | Override the VST3 scan directory |
 | `--mixer` | Apply mixer overrides from JSON |
 | `--generate-mixer-template` | Write a starter `mixer_overrides.json` |
+| `--smpte-start` | SMPTE time bar 1 plays at (default `01:00:00:00`); pass `auto` to infer one whole SMPTE hour from the earliest recording (also on `logic2protools`) |
+| `--keep-unwarped` | Track-name glob, case-insensitive and repeatable; matching tracks are written as unwarped Live clips so they never stretch when the tempo changes |
+| `--timeline` | JSON file with a tempo map and markers applied on top of the Logic project (see [Timeline JSON](#timeline-json) below) |
+
+### Timeline JSON
+
+`--timeline` supplies a tempo map and markers that Logic's project file doesn't expose to the parser yet:
+
+```json
+{
+  "tempo": [{"bar": 9, "bpm": 132}],
+  "markers": [{"bar": 9, "name": "Chorus"}]
+}
+```
+
+Each `tempo` or `markers` entry needs a position: either a 1-based `bar` with
+an optional 1-based `beat` (defaults to 1), or an absolute `beats` value
+counted in quarter notes from bar 1 (so bar 1 is `0`). Give one or the other,
+not both. Bar and beat positions are resolved against the Logic project's own
+base time signature. Tempo changes are steps, not ramps: each breakpoint holds
+its BPM until the next one, and the report's `TIMELINE` section, the Live
+tempo automation, and the clip warp markers all follow that same map.
 
 ### Pro Tools Imports Only
 
@@ -370,12 +417,18 @@ output/
 
 ## Reading The Reports
 
+Every Logic to Ableton report opens with the SMPTE start it used (the
+default `01:00:00:00`, a value passed with `--smpte-start`, or one inferred
+from the earliest recording) and whether it found the project's audio in a
+package or a folder-style layout.
+
 Pay close attention to `COMPATIBILITY WARNINGS`.
 
 Typical warnings include:
 
 - Audio referenced by the source project but missing on disk
 - Logic audio with no embedded timeline timestamp
+- Audio files that start before the SMPTE start value; these land at bar 1 instead of their real position, and the report names each one
 - Ableton clips that rely on warping or other live processing that cannot be rendered faithfully by this project
 - Reverse-lane sources that were copied as references instead of rendered into timestamped WAV files
 
@@ -468,6 +521,12 @@ Publishing a release is done by pushing a `v*` tag. The workflow uploads the
 generated installers to GitHub Releases automatically. The same workflow
 publishes the Python package to PyPI through a trusted publisher (environment
 `pypi`) once the repository variable `PYPI_PUBLISH` is set to `true`.
+
+The macOS build matrix produces two Apple Silicon DMGs: the regular one
+(macOS 12+) and a second built against Electron 37.10.3 for macOS 11 Big
+Sur. The installer job can also be run on demand with `workflow_dispatch`,
+which builds and uploads the same artifacts without cutting a GitHub
+Release.
 
 ## Bug Reports
 

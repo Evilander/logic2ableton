@@ -5,9 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from logic2ableton.ableton_generator import _BUNDLED_TEMPLATE, generate_als, _pick_best_clip, _find_template
+from logic2ableton.ableton_generator import (
+    _BUNDLED_TEMPLATE,
+    generate_als,
+    _pick_best_clip,
+    _find_template,
+    unmatched_keep_unwarped_warnings,
+)
+from logic2ableton.ableton_metadata import main_track, parameter_events
 from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.models import AudioFileRef, LogicMidiNote, LogicMidiTrack, LogicProject, TrackMixerState
+from logic2ableton.timeline import TempoEvent, Timeline, TimelineMarker
 
 from conftest import TEST_PROJECT, TEST_PROJECT_NAME, write_test_wav
 
@@ -552,3 +560,267 @@ def test_generated_clip_color_matches_track(tmp_path):
     # Distinct tracks should not all share color 0.
     colors = {t.find("Color").get("Value") for t in tracks}
     assert len(colors) > 1
+
+
+# --keep-unwarped, tempo automation, and locators (--timeline)
+
+
+def _timeline_project(name: str, track_names: list[str], audio_files: list[AudioFileRef], tempo: float = 120.0) -> LogicProject:
+    return LogicProject(
+        name=name,
+        tempo=tempo,
+        time_sig_numerator=4,
+        time_sig_denominator=4,
+        sample_rate=44100,
+        audio_files=audio_files,
+        plugins=[],
+        track_names=track_names,
+        alternative=0,
+    )
+
+
+def test_generate_als_keep_unwarped_marks_matching_tracks(tmp_path):
+    media = tmp_path / "media"
+    refs = []
+    for name in ("DRUMS", "Bass", "Vocals"):
+        wav = _write_wav(media / f"{name}.wav")
+        refs.append(
+            AudioFileRef(
+                filename=f"{name}.wav",
+                track_name=name,
+                take_number=0,
+                is_comp=False,
+                comp_name="",
+                file_path=wav,
+            )
+        )
+    project = _timeline_project("Unwarped", ["DRUMS", "Bass", "Vocals"], refs)
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False, keep_unwarped=["drums", "voc*"])
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    by_track = {}
+    for track in root.findall(".//Tracks/AudioTrack"):
+        name = track.find(".//Name/EffectiveName").get("Value")
+        clip = track.find(".//Events/AudioClip")
+        by_track[name] = clip.find("IsWarped").get("Value")
+    assert by_track["DRUMS"] == "false"
+    assert by_track["Vocals"] == "false"
+    assert by_track["Bass"] == "true"
+
+
+def test_generate_als_unwarped_clip_loop_in_seconds(tmp_path):
+    wav = _write_wav(tmp_path / "media" / "Drums.wav", frames=44100)
+    ref = AudioFileRef(filename="Drums.wav", track_name="Drums", take_number=0, is_comp=False, comp_name="", file_path=wav)
+    project = _timeline_project("UnwarpedLoop", ["Drums"], [ref])
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False, keep_unwarped=["Drums"])
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    clip = root.find(".//Events/AudioClip")
+    assert clip.find("IsWarped").get("Value") == "false"
+    loop = clip.find("Loop")
+    assert loop.find("LoopStart").get("Value") == "0"
+    assert loop.find("LoopEnd").get("Value") == "1"
+    assert loop.find("StartRelative").get("Value") == "0"
+    markers = clip.find("WarpMarkers").findall("WarpMarker")
+    assert len(markers) == 2
+    assert clip.find("WarpMode").get("Value") == "0"
+
+
+def test_generate_als_keep_unwarped_unmatched_pattern_warns(tmp_path):
+    wav = _write_wav(tmp_path / "media" / "Drums.wav")
+    ref = AudioFileRef(filename="Drums.wav", track_name="Drums", take_number=0, is_comp=False, comp_name="", file_path=wav)
+    project = _timeline_project("UnmatchedPattern", ["Drums"], [ref])
+
+    generate_als(project, tmp_path / "out", copy_audio=False, keep_unwarped=["Drums", "Nonexistent*"])
+    assert any("Nonexistent*" in w for w in project.compatibility_warnings)
+    assert not any("'Drums'" in w for w in project.compatibility_warnings)
+
+
+def test_generate_als_extra_warp_marker_at_tempo_breakpoint(tmp_path):
+    wav = _write_wav(tmp_path / "media" / "Guitar.wav", frames=441_000)  # 10s @ 44100Hz
+    ref = AudioFileRef(filename="Guitar.wav", track_name="Guitar", take_number=0, is_comp=False, comp_name="", file_path=wav)
+    project = _timeline_project("Breakpoint", ["Guitar"], [ref])
+    project.timeline = Timeline(tempo_events=[TempoEvent(beat=8.0, bpm=140.0)], markers=[])
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    clip = root.find(".//Events/AudioClip")
+    markers = clip.find("WarpMarkers").findall("WarpMarker")
+    assert len(markers) == 3
+    # 8 beats at 120bpm = 4s in; the file is 10s long, so beat 22 (8 + 6s @140bpm) is the end.
+    assert markers[0].get("SecTime") == "0"
+    assert markers[0].get("BeatTime") == "0"
+    assert markers[1].get("SecTime") == "4.0"
+    assert markers[1].get("BeatTime") == "8.0"
+    assert markers[2].get("SecTime") == "10.0"
+    assert markers[2].get("BeatTime") == "22.0"
+    ids = [m.get("Id") for m in markers]
+    assert len(ids) == len(set(ids))
+
+
+def test_generate_als_warped_clip_length_is_anchored_at_its_position(tmp_path):
+    wav = _write_wav(tmp_path / "media" / "Guitar.wav", frames=441_000)  # 10s @ 44100Hz
+    ref = AudioFileRef(filename="Guitar.wav", track_name="Guitar", take_number=0, is_comp=False, comp_name="", file_path=wav)
+    ref.start_position_samples = 88_200  # 2s -> beat 4 at 120bpm
+    project = _timeline_project("Anchored", ["Guitar"], [ref])
+    project.timeline = Timeline(tempo_events=[TempoEvent(beat=8.0, bpm=140.0)], markers=[])
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    clip = root.find(".//Events/AudioClip")
+    # 2s at 120bpm reach the breakpoint (4 beats), the remaining 8s run at 140bpm (18.667 beats).
+    expected_beats = 4.0 + 8.0 * 140.0 / 60.0
+    assert clip.find("CurrentStart").get("Value") == "4.0"
+    assert abs(float(clip.find("CurrentEnd").get("Value")) - (4.0 + expected_beats)) < 1e-9
+    assert abs(float(clip.find("Loop/LoopEnd").get("Value")) - expected_beats) < 1e-6
+    markers = clip.find("WarpMarkers").findall("WarpMarker")
+    assert [(m.get("SecTime"), m.get("BeatTime")) for m in markers][:2] == [("0", "0"), ("2.0", "4.0")]
+    assert abs(float(markers[2].get("BeatTime")) - expected_beats) < 1e-9
+
+
+def test_generate_als_tempo_automation_writes_step_pairs(tmp_path):
+    project = _timeline_project("TempoAutomation", [], [])
+    project.timeline = Timeline(
+        tempo_events=[
+            TempoEvent(beat=8.0, bpm=140.0),
+            TempoEvent(beat=16.0, bpm=140.0),  # no change from the previous breakpoint: no step
+            TempoEvent(beat=24.0, bpm=90.0),
+        ],
+        markers=[],
+    )
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    manual = root.find(".//Tempo/Manual")
+    assert manual.get("Value") == "120"
+
+    live_set = root.find("LiveSet")
+    track = main_track(live_set)
+    tempo_param = track.find("DeviceChain/Mixer/Tempo")
+    events = parameter_events(track, tempo_param)
+    values = [(e.get("Time"), e.get("Value")) for e in events]
+
+    assert values[0] == ("-63072000", "120")
+    assert ("8", "120") in values
+    assert ("8", "140") in values
+    assert ("24", "140") in values
+    assert ("24", "90") in values
+    assert len(values) == 5
+
+    ids = [e.get("Id") for e in events]
+    assert len(ids) == len(set(ids))
+
+
+def test_generate_als_locators_schema_and_order(tmp_path):
+    project = _timeline_project("Locators", [], [])
+    project.timeline = Timeline(
+        tempo_events=[],
+        markers=[TimelineMarker(beat=32.0, name="Chorus"), TimelineMarker(beat=0.0, name="Intro")],
+    )
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    locators = root.find(".//Locators/Locators").findall("Locator")
+    assert [loc.get("Id") for loc in locators] == ["0", "1"]
+    assert [loc.find("Name").get("Value") for loc in locators] == ["Intro", "Chorus"]
+    assert [loc.find("Time").get("Value") for loc in locators] == ["0", "32"]
+    for locator in locators:
+        assert locator.find("LomId").get("Value") == "0"
+        assert locator.find("Annotation").get("Value") == ""
+        assert locator.find("IsSongStart").get("Value") == "false"
+
+
+def test_generate_als_unique_critical_ids_with_tempo_automation_and_locators(tmp_path):
+    """The global ID invariant must hold with tempo automation and locators present."""
+    audio_path = write_test_wav(tmp_path / "media" / "Guitar.wav")
+    ref = AudioFileRef(filename="Guitar.wav", track_name="Guitar", take_number=0, is_comp=False, comp_name="", file_path=audio_path)
+    project = _timeline_project("Synthetic IDs Timeline", ["Guitar"], [ref])
+    project.timeline = Timeline(
+        tempo_events=[TempoEvent(beat=8.0, bpm=140.0)],
+        markers=[TimelineMarker(beat=0.0, name="Intro"), TimelineMarker(beat=32.0, name="Chorus")],
+    )
+
+    als_path = generate_als(
+        project,
+        tmp_path / "output",
+        copy_audio=False,
+        template_path=_BUNDLED_TEMPLATE,
+        keep_unwarped=["Guitar"],
+    )
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+    _assert_unique_critical_ids(root)
+
+
+def test_unmatched_keep_unwarped_warnings_usable_without_generate_als():
+    """The unmatched-pattern warning is plain string matching, so a caller
+    (e.g. a report-only path that never calls generate_als) can compute it
+    directly from track names alone.
+    """
+    warnings = unmatched_keep_unwarped_warnings(["Drums", "Bass"], ["Drums", "Nonexistent*"])
+    assert warnings == ["--keep-unwarped pattern 'Nonexistent*' did not match any track name."]
+    assert unmatched_keep_unwarped_warnings(["Drums"], ["Drums"]) == []
+    assert unmatched_keep_unwarped_warnings(["Drums"], None) == []
+
+
+def test_generate_als_warped_offset_beats_use_flat_content_relative_formula(tmp_path):
+    """content_offset_samples is a slice position within the source file, not
+    an arrangement position, so it must convert to beats on the flat
+    single-tempo formula even when a timeline tempo breakpoint sits under
+    the clip's arrangement position.
+    """
+    wav = _write_wav(tmp_path / "media" / "Guitar.wav", frames=220_500)  # 5s @ 44100Hz
+    ref = AudioFileRef(
+        filename="Guitar.wav",
+        track_name="Guitar",
+        take_number=0,
+        is_comp=False,
+        comp_name="",
+        file_path=wav,
+        content_offset_samples=132_300,  # 3s slice offset within the source file
+        content_duration_samples=88_200,  # 2s of content
+    )
+    project = _timeline_project("OffsetWithBreakpoint", ["Guitar"], [ref])
+    project.timeline = Timeline(tempo_events=[TempoEvent(beat=2.0, bpm=240.0)], markers=[])
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    clip = root.find(".//Events/AudioClip")
+    # 3s at the flat 120bpm formula is 6 beats. Routing the offset through
+    # the breakpoint at beat 2 (as if it were an arrangement position)
+    # would instead give 10 beats.
+    assert clip.find("Loop/LoopStart").get("Value") == "6"
+    assert clip.find("Loop/LoopEnd").get("Value") == "12"
+
+
+def test_write_locators_strips_control_characters_from_marker_name(tmp_path):
+    """A --timeline marker name carrying a raw control character must not
+    corrupt the generated .als, which is itself XML.
+    """
+    wav = _write_wav(tmp_path / "media" / "Guitar.wav")
+    ref = AudioFileRef(filename="Guitar.wav", track_name="Guitar", take_number=0, is_comp=False, comp_name="", file_path=wav)
+    project = _timeline_project("TaintedMarker", ["Guitar"], [ref])
+    project.timeline = Timeline(tempo_events=[], markers=[TimelineMarker(beat=0.0, name="Chorus\x07Bell")])
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        xml_bytes = f.read()
+
+    # Must round-trip through ElementTree's own parser without error.
+    root = ET.fromstring(xml_bytes)
+    locator = root.find(".//Locators/Locators/Locator")
+    assert locator.find("Name").get("Value") == "ChorusBell"

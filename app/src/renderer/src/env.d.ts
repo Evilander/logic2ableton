@@ -31,6 +31,17 @@ interface ProgressEvent {
   warning?: string
 }
 
+interface ConversionRequest {
+  direction: ConversionDirection
+  sourcePath: string
+  outputDir: string
+  reportOnly: boolean
+  tempo?: number
+  smpteStart?: string
+  keepUnwarped?: string[]
+  timelinePath?: string
+}
+
 interface ConversionRecord {
   id: string
   direction: ConversionDirection
@@ -55,13 +66,9 @@ interface Window {
     getPathForFile: (file: File) => string
     platform: string
     selectOutputDir: () => Promise<string | null>
-    startConversion: (
-      direction: ConversionDirection,
-      sourcePath: string,
-      outputDir: string,
-      tempo?: number,
-    ) => Promise<void>
-    startPreview: (direction: ConversionDirection, sourcePath: string, tempo?: number) => Promise<void>
+    selectTimelineJson: () => Promise<string | null>
+    startConversion: (request: ConversionRequest) => Promise<void>
+    startPreview: (request: ConversionRequest) => Promise<void>
     cancelActiveJob: () => Promise<void>
     openFile: (path: string) => Promise<string>
     showInFolder: (path: string) => Promise<void>

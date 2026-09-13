@@ -1,12 +1,16 @@
+import gzip
 import subprocess
 import sys
 import json
+import xml.etree.ElementTree as ET
 
 import pytest
 
 from logic2ableton.cli import main
 from logic2ableton import __version__
 from logic2ableton.models import LogicProject
+
+from scripts.fixture_builders import build_logic_project_data, build_synthetic_logicx, write_smpte_stamped_wav
 
 from conftest import TEST_PROJECT, TEST_PROJECT_NAME
 
@@ -93,6 +97,39 @@ def test_cli_report_only_writes_report(tmp_path, monkeypatch, capsys):
     report_path = output_dir / "Preview Project_conversion_report.txt"
     assert report_path.exists()
     assert str(report_path) in captured.out
+
+
+def test_cli_report_only_reuses_report_path_across_repeat_runs(tmp_path, monkeypatch, capsys):
+    """A single-input --report-only run (the Electron preview flow) must overwrite the
+    same report file on repeat calls instead of numbering a new one each time."""
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: LogicProject(
+            name="Preview Project",
+            tempo=120.0,
+            time_sig_numerator=4,
+            time_sig_denominator=4,
+            sample_rate=44100,
+            audio_files=[],
+            plugins=[],
+            track_names=["Track 1"],
+            alternative=0,
+            compatibility_warnings=[],
+        ),
+    )
+    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+
+    for _ in range(3):
+        exit_code = main([str(project_path), "--output", str(output_dir), "--report-only"])
+        assert exit_code == 0
+
+    reports = list(output_dir.glob("*_conversion_report.txt"))
+    assert [p.name for p in reports] == ["Preview Project_conversion_report.txt"]
 
 
 def test_cli_writes_report_when_parse_fails(tmp_path, monkeypatch, capsys):
@@ -426,3 +463,266 @@ def test_cli_json_progress_report_only():
     complete = [p for p in parsed if p["stage"] == "complete"][0]
     assert "report" in complete
     assert complete["tracks"] > 0
+
+
+def _minimal_project(**overrides):
+    fields = dict(
+        name="SMPTE Project",
+        tempo=120.0,
+        time_sig_numerator=4,
+        time_sig_denominator=4,
+        sample_rate=44100,
+        audio_files=[],
+        plugins=[],
+        track_names=[],
+        alternative=0,
+        compatibility_warnings=[],
+    )
+    fields.update(overrides)
+    return LogicProject(**fields)
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("01:30:00:00", 5400.0),
+    ("120", 120.0),
+    ("auto", None),
+])
+def test_cli_smpte_start_reaches_parse_logic_project(tmp_path, monkeypatch, value, expected):
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
+    output_dir = tmp_path / "output"
+
+    captured = {}
+
+    def fake_parse(*_args, **kwargs):
+        captured.update(kwargs)
+        return _minimal_project()
+
+    monkeypatch.setattr("logic2ableton.cli.parse_logic_project", fake_parse)
+    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+
+    exit_code = main([str(project_path), "--output", str(output_dir), "--report-only", "--smpte-start", value])
+
+    assert exit_code == 0
+    assert captured["smpte_start_seconds"] == expected
+
+
+def test_cli_smpte_start_invalid_value_exits_2():
+    with pytest.raises(SystemExit) as exc:
+        main(["--smpte-start", "not-a-time", "project.logicx"])
+    assert exc.value.code == 2
+
+
+def test_cli_keep_unwarped_reaches_generate_als(tmp_path, monkeypatch):
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: _minimal_project(name="Unwarp Project", track_names=["Guitar"]),
+    )
+    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+
+    captured = {}
+
+    def fake_generate_als(project, output_dir, copy_audio=True, template_path=None, *, keep_unwarped=None):
+        captured["keep_unwarped"] = keep_unwarped
+        als_path = output_dir / f"{project.name} Project" / f"{project.name}.als"
+        als_path.parent.mkdir(parents=True, exist_ok=True)
+        root = ET.Element("Ableton")
+        ET.SubElement(root, "LiveSet")
+        with gzip.open(als_path, "wb") as handle:
+            handle.write(ET.tostring(root))
+        return als_path
+
+    monkeypatch.setattr("logic2ableton.cli.generate_als", fake_generate_als)
+
+    exit_code = main([
+        str(project_path), "--output", str(output_dir),
+        "--keep-unwarped", "Guitar*", "--keep-unwarped", "Drums",
+    ])
+
+    assert exit_code == 0
+    assert captured["keep_unwarped"] == ["Guitar*", "Drums"]
+
+
+def test_cli_timeline_loaded_and_attached(tmp_path, monkeypatch, capsys):
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: _minimal_project(name="Timeline Project"),
+    )
+    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+
+    timeline_path = tmp_path / "timeline.json"
+    timeline_path.write_text(json.dumps({
+        "tempo": [{"bar": 3, "bpm": 90}],
+        "markers": [{"bar": 5, "name": "Bridge"}],
+    }))
+
+    exit_code = main([
+        str(project_path), "--output", str(output_dir), "--report-only",
+        "--timeline", str(timeline_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "TIMELINE:" in captured.out
+    assert "90 BPM" in captured.out
+    assert "Bridge" in captured.out
+
+
+@pytest.mark.parametrize("write_timeline", [None, "missing", "invalid"])
+def test_cli_timeline_missing_or_invalid_file_exits_1(tmp_path, monkeypatch, write_timeline):
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        "logic2ableton.cli.parse_logic_project",
+        lambda *_args, **_kwargs: _minimal_project(name="Broken Timeline"),
+    )
+
+    if write_timeline == "invalid":
+        timeline_path = tmp_path / "timeline.json"
+        timeline_path.write_text(json.dumps({"tempo": [{"bar": 1}]}))  # missing 'bpm'
+    else:
+        timeline_path = tmp_path / "missing.json"
+
+    exit_code = main([
+        str(project_path), "--output", str(output_dir), "--timeline", str(timeline_path),
+    ])
+
+    assert exit_code == 1
+    report_path = output_dir / "Broken Timeline_conversion_report.txt"
+    assert report_path.exists()
+    assert "Stage: timeline" in report_path.read_text(encoding="utf-8")
+
+
+def test_cli_batch_two_inputs_produce_two_reports_and_json_lines(tmp_path, capsys):
+    blob = build_logic_project_data([])
+    first = build_synthetic_logicx(tmp_path / "one", project_data=blob)
+    second = build_synthetic_logicx(tmp_path / "two", project_data=blob)
+    output_dir = tmp_path / "output"
+
+    exit_code = main([
+        "logic2ableton", str(first), str(second),
+        "--output", str(output_dir), "--report-only", "--json-progress",
+    ])
+    lines = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    completes = [line for line in lines if line["stage"] == "complete"]
+
+    assert exit_code == 0
+    assert len(completes) == 2
+    assert {line["input"] for line in completes} == {str(first), str(second)}
+    assert len(list(output_dir.glob("*_conversion_report.txt"))) == 2
+
+
+def test_cli_batch_exit_code_is_1_when_one_input_fails(tmp_path, capsys):
+    blob = build_logic_project_data([])
+    good = build_synthetic_logicx(tmp_path / "one", project_data=blob)
+    bad = tmp_path / "broken.logicx"
+    bad.mkdir()
+    output_dir = tmp_path / "output"
+
+    exit_code = main([
+        "logic2ableton", str(good), str(bad),
+        "--output", str(output_dir), "--report-only", "--json-progress",
+    ])
+
+    assert exit_code == 1
+    assert (output_dir / "Synth_conversion_report.txt").exists()
+    assert (output_dir / "broken_conversion_report.txt").exists()
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    errors = [line for line in lines if line["stage"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["input"] == str(bad)
+
+
+def test_cli_batch_generate_mixer_template_does_not_overwrite_across_inputs(tmp_path):
+    blob = build_logic_project_data([])
+    first = build_synthetic_logicx(tmp_path / "one", project_data=blob)
+    second = build_synthetic_logicx(tmp_path / "two", project_data=blob)
+    output_dir = tmp_path / "output"
+
+    exit_code = main([
+        "logic2ableton", str(first), str(second),
+        "--output", str(output_dir), "--report-only", "--generate-mixer-template",
+    ])
+
+    assert exit_code == 0
+    templates = sorted(output_dir.glob("mixer_overrides*.json"))
+    assert len(templates) == 2
+
+
+def test_cli_smpte_start_auto_infers_hour_floor_end_to_end(tmp_path, capsys):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    write_smpte_stamped_wav(audio_dir / "Early.wav", smpte_seconds=7210.0, sample_rate=44_100)
+    write_smpte_stamped_wav(audio_dir / "Later.wav", smpte_seconds=7300.0, sample_rate=44_100)
+    output_dir = tmp_path / "output"
+
+    exit_code = main([str(logicx), "--output", str(output_dir), "--report-only", "--smpte-start", "auto"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "SMPTE start: 02:00:00:00 (inferred from the earliest recording)" in captured.out
+
+
+def test_cli_single_run_mixer_template_overwrites_on_repeat(tmp_path):
+    blob = build_logic_project_data([])
+    logicx = build_synthetic_logicx(tmp_path, project_data=blob)
+    output_dir = tmp_path / "output"
+
+    for _ in range(3):
+        exit_code = main([
+            str(logicx), "--output", str(output_dir), "--report-only", "--generate-mixer-template",
+        ])
+        assert exit_code == 0
+
+    assert sorted(p.name for p in output_dir.glob("mixer_overrides*.json")) == ["mixer_overrides.json"]
+
+
+def test_cli_folder_style_project_converts_and_copies_audio(tmp_path, capsys):
+    from scripts.fixture_builders import build_folder_style_logicx
+
+    logicx = build_folder_style_logicx(tmp_path, name="Folder Song")
+    write_smpte_stamped_wav(logicx.parent / "Audio Files" / "LTC#01.wav", smpte_seconds=3600.0, sample_rate=44_100)
+    write_smpte_stamped_wav(logicx.parent / "Audio Files" / "Guitar#01.wav", smpte_seconds=3602.0, sample_rate=44_100)
+    output_dir = tmp_path / "output"
+
+    exit_code = main([str(logicx), "--output", str(output_dir), "--keep-unwarped", "ltc*"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Audio files: folder-style project" in captured.out
+    assert "Unwarped (won't stretch with tempo changes): LTC" in captured.out
+    project_dir = output_dir / "Folder Song Project"
+    assert (project_dir / "Folder Song.als").exists()
+    copied = sorted(p.name for p in (project_dir / "Samples" / "Imported").glob("*.wav"))
+    assert copied == ["Guitar#01.wav", "LTC#01.wav"]
+
+
+def test_cli_report_only_warns_about_unmatched_keep_unwarped_pattern(tmp_path, capsys):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    write_smpte_stamped_wav(logicx / "Media" / "Audio Files" / "Guitar#01.wav", smpte_seconds=3600.0, sample_rate=44_100)
+    output_dir = tmp_path / "output"
+
+    exit_code = main([
+        str(logicx), "--output", str(output_dir), "--report-only",
+        "--keep-unwarped", "Guitar*", "--keep-unwarped", "Pilot*",
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "--keep-unwarped pattern 'Pilot*' did not match any track name." in captured.out
+    assert "'Guitar*' did not match" not in captured.out

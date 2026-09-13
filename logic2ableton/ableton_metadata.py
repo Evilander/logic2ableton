@@ -2,6 +2,14 @@
 
 import math
 import xml.etree.ElementTree as ET
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from logic2ableton.timeline import TempoMap
+
+# The sentinel event Live writes on every automated envelope to carry its
+# initial value at playback start, well before any real automation begins.
+_SENTINEL_TIME = "-63072000"
 
 
 def encode_meter(numerator: int, denominator: int) -> int:
@@ -72,6 +80,86 @@ def set_global_parameter(live_set: ET.Element, name: str, value: str) -> None:
     # A template's automation can override its Manual value at playback start.
     for event in parameter_events(track, parameter):
         event.set("Value", value)
+
+
+def _format_number(value: float) -> str:
+    """Format like ableton_generator's number formatting: no dropped fractional precision."""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def set_tempo_automation(live_set: ET.Element, tempo_map: "TempoMap", allocator) -> None:
+    """Set the project tempo and, when the map has breakpoints, step the
+    Tempo envelope through them.
+
+    With no breakpoints this only sets Manual and mirrors it onto any
+    existing envelope events via set_global_parameter — unchanged from
+    before tempo automation existed, and template-preserving (it never
+    touches an envelope's event count or timing, only values).
+
+    With breakpoints: the sentinel event (Time=-63072000, Live's carrier
+    for the initial value) is rewritten to the tempo at beat 0, every other
+    existing event on the envelope is dropped, and each breakpoint after
+    beat 0 that actually changes the tempo gets a two-event step at its own
+    Time — the previous bpm immediately followed by the new one — since
+    Live's automation is linear between events and a bare single point
+    would ramp instead of stepping.
+    """
+    base_bpm = tempo_map.bpm_at(0.0)
+    value = _format_number(base_bpm)
+    if not tempo_map.events:
+        set_global_parameter(live_set, "Tempo", value)
+        return
+
+    track = main_track(live_set)
+    if track is None:
+        return
+    parameter = track.find("DeviceChain/Mixer/Tempo")
+    if parameter is None:
+        return
+    manual = parameter.find("Manual")
+    if manual is not None:
+        manual.set("Value", value)
+
+    target = parameter.find("AutomationTarget")
+    if target is None:
+        return
+    target_id = target.get("Id")
+    events_elem = None
+    for envelope in track.findall("AutomationEnvelopes/Envelopes/AutomationEnvelope"):
+        pointee = envelope.find("EnvelopeTarget/PointeeId")
+        if pointee is not None and pointee.get("Value") == target_id:
+            events_elem = envelope.find("Automation/Events")
+            break
+    if events_elem is None:
+        return
+
+    sentinel = None
+    for event in list(events_elem):
+        if sentinel is None and event.get("Time") == _SENTINEL_TIME:
+            sentinel = event
+        events_elem.remove(event)
+    if sentinel is None:
+        sentinel = ET.SubElement(events_elem, "FloatEvent")
+        sentinel.set("Id", str(allocator.next()))
+        sentinel.set("Time", _SENTINEL_TIME)
+    else:
+        events_elem.append(sentinel)
+    sentinel.set("Value", value)
+
+    previous_bpm = base_bpm
+    for event in tempo_map.events:
+        if event.beat <= 0:
+            previous_bpm = event.bpm
+            continue
+        if event.bpm != previous_bpm:
+            for bpm in (previous_bpm, event.bpm):
+                step = ET.SubElement(events_elem, "FloatEvent")
+                step.set("Id", str(allocator.next()))
+                step.set("Time", _format_number(event.beat))
+                step.set("Value", _format_number(bpm))
+        previous_bpm = event.bpm
 
 
 def has_global_changes(live_set: ET.Element, name: str) -> bool:

@@ -24,3 +24,6 @@ app/resources/logic2ableton*
 # Local working notes.
 notes/
 todos/
+
+# Generated on the CI runner for the macOS 11 build leg
+app/electron-builder.macos11.yml

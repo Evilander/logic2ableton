@@ -5,24 +5,40 @@ strip its default tracks, inject our audio tracks with clips, and set tempo/time
 This guarantees structural correctness since we start from a valid file.
 
 Critical: All Id attributes in the XML must be globally unique. When cloning
-template tracks, every Id is reassigned using a global counter.
+template tracks, every Id is reassigned using a global counter. Locators are
+the one exception: Live scopes their Ids from 0 in their own namespace (see
+_write_locators), confirmed against Live 12.4.3's own saved sets.
+
+Unwarped-clip units: Loop/LoopStart, Loop/LoopEnd, and Loop/StartRelative are
+expressed in plain seconds when IsWarped is false (see
+_unwarped_clip_extent), while CurrentStart/CurrentEnd stay in arrangement
+beats. Verified against Live 12.4.3's own save: a 10 s file Live imported and
+unwarped at 90 BPM was written with LoopEnd 10 and CurrentEnd - CurrentStart
+15, and Live normalizes the WarpMarkers of an unwarped clip itself.
 """
 
 import copy
+import fnmatch
 import gzip
 import io
 import math
+import re
 import shutil
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from logic2ableton.audio import read_audio_info
-from logic2ableton.ableton_metadata import encode_meter, set_global_parameter
+from logic2ableton.ableton_metadata import encode_meter, set_global_parameter, set_tempo_automation
 from logic2ableton.paths import create_output_directory, safe_name
+from logic2ableton.timeline import TempoMap, beats_per_bar
 
-from logic2ableton.models import AudioFileRef, LogicMidiTrack, LogicProject, TrackMixerState
+from logic2ableton.models import AudioFileRef, LogicMidiTrack, LogicProject, TrackMixerState, samples_to_beats
+
+if TYPE_CHECKING:
+    from logic2ableton.timeline import TimelineMarker
 
 
 _EDITIONS = ["Suite", "Trial", "Standard", "Intro", "Lite"]
@@ -62,10 +78,17 @@ def _find_template(custom_path: Path | None = None) -> Path | None:
     return None
 
 
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _val(parent: ET.Element, tag: str, value) -> ET.Element:
-    """Create a <Tag Value="value"/> child element."""
+    """Create a <Tag Value="value"/> child element.
+
+    Strips control characters (illegal in XML 1.0) so a tainted string —
+    e.g. a --timeline marker name — can never produce a malformed .als.
+    """
     elem = ET.SubElement(parent, tag)
-    elem.set("Value", str(value))
+    elem.set("Value", _CONTROL_CHAR_RE.sub("", str(value)))
     return elem
 
 
@@ -112,11 +135,8 @@ def _reassign_ids(element: ET.Element, allocator: _IdAllocator) -> None:
 def _clone_track(template_track: ET.Element, allocator: _IdAllocator, name: str, color: int) -> ET.Element:
     """Clone a template AudioTrack with unique IDs and custom name/color."""
     track = copy.deepcopy(template_track)
-
-    # Reassign ALL Id attributes to globally unique values
     _reassign_ids(track, allocator)
 
-    # Set name
     name_elem = track.find("Name")
     if name_elem is not None:
         eff = name_elem.find("EffectiveName")
@@ -126,7 +146,6 @@ def _clone_track(template_track: ET.Element, allocator: _IdAllocator, name: str,
         if user is not None:
             user.set("Value", name)
 
-    # Set color
     color_elem = track.find("Color")
     if color_elem is not None:
         color_elem.set("Value", str(color))
@@ -161,15 +180,31 @@ def _set_mixer_state(track: ET.Element, mixer_state: TrackMixerState | None) -> 
         solo_elem.set("Value", "true" if mixer_state.is_soloed else "false")
 
 
+def _unwarped_clip_extent(duration_secs: float, offset_secs: float) -> dict:
+    """Loop bounds for an unwarped clip, expressed in plain seconds.
+
+    Warped clips address Loop/WarpMarker bounds in beats, on the file's own
+    warp grid. An unwarped clip plays back at its raw sample rate with no
+    warp grid, so Live addresses Loop/LoopStart, Loop/LoopEnd, and
+    Loop/StartRelative in seconds instead — see the module docstring.
+    """
+    return {
+        "LoopStart": offset_secs,
+        "LoopEnd": offset_secs + duration_secs,
+        "StartRelative": 0.0,
+    }
+
+
 def _make_audio_clip_xml(
     allocator: _IdAllocator,
     ref: AudioFileRef,
-    tempo: float,
+    tempo_map: TempoMap,
     sample_rate: int,
     time_sig_numerator: int,
     time_sig_denominator: int,
     project_folder: Path | None = None,
     color: int = 0,
+    is_warped: bool = True,
 ) -> ET.Element:
     """Create an AudioClip element for arrangement view.
 
@@ -177,13 +212,9 @@ def _make_audio_clip_xml(
     Logic Pro embeds BWF timestamps in recordings; the position is extracted
     during parsing and stored in AudioFileRef.start_position_samples.
     """
-    # Get duration and sample rate from WAV header
     file_duration_samples, file_sample_rate = _get_audio_info(ref.file_path)
     timeline_sample_rate = ref.timeline_sample_rate or file_sample_rate or sample_rate
     source_sample_rate = file_sample_rate or sample_rate
-
-    def to_beats(samples: int) -> float:
-        return samples * tempo / (timeline_sample_rate * 60)
 
     # Pro Tools-style regions play a slice of the source file; Logic clips
     # play the whole file (offset 0, duration None).
@@ -195,29 +226,60 @@ def _make_audio_clip_xml(
     duration_samples = file_duration_samples
     if content_samples <= 0:
         raise ValueError(f"Cannot determine audio duration: {ref.filename}")
-    duration_beats = to_beats(content_samples)
     duration_secs = (duration_samples / source_sample_rate if duration_samples > 0
                      else (offset_samples + content_samples) / timeline_sample_rate)
-    offset_beats = to_beats(offset_samples)
+    # The content offset is a slice position within the source file, not an
+    # arrangement position — it must not be run through the tempo map's
+    # absolute-zero-anchored curve (that would treat it as if it sat on the
+    # song timeline). Always use the flat single-tempo formula, the same one
+    # TempoMap.samples_to_beats falls back to when there is no tempo map.
+    offset_beats = samples_to_beats(offset_samples, tempo_map.base_tempo, timeline_sample_rate)
+    offset_secs = offset_samples / timeline_sample_rate
+    content_secs = content_samples / timeline_sample_rate
 
     # Calculate timeline position from BWF timestamp
-    start_beats = to_beats(ref.start_position_samples)
+    start_beats = tempo_map.samples_to_beats(ref.start_position_samples, timeline_sample_rate)
+    start_seconds = tempo_map.beats_to_seconds(start_beats)
+    # How many beats the content spans depends on where it sits once the
+    # tempo changes, so measure from the clip's own position. Without a
+    # timeline this is the flat single-tempo formula, kept as is so the
+    # output does not drift by float rounding.
+    if tempo_map.events:
+        duration_beats = tempo_map.seconds_to_beats(start_seconds + content_secs) - start_beats
+    else:
+        duration_beats = tempo_map.samples_to_beats(content_samples, timeline_sample_rate)
 
     clip = ET.Element("AudioClip")
     clip.set("Id", str(allocator.next()))
     clip.set("Time", str(start_beats))
 
     _val(clip, "LomId", "0")
+    if is_warped:
+        current_end = start_beats + duration_beats
+    else:
+        # Anchor the elapsed-beats calculation at the clip's own arrangement
+        # position so a tempo breakpoint under the clip is reflected exactly,
+        # rather than assuming a flat tempo across the whole clip.
+        current_end = start_beats + (
+            tempo_map.seconds_to_beats(start_seconds + content_secs)
+            - tempo_map.seconds_to_beats(start_seconds)
+        )
     # CurrentStart/CurrentEnd are ABSOLUTE timeline positions
     _val(clip, "CurrentStart", str(start_beats))
-    _val(clip, "CurrentEnd", str(start_beats + duration_beats))
+    _val(clip, "CurrentEnd", str(current_end))
 
     # Loop — relative to audio content (not timeline). StartRelative selects
     # where in the source the clip starts playing.
     loop = ET.SubElement(clip, "Loop")
-    _val(loop, "LoopStart", _format_ableton_number(offset_beats))
-    _val(loop, "LoopEnd", _format_ableton_number(offset_beats + duration_beats))
-    _val(loop, "StartRelative", "0")
+    if is_warped:
+        _val(loop, "LoopStart", _format_ableton_number(offset_beats))
+        _val(loop, "LoopEnd", _format_ableton_number(offset_beats + duration_beats))
+        _val(loop, "StartRelative", "0")
+    else:
+        extent = _unwarped_clip_extent(content_secs, offset_secs)
+        _val(loop, "LoopStart", _format_ableton_number(extent["LoopStart"]))
+        _val(loop, "LoopEnd", _format_ableton_number(extent["LoopEnd"]))
+        _val(loop, "StartRelative", _format_ableton_number(extent["StartRelative"]))
     _val(loop, "LoopOn", "false")
 
     clip_name = ref.clip_name or ref.filename.rsplit(".", 1)[0]
@@ -225,16 +287,14 @@ def _make_audio_clip_xml(
     # Match the clip color to its track so the arrangement reads cleanly.
     _val(clip, "Color", str(color))
     _val(clip, "Disabled", "false")
-    _val(clip, "IsWarped", "true")
+    _val(clip, "IsWarped", "true" if is_warped else "false")
 
-    # Fades
     fades = ET.SubElement(clip, "Fades")
     _val(fades, "FadeInLength", "0")
     _val(fades, "FadeOutLength", "0")
     _val(fades, "IsDefaultFadeIn", "true")
     _val(fades, "IsDefaultFadeOut", "true")
 
-    # TimeSignature
     ts_outer = ET.SubElement(clip, "TimeSignature")
     ts_list = ET.SubElement(ts_outer, "TimeSignatures")
     ts_remote = ET.SubElement(ts_list, "RemoteableTimeSignature")
@@ -243,16 +303,33 @@ def _make_audio_clip_xml(
     _val(ts_remote, "Denominator", str(time_sig_denominator))
     _val(ts_remote, "Time", "0")
 
-    # WarpMarkers — two markers: start and end
+    # WarpMarkers — start and end always; warped clips that cross a tempo
+    # breakpoint get an extra marker at each one so Live's playback speed
+    # tracks the song's actual tempo curve instead of one flat ratio for
+    # the whole file. With no timeline, this reduces to the plain
+    # single-tempo formula (no map lookups) so output is unchanged.
+    if tempo_map.events:
+        end_abs_beat = tempo_map.seconds_to_beats(start_seconds + duration_secs)
+        warp_end_beat_time = end_abs_beat - start_beats
+        breakpoints = tempo_map.breakpoints_between(start_beats, end_abs_beat) if is_warped else []
+    else:
+        warp_end_beat_time = duration_secs * tempo_map.base_tempo / 60
+        breakpoints = []
+
     warp_markers = ET.SubElement(clip, "WarpMarkers")
     wm_start = ET.SubElement(warp_markers, "WarpMarker")
     wm_start.set("Id", str(allocator.next()))
     wm_start.set("SecTime", "0")
     wm_start.set("BeatTime", "0")
+    for event in breakpoints:
+        wm_mid = ET.SubElement(warp_markers, "WarpMarker")
+        wm_mid.set("Id", str(allocator.next()))
+        wm_mid.set("SecTime", str(tempo_map.beats_to_seconds(event.beat) - start_seconds))
+        wm_mid.set("BeatTime", str(event.beat - start_beats))
     wm_end = ET.SubElement(warp_markers, "WarpMarker")
     wm_end.set("Id", str(allocator.next()))
     wm_end.set("SecTime", str(duration_secs))
-    wm_end.set("BeatTime", str(duration_secs * tempo / 60))
+    wm_end.set("BeatTime", str(warp_end_beat_time))
 
     # WarpMode: 0 = Beats (default for arrangement clips)
     _val(clip, "WarpMode", "0")
@@ -283,7 +360,6 @@ def _make_audio_clip_xml(
     _val(sample_ref, "DefaultDuration", str(duration_samples))
     _val(sample_ref, "DefaultSampleRate", str(source_sample_rate))
 
-    # Envelopes
     envelopes = ET.SubElement(clip, "Envelopes")
     ET.SubElement(envelopes, "Envelopes")
 
@@ -300,17 +376,14 @@ def _pick_best_clip(clips: list[AudioFileRef]) -> AudioFileRef | None:
     if len(clips) == 1:
         return clips[0]
 
-    # Prefer comp files
     comps = [c for c in clips if c.is_comp]
     if comps:
         return comps[0]
 
-    # Prefer bounce-in-place files
     bips = [c for c in clips if "_bip" in c.filename]
     if bips:
         return bips[0]
 
-    # Fall back to latest take (highest take number)
     return max(clips, key=lambda c: c.take_number)
 
 
@@ -322,7 +395,7 @@ def _get_clip_end_samples(ref: AudioFileRef, sample_rate: int) -> int:
     return ref.start_position_samples + duration_samples
 
 
-def _resolve_overlaps(clips: list[AudioFileRef], tempo: float, sample_rate: int) -> list[AudioFileRef]:
+def _resolve_overlaps(clips: list[AudioFileRef], sample_rate: int) -> list[AudioFileRef]:
     """Resolve overlapping clips, keeping the best one per overlapping group.
 
     Clips at different timeline positions are all kept. When clips overlap
@@ -338,9 +411,8 @@ def _resolve_overlaps(clips: list[AudioFileRef], tempo: float, sample_rate: int)
     placed = [clip for clip in clips if clip.content_duration_samples is not None]
     if placed:
         takes = [clip for clip in clips if clip.content_duration_samples is None]
-        return sorted(placed + _resolve_overlaps(takes, tempo, sample_rate), key=lambda clip: clip.start_position_samples)
+        return sorted(placed + _resolve_overlaps(takes, sample_rate), key=lambda clip: clip.start_position_samples)
 
-    # Sort by start position
     sorted_clips = sorted(clips, key=lambda c: c.start_position_samples)
 
     # Group clips that overlap in time range using a sweep-line approach
@@ -350,7 +422,6 @@ def _resolve_overlaps(clips: list[AudioFileRef], tempo: float, sample_rate: int)
 
     for clip in sorted_clips[1:]:
         if clip.start_position_samples < group_end:
-            # Overlaps with current group
             current_group.append(clip)
             clip_end = _get_clip_end_samples(clip, sample_rate)
             group_end = max(group_end, clip_end)
@@ -360,25 +431,25 @@ def _resolve_overlaps(clips: list[AudioFileRef], tempo: float, sample_rate: int)
             group_end = _get_clip_end_samples(clip, sample_rate)
     groups.append(current_group)
 
-    # Pick best clip from each group
-    result = []
+    resolved = []
     for group in groups:
         best = _pick_best_clip(group)
         if best is not None:
-            result.append(best)
-    return result
+            resolved.append(best)
+    return resolved
 
 
 def _inject_clips_into_track(
     track: ET.Element,
     clips: list[AudioFileRef],
     allocator: _IdAllocator,
-    tempo: float,
+    tempo_map: TempoMap,
     sample_rate: int,
     time_sig_numerator: int,
     time_sig_denominator: int,
     project_folder: Path | None = None,
     color: int = 0,
+    is_warped: bool = True,
 ) -> None:
     """Inject AudioClip elements into a track's arrangement view.
 
@@ -406,30 +477,80 @@ def _inject_clips_into_track(
     if events is None:
         events = ET.SubElement(arranger, "Events")
 
-    # Clear any existing clips
     for existing in list(events):
         events.remove(existing)
 
-    # Resolve overlapping clips, keep all non-overlapping
-    selected = _resolve_overlaps(clips, tempo, sample_rate)
+    selected = _resolve_overlaps(clips, sample_rate)
 
     for ref in selected:
         clip_elem = _make_audio_clip_xml(
             allocator=allocator,
             ref=ref,
-            tempo=tempo,
+            tempo_map=tempo_map,
             sample_rate=sample_rate,
             time_sig_numerator=time_sig_numerator,
             time_sig_denominator=time_sig_denominator,
             project_folder=project_folder,
             color=color,
+            is_warped=is_warped,
         )
         events.append(clip_elem)
 
 
-def _bar_length_beats(numerator: int, denominator: int) -> float:
-    """Length of one bar in quarter-note beats."""
-    return numerator * 4.0 / max(1, denominator)
+def _matching_unwarp_patterns(track_name: str, keep_unwarped: list[str] | None) -> list[str]:
+    """--keep-unwarped patterns (fnmatch, case-insensitive via casefold) matching a track name."""
+    if not keep_unwarped:
+        return []
+    folded = track_name.casefold()
+    return [pattern for pattern in keep_unwarped if fnmatch.fnmatchcase(folded, pattern.casefold())]
+
+
+def unmatched_keep_unwarped_warnings(track_names: list[str], keep_unwarped: list[str] | None) -> list[str]:
+    """Compatibility warnings for --keep-unwarped patterns that matched no track name.
+
+    Track-name matching is plain string logic with no dependency on
+    generate_als actually running, so this is shared by generate_als and any
+    report-only caller that wants the same "pattern didn't match anything"
+    diagnostic without a full conversion.
+    """
+    if not keep_unwarped:
+        return []
+    matched: set[str] = set()
+    for name in track_names:
+        matched.update(_matching_unwarp_patterns(name, keep_unwarped))
+    return [
+        f"--keep-unwarped pattern {pattern!r} did not match any track name."
+        for pattern in keep_unwarped
+        if pattern not in matched
+    ]
+
+
+def _write_locators(live_set: ET.Element, markers: list["TimelineMarker"]) -> None:
+    """Write TimelineMarkers into LiveSet/Locators/Locators.
+
+    Schema confirmed against Live 12.4.3's own saved sets and
+    ableton_parser._parse_locators: <Locator Id="N"><LomId Value="0"/>
+    <Time Value="beats"/><Name Value="..."/><Annotation Value=""/>
+    <IsSongStart Value="false"/></Locator>, Ids sequential from 0 in their
+    own namespace (not the global allocator — see the module docstring).
+    """
+    locators_outer = live_set.find("Locators")
+    if locators_outer is None:
+        return
+    locators = locators_outer.find("Locators")
+    if locators is None:
+        locators = ET.SubElement(locators_outer, "Locators")
+    for existing in list(locators):
+        locators.remove(existing)
+
+    for index, marker in enumerate(sorted(markers, key=lambda m: m.beat)):
+        locator = ET.SubElement(locators, "Locator")
+        locator.set("Id", str(index))
+        _val(locator, "LomId", "0")
+        _val(locator, "Time", _format_ableton_number(marker.beat))
+        _val(locator, "Name", marker.name)
+        _val(locator, "Annotation", "")
+        _val(locator, "IsSongStart", "false")
 
 
 def _make_midi_clip_xml(
@@ -448,11 +569,11 @@ def _make_midi_clip_xml(
     Note times are relative to the clip content origin, which aligns with
     CurrentStart when StartRelative is 0.
     """
-    bar = _bar_length_beats(time_sig_numerator, time_sig_denominator)
+    bar_length_beats = beats_per_bar(time_sig_numerator, time_sig_denominator)
     starts = [note.start_beats for note in midi_track.notes]
     ends = [note.start_beats + note.duration_beats for note in midi_track.notes]
-    clip_start = math.floor(min(starts) / bar) * bar
-    clip_end = max(math.ceil(max(ends) / bar) * bar, clip_start + bar)
+    clip_start = math.floor(min(starts) / bar_length_beats) * bar_length_beats
+    clip_end = max(math.ceil(max(ends) / bar_length_beats) * bar_length_beats, clip_start + bar_length_beats)
     length = clip_end - clip_start
 
     clip = ET.Element("MidiClip")
@@ -626,6 +747,8 @@ def generate_als(
     output_dir: Path,
     copy_audio: bool = True,
     template_path: Path | None = None,
+    *,
+    keep_unwarped: list[str] | None = None,
 ) -> Path:
     """Generate a gzipped XML Ableton Live Set (.als) file.
 
@@ -637,6 +760,9 @@ def generate_als(
         output_dir: Directory to write the Ableton project into.
         copy_audio: If True, copy audio files to the project's Samples/Imported folder.
         template_path: Explicit path to DefaultLiveSet.als. Auto-detected if None.
+        keep_unwarped: fnmatch patterns, matched case-insensitively against
+            the Logic track name, selecting tracks whose audio clips should
+            be written unwarped (IsWarped=false, Loop bounds in seconds).
 
     Returns:
         Path to the created .als file.
@@ -646,7 +772,9 @@ def generate_als(
         raise ValueError("Project tempo must be finite and positive")
     meter = encode_meter(project.time_sig_numerator, project.time_sig_denominator)
 
-    # Load the real Ableton template
+    timeline = getattr(project, "timeline", None)
+    tempo_map = TempoMap(project.tempo, timeline.tempo_events if timeline is not None else [])
+
     resolved_template = _find_template(template_path)
     if resolved_template is None:
         raise FileNotFoundError(
@@ -714,30 +842,34 @@ def generate_als(
         export_refs.append(exported)
         clips_by_track.setdefault(ref.track_name, []).append(exported)
 
-    # Create one audio track per Logic track
     for i, track_name in enumerate(project.track_names):
         color = i % 16
         track = _clone_track(template_audio_track, allocator, track_name, color)
 
-        # Inject clips into the track's arrangement view
+        unwarp_patterns = _matching_unwarp_patterns(track_name, keep_unwarped)
+
         track_clips = clips_by_track.get(track_name, [])
         _inject_clips_into_track(
             track,
             track_clips,
             allocator,
-            project.tempo,
+            tempo_map,
             project.sample_rate,
             project.time_sig_numerator,
             project.time_sig_denominator,
             project_folder if copy_audio else None,
             color=color,
+            is_warped=not unwarp_patterns,
         )
 
-        # Apply mixer values when present.
         if project.mixer_state:
             _set_mixer_state(track, project.mixer_state.get(track_name))
 
         tracks_elem.append(track)
+
+    for warning in unmatched_keep_unwarped_warnings(project.track_names, keep_unwarped):
+        if warning not in project.compatibility_warnings:
+            project.compatibility_warnings.append(warning)
 
     # Create native MIDI tracks from extracted Logic MIDI sequences
     native_midi_tracks = [t for t in project.midi_tracks if t.note_count > 0]
@@ -765,14 +897,17 @@ def generate_als(
     for rt in return_tracks:
         tracks_elem.append(rt)
 
-    # Update NextPointeeId to be above all allocated IDs
+    set_tempo_automation(live_set, tempo_map, allocator)
+    set_global_parameter(live_set, "TimeSignature", str(meter))
+
+    if timeline is not None and timeline.markers:
+        _write_locators(live_set, timeline.markers)
+
+    # Update NextPointeeId to be above all allocated IDs. Must come after
+    # set_tempo_automation, which can allocate new FloatEvent Ids.
     if next_id_elem is not None:
         next_id_elem.set("Value", str(allocator.current))
 
-    set_global_parameter(live_set, "Tempo", _format_ableton_number(project.tempo))
-    set_global_parameter(live_set, "TimeSignature", str(meter))
-
-    # Update the Creator attribute
     root.set("Creator", "logic2ableton converter")
 
     # Write gzipped XML
@@ -784,7 +919,6 @@ def generate_als(
     with gzip.open(als_path, "wb") as f:
         f.write(xml_bytes)
 
-    # Copy audio files if requested
     if copy_audio:
         samples_dir = project_folder / "Samples" / "Imported"
         samples_dir.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,10 @@
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from logic2ableton.timeline import Timeline
 
 
 @dataclass
@@ -80,6 +84,11 @@ class LogicProject:
     software_instrument_files: int = 0
     midi_tracks: list[LogicMidiTrack] = field(default_factory=list)
     compatibility_warnings: list[str] = field(default_factory=list)
+    smpte_start_seconds: float = 3600.0
+    smpte_start_inferred: bool = False
+    audio_dir: Path | None = None
+    audio_layout: str = "package"
+    timeline: "Timeline | None" = None
 
     @property
     def total_midi_notes(self) -> int:

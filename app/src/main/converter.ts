@@ -14,6 +14,17 @@ export const CONVERSION_DIRECTIONS = [
 
 export type ConversionDirection = (typeof CONVERSION_DIRECTIONS)[number]
 
+export interface ConversionRequest {
+  direction: ConversionDirection
+  sourcePath: string
+  outputDir: string
+  reportOnly: boolean
+  tempo?: number
+  smpteStart?: string
+  keepUnwarped?: string[]
+  timelinePath?: string
+}
+
 export interface ProgressEvent {
   direction?: ConversionDirection
   stage: string
@@ -57,15 +68,12 @@ function getConverterCommand(): { cmd: string; baseArgs: string[] } {
 }
 
 export function runConversion(
-  direction: ConversionDirection,
-  sourcePath: string,
-  outputDir: string,
+  request: ConversionRequest,
   onProgress: (event: ProgressEvent) => void,
   onError: (error: string) => void,
   onExit: (code: number) => void,
-  reportOnly = false,
-  tempo?: number,
 ): ChildProcess | null {
+  const { direction, sourcePath, outputDir, reportOnly, tempo, smpteStart, keepUnwarped, timelinePath } = request
   let cmd: string
   let baseArgs: string[]
 
@@ -91,6 +99,17 @@ export function runConversion(
   }
   if (direction.startsWith("protools2") && tempo !== undefined) {
     args.push("--tempo", String(tempo))
+  }
+  if (smpteStart !== undefined) {
+    args.push("--smpte-start", smpteStart)
+  }
+  if (keepUnwarped) {
+    for (const pattern of keepUnwarped) {
+      args.push("--keep-unwarped", pattern)
+    }
+  }
+  if (timelinePath !== undefined) {
+    args.push("--timeline", timelinePath)
   }
 
   const cwd = app.isPackaged ? undefined : resolve(__dirname, "../../..")

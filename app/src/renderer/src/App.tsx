@@ -11,6 +11,7 @@ import {
   destinationForDirection,
   detectSourceFormat,
   isProToolsSource,
+  sourceForDirection,
 } from "./conversion"
 import { useAppState, type ConversionRecord } from "./hooks/useAppState"
 
@@ -25,6 +26,21 @@ function outputPathFromEvent(event: ProgressEvent, direction: ConversionDirectio
 
 function nameFromPath(path: string): string {
   return (path.split(/[/\\]/).pop() || "Unknown").replace(/\.(logicx|als|ptx|pts|ptf)$/i, "")
+}
+
+function extrasForDirection(
+  direction: ConversionDirection,
+  smpteStart: string,
+  keepUnwarped: string,
+  timelinePath: string | null,
+): Pick<ConversionRequest, "smpteStart" | "keepUnwarped" | "timelinePath"> {
+  const trimmedSmpteStart = smpteStart.trim()
+  const patterns = keepUnwarped.split(",").map((pattern) => pattern.trim()).filter(Boolean)
+  return {
+    smpteStart: sourceForDirection(direction) === "logic" && trimmedSmpteStart ? trimmedSmpteStart : undefined,
+    keepUnwarped: direction === "logic2ableton" && patterns.length > 0 ? patterns : undefined,
+    timelinePath: direction === "logic2ableton" && timelinePath ? timelinePath : undefined,
+  }
 }
 
 export default function App() {
@@ -77,7 +93,14 @@ export default function App() {
     }
   }, [])
 
-  const runPreview = async (path: string, direction: ConversionDirection, tempo: number) => {
+  const runPreview = async (
+    path: string,
+    direction: ConversionDirection,
+    tempo: number,
+    smpteStart: string,
+    keepUnwarped: string,
+    timelinePath: string | null,
+  ) => {
     const requestId = previewRequestRef.current + 1
     previewRequestRef.current = requestId
     cleanupListeners(previewCleanupRef)
@@ -146,7 +169,14 @@ export default function App() {
     }
 
     try {
-      await window.api.startPreview(direction, path, isProToolsSource(direction) ? tempo : undefined)
+      await window.api.startPreview({
+        direction,
+        sourcePath: path,
+        outputDir: "",
+        reportOnly: true,
+        tempo: isProToolsSource(direction) ? tempo : undefined,
+        ...extrasForDirection(direction, smpteStart, keepUnwarped, timelinePath),
+      })
     } catch (error) {
       failPreview(error instanceof Error ? error.message : String(error))
     }
@@ -169,20 +199,61 @@ export default function App() {
     state.setSourcePath(path)
     state.setOutputDir(null)
     state.setTempo(120)
+    state.setSmpteStart("01:00:00:00")
+    state.setKeepUnwarped("")
+    state.setTimelinePath(null)
     state.setResult(null)
-    void runPreview(path, direction, 120)
+    void runPreview(path, direction, 120, "01:00:00:00", "", null)
+  }
+
+  const requestPreviewWith = (overrides: Partial<{
+    direction: ConversionDirection
+    tempo: number
+    smpteStart: string
+    keepUnwarped: string
+    timelinePath: string | null
+  }>) => {
+    if (!state.sourcePath) return
+    void runPreview(
+      state.sourcePath,
+      overrides.direction ?? state.direction,
+      overrides.tempo ?? state.tempo,
+      overrides.smpteStart ?? state.smpteStart,
+      overrides.keepUnwarped ?? state.keepUnwarped,
+      "timelinePath" in overrides ? (overrides.timelinePath as string | null) : state.timelinePath,
+    )
   }
 
   const handleDirectionChange = (direction: ConversionDirection) => {
     if (!state.sourcePath || direction === state.direction) return
     setSelectedHistoryId(null)
     state.setDirection(direction)
-    void runPreview(state.sourcePath, direction, state.tempo)
+    requestPreviewWith({ direction })
   }
 
   const handleTempoChange = (tempo: number) => {
     state.setTempo(tempo)
-    if (state.sourcePath) void runPreview(state.sourcePath, state.direction, tempo)
+    requestPreviewWith({ tempo })
+  }
+
+  const handleSmpteStartChange = (smpteStart: string) => {
+    state.setSmpteStart(smpteStart)
+    requestPreviewWith({ smpteStart })
+  }
+
+  const handleKeepUnwarpedChange = (keepUnwarped: string) => {
+    state.setKeepUnwarped(keepUnwarped)
+    requestPreviewWith({ keepUnwarped })
+  }
+
+  const handleTimelinePathChange = (timelinePath: string | null) => {
+    state.setTimelinePath(timelinePath)
+    requestPreviewWith({ timelinePath })
+  }
+
+  const handleSelectTimelineJson = async () => {
+    const path = await window.api.selectTimelineJson()
+    if (path) handleTimelinePathChange(path)
   }
 
   const handleSelectOutputDir = async () => {
@@ -199,6 +270,9 @@ export default function App() {
     const outputDir = state.outputDir
     const projectName = state.preview?.projectName || nameFromPath(sourcePath)
     const tempo = state.tempo
+    const smpteStart = state.smpteStart
+    const keepUnwarped = state.keepUnwarped
+    const timelinePath = state.timelinePath
 
     const requestId = ++previewRequestRef.current
     cleanupListeners(previewCleanupRef)
@@ -306,12 +380,14 @@ export default function App() {
     }
 
     try {
-      await window.api.startConversion(
+      await window.api.startConversion({
         direction,
         sourcePath,
         outputDir,
-        isProToolsSource(direction) ? tempo : undefined,
-      )
+        reportOnly: false,
+        tempo: isProToolsSource(direction) ? tempo : undefined,
+        ...extrasForDirection(direction, smpteStart, keepUnwarped, timelinePath),
+      })
     } catch (error) {
       recordFailure(error instanceof Error ? error.message : String(error))
       cleanupListeners(conversionCleanupRef)
@@ -392,8 +468,15 @@ export default function App() {
                 preview={state.preview}
                 outputDir={state.outputDir}
                 tempo={state.tempo}
+                smpteStart={state.smpteStart}
+                keepUnwarped={state.keepUnwarped}
+                timelinePath={state.timelinePath}
                 onDirectionChange={handleDirectionChange}
                 onTempoChange={handleTempoChange}
+                onSmpteStartChange={handleSmpteStartChange}
+                onKeepUnwarpedChange={handleKeepUnwarpedChange}
+                onSelectTimelineJson={() => void handleSelectTimelineJson()}
+                onClearTimelinePath={() => handleTimelinePathChange(null)}
                 onSelectOutputDir={handleSelectOutputDir}
                 onConvert={() => void handleConvert()}
                 loading={previewLoading}

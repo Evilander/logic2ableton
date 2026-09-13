@@ -33,6 +33,17 @@ export interface ProgressEvent {
   warning?: string
 }
 
+export interface ConversionRequest {
+  direction: ConversionDirection
+  sourcePath: string
+  outputDir: string
+  reportOnly: boolean
+  tempo?: number
+  smpteStart?: string
+  keepUnwarped?: string[]
+  timelinePath?: string
+}
+
 export interface ConversionRecord {
   id: string
   direction: ConversionDirection
@@ -62,14 +73,9 @@ const api = {
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   platform: process.platform,
   selectOutputDir: (): Promise<string | null> => ipcRenderer.invoke("select-output-dir"),
-  startConversion: (
-    direction: ConversionDirection,
-    sourcePath: string,
-    outputDir: string,
-    tempo?: number,
-  ): Promise<void> => ipcRenderer.invoke("start-conversion", direction, sourcePath, outputDir, tempo),
-  startPreview: (direction: ConversionDirection, sourcePath: string, tempo?: number): Promise<void> =>
-    ipcRenderer.invoke("start-preview", direction, sourcePath, tempo),
+  selectTimelineJson: (): Promise<string | null> => ipcRenderer.invoke("select-timeline-json"),
+  startConversion: (request: ConversionRequest): Promise<void> => ipcRenderer.invoke("start-conversion", request),
+  startPreview: (request: ConversionRequest): Promise<void> => ipcRenderer.invoke("start-preview", request),
   cancelActiveJob: (): Promise<void> => ipcRenderer.invoke("cancel-active-job"),
   openFile: (path: string): Promise<string> => ipcRenderer.invoke("open-file", path),
   showInFolder: (path: string): Promise<void> => ipcRenderer.invoke("show-in-folder", path),

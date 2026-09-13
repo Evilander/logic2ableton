@@ -115,6 +115,30 @@ def test_logic2protools_report_only(tmp_path, capsys, monkeypatch):
     assert Path(payload["report_path"]).exists()
 
 
+def test_logic2protools_accepts_smpte_start(tmp_path, capsys, monkeypatch):
+    blob = build_logic_project_data([[(60, 100, 38400, 960)]])
+    logicx = build_synthetic_logicx(tmp_path, project_data=blob)
+    out_dir = tmp_path / "out"
+
+    captured = {}
+    from logic2ableton import cli
+
+    original_parse = cli.parse_logic_project
+
+    def spy_parse(*args, **kwargs):
+        captured.update(kwargs)
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "parse_logic_project", spy_parse)
+
+    rc = main([
+        "logic2protools", str(logicx), "--output", str(out_dir), "--report-only",
+        "--json-progress", "--smpte-start", "02:00:00:00",
+    ])
+    assert rc == 0
+    assert captured["smpte_start_seconds"] == 7200.0
+
+
 def test_protools_lane_rejects_wrong_extension(tmp_path, capsys):
     not_ptx = tmp_path / "set.als"
     not_ptx.write_bytes(b"x")
@@ -123,6 +147,30 @@ def test_protools_lane_rejects_wrong_extension(tmp_path, capsys):
     lines = _json_lines(capsys)
     assert lines[-1]["stage"] == "error"
     assert "Pro Tools session" in lines[-1]["message"]
+
+
+def test_protools2ableton_batch_rejects_wrong_lane_but_completes_good_input(tmp_path, capsys):
+    ptx = build_synthetic_ptx(tmp_path)
+    write_test_wav(ptx.parent / "Audio Files" / "Guitar.wav", frames=118050, sample_rate=48000)
+    wrong_lane = tmp_path / "set.als"
+    wrong_lane.write_bytes(b"x")
+    out_dir = tmp_path / "out"
+
+    rc = main([
+        "protools2ableton", str(ptx), str(wrong_lane),
+        "--output", str(out_dir), "--json-progress",
+    ])
+    assert rc == 1
+
+    lines = _json_lines(capsys)
+    completes = [line for line in lines if line["stage"] == "complete"]
+    errors = [line for line in lines if line["stage"] == "error"]
+    assert len(completes) == 1
+    assert completes[0]["input"] == str(ptx)
+    assert len(errors) == 1
+    assert errors[0]["input"] == str(wrong_lane)
+    assert "Pro Tools session" in errors[0]["message"]
+    assert len(list(out_dir.glob("*_conversion_report.txt"))) == 2
 
 
 def test_protools_lane_reports_parse_failure(tmp_path, capsys):

@@ -9,6 +9,7 @@ import wave
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from logic2ableton.audio import write_pcm_wav
 from logic2ableton.logic_parser import _MIDI_NOTE_SIGNATURE
 from logic2ableton.protools_parser import (
     _PT_ZERO_TICKS,
@@ -130,6 +131,66 @@ def build_synthetic_logicx(
         plistlib.dump(metadata, handle)
     (alternative / "ProjectData").write_bytes(project_data)
     return logicx_path
+
+
+def build_folder_style_logicx(
+    output_dir: Path,
+    *,
+    name: str = "FolderProj",
+    project_data: bytes = b"",
+    sampler_files: list[str] | None = None,
+) -> Path:
+    """Create a folder-saved Logic project: .logicx package plus a sibling Audio Files folder.
+
+    Mirrors Apple's "Save As" project-folder layout: the project folder holds
+    the .logicx (Resources/, Alternatives/) and a sibling 'Audio Files'
+    folder, rather than 'Media/Audio Files' nested inside the package.
+    """
+    project_folder = output_dir / name
+    logicx_path = project_folder / f"{name}.logicx"
+    resources = logicx_path / "Resources"
+    alternative = logicx_path / "Alternatives" / "000"
+    resources.mkdir(parents=True)
+    alternative.mkdir(parents=True)
+    with open(resources / "ProjectInformation.plist", "wb") as handle:
+        plistlib.dump(
+            {"VariantNames": {"0": name}, "ActiveVariant": 0, "HasProjectFolder": True},
+            handle,
+        )
+    metadata = {
+        "BeatsPerMinute": 120.0,
+        "SampleRate": 44_100,
+        "NumberOfTracks": 0,
+        "SamplerInstrumentsFiles": sampler_files or [],
+    }
+    with open(alternative / "MetaData.plist", "wb") as handle:
+        plistlib.dump(metadata, handle)
+    (alternative / "ProjectData").write_bytes(project_data)
+    (project_folder / "Audio Files").mkdir(parents=True)
+    return logicx_path
+
+
+def write_smpte_stamped_wav(
+    path: Path,
+    *,
+    smpte_seconds: float,
+    sample_rate: int = 44_100,
+    channels: int = 1,
+    sample_width: int = 2,
+    frames: int = 44_100,
+) -> Path:
+    """Write a BWF-stamped test WAV with its bext TimeReference at a chosen SMPTE time."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    time_reference_samples = int(smpte_seconds * sample_rate)
+    write_pcm_wav(
+        path,
+        sample_rate=sample_rate,
+        channels=channels,
+        sample_width=sample_width,
+        frames=b"\x00" * (frames * channels * sample_width),
+        time_reference_samples=time_reference_samples,
+    )
+    return path
 
 
 def _pt_block(block_type: int, content_type: int, payload: bytes) -> bytes:

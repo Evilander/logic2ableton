@@ -13,12 +13,16 @@ from logic2ableton.logic_parser import (
     discover_audio_files,
     extract_plugins,
     extract_regions,
+    format_smpte,
     load_mixer_overrides,
     parse_logic_project,
     parse_metadata,
     parse_project_info,
+    parse_smpte_start,
     resolve_alternative,
+    resolve_audio_dir,
 )
+from scripts.fixture_builders import build_folder_style_logicx, build_synthetic_logicx, write_smpte_stamped_wav
 
 from conftest import TEST_PROJECT, TEST_PROJECT_NAME
 
@@ -388,3 +392,193 @@ def test_parse_logic_project_no_instrument_warning_when_absent(tmp_path):
     project = parse_logic_project(logicx)
     assert project.software_instrument_files == 0
     assert not any("software-instrument" in w for w in project.compatibility_warnings)
+
+
+# SMPTE start parsing/formatting
+def test_parse_smpte_start_auto_returns_none():
+    assert parse_smpte_start("auto") is None
+    assert parse_smpte_start("  AUTO  ") is None
+
+
+def test_parse_smpte_start_accepts_hh_mm_ss():
+    assert parse_smpte_start("01:00:00") == 3600.0
+    assert parse_smpte_start("02:15:30") == 8130.0
+
+
+def test_parse_smpte_start_accepts_frames_with_colon_and_semicolon():
+    assert parse_smpte_start("01:00:00:15", fps=30.0) == 3600.5
+    assert parse_smpte_start("01:00:00;15", fps=30.0) == 3600.5
+
+
+def test_parse_smpte_start_accepts_bare_seconds():
+    assert parse_smpte_start("5400") == 5400.0
+    assert parse_smpte_start("5400.25") == 5400.25
+
+
+def test_parse_smpte_start_rejects_garbage():
+    with pytest.raises(ValueError):
+        parse_smpte_start("not-a-time")
+
+
+def test_parse_smpte_start_rejects_non_finite_and_negative_bare_numbers():
+    for value in ("nan", "inf", "-inf", "-100"):
+        with pytest.raises(ValueError):
+            parse_smpte_start(value)
+
+
+def test_parse_smpte_start_rejects_out_of_range_frame():
+    with pytest.raises(ValueError):
+        parse_smpte_start("01:00:00:30", fps=30.0)
+
+
+def test_format_smpte():
+    assert format_smpte(3600.0) == "01:00:00:00"
+    assert format_smpte(3600.5, fps=30.0) == "01:00:00:15"
+    assert format_smpte(8130.0) == "02:15:30:00"
+
+
+def test_format_smpte_parse_smpte_start_roundtrip():
+    assert parse_smpte_start(format_smpte(7384.0)) == 7384.0
+
+
+# extract_regions with a custom SMPTE start
+def test_extract_regions_custom_smpte_start(tmp_path):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    write_smpte_stamped_wav(audio_dir / "Take.wav", smpte_seconds=7205.0, sample_rate=44_100)
+
+    regions = extract_regions(logicx, alternative=0, smpte_start_seconds=parse_smpte_start("02:00:00"))
+
+    assert regions["Take.wav"] == 5 * 44_100
+
+
+def test_extract_regions_auto_inference_picks_hour_floor(tmp_path):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    write_smpte_stamped_wav(audio_dir / "Early.wav", smpte_seconds=7210.0, sample_rate=44_100)
+    write_smpte_stamped_wav(audio_dir / "Later.wav", smpte_seconds=7300.0, sample_rate=44_100)
+
+    project = parse_logic_project(logicx, smpte_start_seconds=None)
+
+    assert project.smpte_start_inferred is True
+    assert project.smpte_start_seconds == 7200.0
+
+
+def test_extract_regions_auto_inference_falls_back_without_timestamps(tmp_path):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    audio_dir.mkdir(parents=True)
+    (audio_dir / "imported.mp3").write_bytes(b"\x00")
+
+    project = parse_logic_project(logicx, smpte_start_seconds=None)
+
+    assert project.smpte_start_inferred is True
+    assert project.smpte_start_seconds == 3600.0
+
+
+def test_clamped_files_warning_names_files_and_smpte_start(tmp_path):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    write_smpte_stamped_wav(audio_dir / "OnTime.wav", smpte_seconds=3650.0, sample_rate=44_100)
+    write_smpte_stamped_wav(audio_dir / "TooEarly.wav", smpte_seconds=3550.0, sample_rate=44_100)
+
+    project = parse_logic_project(logicx, smpte_start_seconds=3600.0)
+
+    clamp_warnings = [w for w in project.compatibility_warnings if "TooEarly.wav" in w]
+    assert len(clamp_warnings) == 1
+    assert "01:00:00:00" in clamp_warnings[0]
+    assert not any("Every timestamped audio file" in w for w in project.compatibility_warnings)
+
+
+def test_clamped_files_warning_when_every_file_precedes_smpte_start(tmp_path):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    write_smpte_stamped_wav(audio_dir / "Early1.wav", smpte_seconds=3650.0, sample_rate=44_100)
+    write_smpte_stamped_wav(audio_dir / "Early2.wav", smpte_seconds=3700.0, sample_rate=44_100)
+
+    project = parse_logic_project(logicx, smpte_start_seconds=7200.0)
+
+    assert any("Every timestamped audio file" in w for w in project.compatibility_warnings)
+    assert any("--smpte-start" in w for w in project.compatibility_warnings)
+
+
+# Folder-style ("Save As" project folder) discovery
+def test_resolve_audio_dir_finds_folder_layout(tmp_path):
+    logicx = build_folder_style_logicx(tmp_path, name="Folder")
+    write_smpte_stamped_wav(logicx.parent / "Audio Files" / "Guitar.wav", smpte_seconds=3605.0, sample_rate=44_100)
+
+    audio_dir, layout = resolve_audio_dir(logicx)
+
+    assert layout == "folder"
+    assert audio_dir == logicx.parent / "Audio Files"
+
+
+def test_discover_audio_files_folder_layout(tmp_path):
+    logicx = build_folder_style_logicx(tmp_path, name="Folder")
+    write_smpte_stamped_wav(logicx.parent / "Audio Files" / "Guitar.wav", smpte_seconds=3605.0, sample_rate=44_100)
+
+    refs = discover_audio_files(logicx)
+
+    assert [ref.filename for ref in refs] == ["Guitar.wav"]
+    assert refs[0].file_path.resolve().is_relative_to((logicx.parent / "Audio Files").resolve())
+
+
+def test_parse_logic_project_folder_layout_positions_regions(tmp_path):
+    logicx = build_folder_style_logicx(tmp_path, name="Folder")
+    write_smpte_stamped_wav(logicx.parent / "Audio Files" / "Guitar.wav", smpte_seconds=3605.0, sample_rate=44_100)
+
+    project = parse_logic_project(logicx)
+
+    assert project.audio_layout == "folder"
+    assert project.audio_dir == logicx.parent / "Audio Files"
+    guitar = [ref for ref in project.audio_files if ref.filename == "Guitar.wav"]
+    assert len(guitar) == 1
+    assert guitar[0].start_position_samples == 5 * 44_100
+
+
+def test_resolve_audio_dir_package_wins_when_both_exist(tmp_path):
+    logicx = build_folder_style_logicx(tmp_path, name="Folder")
+    write_smpte_stamped_wav(logicx.parent / "Audio Files" / "Guitar.wav", smpte_seconds=3605.0, sample_rate=44_100)
+    package_dir = logicx / "Media" / "Audio Files"
+    write_smpte_stamped_wav(package_dir / "Kick.wav", smpte_seconds=3605.0, sample_rate=44_100)
+
+    audio_dir, layout = resolve_audio_dir(logicx)
+
+    assert layout == "package"
+    assert audio_dir == package_dir
+
+
+def test_discover_audio_files_excludes_symlink_outside_audio_dir(tmp_path):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    write_smpte_stamped_wav(audio_dir / "Inside.wav", smpte_seconds=3605.0, sample_rate=44_100)
+
+    outside = tmp_path / "outside.wav"
+    write_smpte_stamped_wav(outside, smpte_seconds=3605.0, sample_rate=44_100)
+    try:
+        (audio_dir / "Escaped.wav").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    refs = discover_audio_files(logicx)
+
+    assert [ref.filename for ref in refs] == ["Inside.wav"]
+
+
+def test_discover_audio_files_rejects_audio_dir_itself_symlinked_outside_project(tmp_path):
+    logicx = build_folder_style_logicx(tmp_path, name="Folder")
+    audio_dir = logicx.parent / "Audio Files"
+    audio_dir.rmdir()
+
+    outside = tmp_path / "secret_outside"
+    outside.mkdir()
+    write_smpte_stamped_wav(outside / "private_recording.wav", smpte_seconds=3605.0, sample_rate=44_100)
+
+    try:
+        audio_dir.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    refs = discover_audio_files(logicx)
+
+    assert refs == []

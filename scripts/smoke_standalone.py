@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import json
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from scripts.fixture_builders import (
@@ -17,12 +20,20 @@ from scripts.fixture_builders import (
 )
 
 
+def _run_command(command: list[str], *, label: str) -> None:
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        details = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        raise RuntimeError(f"{label} failed with exit code {result.returncode}\n{details}")
+
+
 def _run_converter(
     converter: list[str],
     *,
     mode: str,
     source: Path,
     output_dir: Path,
+    extra_args: list[str] | None = None,
 ) -> None:
     command = [
         *converter,
@@ -32,11 +43,28 @@ def _run_converter(
         "--output",
         str(output_dir),
         "--json-progress",
+        *(extra_args or []),
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        details = "\n".join(part for part in (result.stdout, result.stderr) if part)
-        raise RuntimeError(f"{mode} smoke failed with exit code {result.returncode}\n{details}")
+    _run_command(command, label=f"{mode} smoke")
+
+
+def _run_converter_batch(
+    converter: list[str],
+    *,
+    mode: str,
+    sources: list[Path],
+    output_dir: Path,
+) -> None:
+    command = [
+        *converter,
+        "--mode",
+        mode,
+        *[str(source) for source in sources],
+        "--output",
+        str(output_dir),
+        "--json-progress",
+    ]
+    _run_command(command, label=f"{mode} batch smoke")
 
 
 def _require(output_dir: Path, pattern: str) -> None:
@@ -85,6 +113,48 @@ def run_smoke(converter: list[str]) -> None:
         _require(forward_output, "*_conversion_report.txt")
         _require(forward_output, "**/Samples/Imported/*.wav")
         _require(forward_output, "**/MIDI/*.mid")
+
+        timeline_path = fixtures / "timeline.json"
+        timeline_path.write_text(json.dumps({
+            "tempo": [{"bar": 2, "bpm": 100}, {"bar": 4, "bpm": 140}],
+            "markers": [{"bar": 1, "name": "Intro"}, {"bar": 4, "name": "Chorus"}],
+        }))
+        timeline_output = root / "logic2ableton-timeline"
+        _run_converter(
+            converter,
+            mode="logic2ableton",
+            source=logic_project,
+            output_dir=timeline_output,
+            extra_args=[
+                "--smpte-start", "auto",
+                "--keep-unwarped", "Guitar*",
+                "--timeline", str(timeline_path),
+            ],
+        )
+        als_path = next(timeline_output.glob("**/*.als"))
+        timeline_root = ET.fromstring(gzip.decompress(als_path.read_bytes()))
+        locators = timeline_root.findall(".//Locators/Locators/Locator")
+        if len(locators) != 2:
+            raise AssertionError(f"Expected 2 Locators in the timeline .als, found {len(locators)}")
+        float_events = timeline_root.findall(".//FloatEvent")
+        if len(float_events) <= 1:
+            raise AssertionError("Expected more than one tempo automation FloatEvent")
+        guitar_clip = timeline_root.find(".//AudioClip")
+        if guitar_clip.find("IsWarped").get("Value") != "false":
+            raise AssertionError("Expected the Guitar clip to be unwarped")
+
+        batch_output = root / "logic2ableton-batch"
+        second_project = build_synthetic_logicx(fixtures / "second", project_data=project_data)
+        write_test_wav(second_project / "Media" / "Audio Files" / "Guitar.wav")
+        _run_converter_batch(
+            converter,
+            mode="logic2ableton",
+            sources=[logic_project, second_project],
+            output_dir=batch_output,
+        )
+        batch_reports = list(batch_output.glob("*_conversion_report.txt"))
+        if len(batch_reports) != 2:
+            raise AssertionError(f"Expected 2 batch reports, found {len(batch_reports)}")
 
         protools_output = root / "protools2ableton"
         _run_converter(

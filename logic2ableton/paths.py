@@ -26,6 +26,26 @@ def output_path(directory: Path, filename: str) -> Path:
     return candidate
 
 
+def unique_output_path(directory: Path, name: str, suffix: str) -> Path:
+    """Number a single-file output path so repeat names in the same output dir don't collide.
+
+    Mirrors create_output_directory's numbering ('name<suffix>', then
+    'name (2)<suffix>', 'name (3)<suffix>', ...) but for a file rather than a
+    directory, so e.g. two batch inputs sharing a project name each get their
+    own report file instead of overwriting one another.
+    """
+    root = Path(directory).resolve()
+    number = 1
+    while True:
+        filename = f"{name}{suffix}" if number == 1 else f"{name} ({number}){suffix}"
+        candidate = root / safe_name(filename, max_bytes=220)
+        if not candidate.resolve().is_relative_to(root):
+            raise ValueError(f"Output path escapes the selected directory: {candidate.name}")
+        if not candidate.exists():
+            return candidate
+        number += 1
+
+
 def create_output_directory(directory: Path, name: str) -> Path:
     """Allocate a fresh package; reruns retain previous exports separately."""
     root = Path(directory).resolve()

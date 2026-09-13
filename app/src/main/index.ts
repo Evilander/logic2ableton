@@ -3,7 +3,7 @@ import type { IpcMainInvokeEvent } from "electron"
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron"
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, extname, join, normalize } from "node:path"
-import type { ConversionDirection, ProgressEvent } from "./converter"
+import type { ConversionDirection, ConversionRequest, ProgressEvent } from "./converter"
 import { CONVERSION_DIRECTIONS, runConversion } from "./converter"
 
 interface ConversionStats {
@@ -102,6 +102,80 @@ function normalizeTempo(value: unknown): number | undefined {
   return value
 }
 
+// Mirrors the backend's _SMPTE_TIMECODE_RE (logic_parser.py): minutes/seconds
+// are bounded 00-59 and frames are capped at two digits, then checked against
+// the CLI's fixed 30fps default so an out-of-range frame fails fast here
+// instead of surfacing as a raw argparse dump from the Python child process.
+const SMPTE_TIMECODE_PATTERN = /^\d{1,2}:[0-5]\d:[0-5]\d(?:[:;](\d{1,2}))?$/
+const SMPTE_SECONDS_PATTERN = /^\d+(\.\d+)?$/
+const SMPTE_DEFAULT_FPS = 30
+
+function normalizeSmpteStart(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== "string") {
+    throw new Error("SMPTE start must be a string")
+  }
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  if (trimmed.toLowerCase() === "auto") return "auto"
+  const timecodeMatch = SMPTE_TIMECODE_PATTERN.exec(trimmed)
+  if (timecodeMatch) {
+    const frames = timecodeMatch[1]
+    if (frames !== undefined && Number(frames) >= SMPTE_DEFAULT_FPS) {
+      throw new Error(`SMPTE start frame ${frames} must be less than ${SMPTE_DEFAULT_FPS} fps`)
+    }
+    return trimmed
+  }
+  if (SMPTE_SECONDS_PATTERN.test(trimmed)) return trimmed
+  throw new Error("SMPTE start must be 'auto', HH:MM:SS[:FF], or a non-negative number of seconds")
+}
+
+const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/
+
+function normalizeKeepUnwarped(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined
+  let raw: string[]
+  if (typeof value === "string") {
+    raw = value.split(",")
+  } else if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
+    raw = value.flatMap((entry) => entry.split(","))
+  } else {
+    throw new Error("Keep-unwarped patterns must be a string or an array of strings")
+  }
+  const patterns = raw.map((entry) => entry.trim()).filter((entry) => entry.length > 0)
+  for (const pattern of patterns) {
+    if (CONTROL_CHAR_PATTERN.test(pattern)) {
+      throw new Error("Keep-unwarped patterns cannot contain control characters")
+    }
+    if (pattern.length > 200) {
+      throw new Error("Keep-unwarped patterns must be 200 characters or fewer")
+    }
+    // A leading '-' would otherwise be forwarded as a positional --keep-unwarped
+    // argument that argparse can misread as another option.
+    if (pattern.startsWith("-")) {
+      throw new Error("Keep-unwarped patterns cannot start with '-'")
+    }
+  }
+  return patterns.length > 0 ? patterns : undefined
+}
+
+function normalizeTimelinePath(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== "string") {
+    throw new Error("Timeline path must be a string")
+  }
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  if (extname(trimmed).toLowerCase() !== ".json") {
+    throw new Error("Timeline file must be a .json file")
+  }
+  return normalize(trimmed)
+}
+
+function isLogicSource(direction: ConversionDirection): boolean {
+  return direction.startsWith("logic2")
+}
+
 function approvePath(filePath: string | null | undefined): void {
   if (!filePath) return
   approvedPaths.add(normalizePathInput(filePath))
@@ -151,11 +225,7 @@ async function stopActiveJob(): Promise<void> {
 function startJob(
   kind: "conversion" | "preview",
   event: IpcMainInvokeEvent,
-  direction: ConversionDirection,
-  sourcePath: string,
-  outputDir: string,
-  reportOnly = false,
-  tempo?: number,
+  request: ConversionRequest,
 ): void {
   if (activeJob) {
     throw new Error(`${activeJob.kind === "preview" ? "Preview" : "Conversion"} already in progress`)
@@ -178,9 +248,11 @@ function startJob(
   }
   try {
     job.child = runConversion(
-      direction,
-      normalizePathInput(sourcePath),
-      normalizePathInput(outputDir),
+      {
+        ...request,
+        sourcePath: normalizePathInput(request.sourcePath),
+        outputDir: normalizePathInput(request.outputDir),
+      },
       (progress: ProgressEvent) => {
         if (job.cancelled) return
         approvePath(progress.als_path)
@@ -194,8 +266,6 @@ function startJob(
         complete()
         send(exitChannel, code)
       },
-      reportOnly,
-      tempo,
     )
     if (!job.child) complete()
   } catch (error) {
@@ -353,25 +423,44 @@ ipcMain.handle("select-output-dir", async () => {
   return result.filePaths[0]
 })
 
-ipcMain.handle("start-conversion", async (
-  event,
-  direction: ConversionDirection,
-  sourcePath: string,
-  outputDir: string,
-  tempo?: number,
-) => {
-  if (!isConversionDirection(direction)) throw new Error("Unsupported conversion mode")
-  startJob("conversion", event, direction, sourcePath, outputDir, false, normalizeTempo(tempo))
+ipcMain.handle("select-timeline-json", async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openFile"],
+    title: "Select timeline JSON",
+    filters: [{ name: "Timeline JSON", extensions: ["json"] }],
+  })
+  if (result.canceled || result.filePaths.length === 0) return null
+  return result.filePaths[0]
 })
 
-ipcMain.handle("start-preview", async (
-  event,
-  direction: ConversionDirection,
-  sourcePath: string,
-  tempo?: number,
-) => {
-  if (!isConversionDirection(direction)) throw new Error("Unsupported conversion mode")
-  startJob("preview", event, direction, sourcePath, previewOutputDir(direction), true, normalizeTempo(tempo))
+ipcMain.handle("start-conversion", async (event, request: ConversionRequest) => {
+  if (!isConversionDirection(request.direction)) throw new Error("Unsupported conversion mode")
+  const direction = request.direction
+  startJob("conversion", event, {
+    direction,
+    sourcePath: request.sourcePath,
+    outputDir: request.outputDir,
+    reportOnly: false,
+    tempo: normalizeTempo(request.tempo),
+    smpteStart: isLogicSource(direction) ? normalizeSmpteStart(request.smpteStart) : undefined,
+    keepUnwarped: direction === "logic2ableton" ? normalizeKeepUnwarped(request.keepUnwarped) : undefined,
+    timelinePath: direction === "logic2ableton" ? normalizeTimelinePath(request.timelinePath) : undefined,
+  })
+})
+
+ipcMain.handle("start-preview", async (event, request: ConversionRequest) => {
+  if (!isConversionDirection(request.direction)) throw new Error("Unsupported conversion mode")
+  const direction = request.direction
+  startJob("preview", event, {
+    direction,
+    sourcePath: request.sourcePath,
+    outputDir: previewOutputDir(direction),
+    reportOnly: true,
+    tempo: normalizeTempo(request.tempo),
+    smpteStart: isLogicSource(direction) ? normalizeSmpteStart(request.smpteStart) : undefined,
+    keepUnwarped: direction === "logic2ableton" ? normalizeKeepUnwarped(request.keepUnwarped) : undefined,
+    timelinePath: direction === "logic2ableton" ? normalizeTimelinePath(request.timelinePath) : undefined,
+  })
 })
 
 ipcMain.handle("cancel-active-job", async () => {

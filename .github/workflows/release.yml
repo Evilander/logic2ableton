@@ -104,7 +104,7 @@ jobs:
 
   build:
     needs: [test, desktop-smoke]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -115,12 +115,33 @@ jobs:
             artifact_name: installer-win-x64
             converter_binary: dist/logic2ableton.exe
             smoke_command: .\dist\logic2ableton.exe --version
+            electron_override: ""
+            mac_min_os_version: ""
+            builder_args: ""
           - os: macos-14
             platform: mac
             arch: arm64
             artifact_name: installer-mac-arm64
             converter_binary: dist/logic2ableton
             smoke_command: ./dist/logic2ableton --version
+            electron_override: ""
+            mac_min_os_version: ""
+            builder_args: ""
+          # This leg is built, smoke-tested, and packaged entirely on the macos-14 runner
+          # above, not on real macOS 11 hardware. Green CI here confirms the artifact was
+          # produced with the pinned Electron version and minimumSystemVersion, not that it
+          # actually launches on macOS 11 — treat that as unverified until checked by hand.
+          - os: macos-14
+            platform: mac
+            arch: arm64
+            artifact_name: installer-mac-arm64-macos11
+            converter_binary: dist/logic2ableton
+            smoke_command: ./dist/logic2ableton --version
+            electron_override: "37.10.3"
+            # Passed via a generated electron-builder config file (not -c.mac.minimumSystemVersion=)
+            # because yargs coerces "11.0" to the number 11 as a CLI override, dropping the trailing .0.
+            mac_min_os_version: "11.0"
+            builder_args: "-c.artifactName='${productName}-${version}-${arch}-macos11.${ext}'"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +179,13 @@ jobs:
         working-directory: app
         run: npm ci
 
+      - name: Pin legacy Electron for macOS 11
+        if: matrix.electron_override != ''
+        working-directory: app
+        run: |
+          npm install --no-save electron@${{ matrix.electron_override }}
+          node -p "require('electron/package.json').version"
+
       - name: Build app bundles
         working-directory: app
         run: npm run build
@@ -171,10 +199,18 @@ jobs:
         working-directory: app
         shell: bash
         run: |
+          config_file=electron-builder.yml
+          if [ -n "${{ matrix.mac_min_os_version }}" ]; then
+            # Writing minimumSystemVersion into a YAML config (parsed by js-yaml) keeps it a
+            # string. A -c.mac.minimumSystemVersion=11.0 CLI override goes through yargs, which
+            # parses "11.0" as the number 11 and silently drops the trailing .0.
+            config_file=electron-builder.macos11.yml
+            printf 'extends: electron-builder.yml\nmac:\n  minimumSystemVersion: "%s"\n' "${{ matrix.mac_min_os_version }}" > "$config_file"
+          fi
           if [ "${{ matrix.platform }}" = "win" ]; then
-            npx electron-builder --win --${{ matrix.arch }} --config electron-builder.yml
+            npx electron-builder --win --${{ matrix.arch }} --config "$config_file" ${{ matrix.builder_args }}
           else
-            npx electron-builder --mac --${{ matrix.arch }} --config electron-builder.yml
+            npx electron-builder --mac --${{ matrix.arch }} --config "$config_file" ${{ matrix.builder_args }}
           fi
 
       - name: Upload installer artifacts
