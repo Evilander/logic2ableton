@@ -245,6 +245,19 @@ def _smpte_start_argument(value: str) -> float | None:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+# A non-string default is left alone by argparse, so an explicit
+# "--smpte-start 01:00:00:00" stays distinguishable from the default.
+_SMPTE_UNSET = object()
+_SMPTE_DEFAULT_SECONDS = 3600.0
+
+
+def _resolve_smpte_start(args: argparse.Namespace) -> tuple[float | None, bool]:
+    """Return (seconds or None for auto, whether the user passed --smpte-start)."""
+    if args.smpte_start is _SMPTE_UNSET:
+        return _SMPTE_DEFAULT_SECONDS, False
+    return args.smpte_start, True
+
+
 def _emit_failure(
     *,
     mode: str,
@@ -322,7 +335,7 @@ def _build_forward_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--smpte-start",
         type=_smpte_start_argument,
-        default="01:00:00:00",
+        default=_SMPTE_UNSET,
         metavar="HH:MM:SS[:FF]|SECONDS|auto",
         help=(
             "SMPTE time at which bar 1 plays in the Logic project (default 01:00:00:00). "
@@ -408,7 +421,7 @@ def _build_protools_export_parser(mode: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--smpte-start",
         type=_smpte_start_argument,
-        default="01:00:00:00",
+        default=_SMPTE_UNSET,
         metavar="HH:MM:SS[:FF]|SECONDS|auto",
         help=(
             "SMPTE time at which bar 1 plays in the Logic project (default 01:00:00:00); "
@@ -497,8 +510,9 @@ def _run_forward(args: argparse.Namespace) -> int:
     else:
         print(f"Parsing {logicx_path.name}...")
 
+    smpte_start, smpte_explicit = _resolve_smpte_start(args)
     try:
-        project = parse_logic_project(logicx_path, alternative=args.alternative, smpte_start_seconds=args.smpte_start)
+        project = parse_logic_project(logicx_path, alternative=args.alternative, smpte_start_seconds=smpte_start)
     except Exception as exc:
         return _emit_failure(
             mode=FORWARD_MODE,
@@ -609,7 +623,9 @@ def _run_forward(args: argparse.Namespace) -> int:
         )
 
     try:
-        report = generate_report(project, plugin_matches, keep_unwarped=args.keep_unwarped)
+        report = generate_report(
+            project, plugin_matches, keep_unwarped=args.keep_unwarped, smpte_start_explicit=smpte_explicit
+        )
     except Exception as exc:
         return _emit_failure(
             mode=FORWARD_MODE,
@@ -695,7 +711,9 @@ def _run_forward(args: argparse.Namespace) -> int:
         )
 
     midi_files = _export_logic_midi(project, als_path.parent)
-    report = generate_report(project, plugin_matches, keep_unwarped=args.keep_unwarped)
+    report = generate_report(
+            project, plugin_matches, keep_unwarped=args.keep_unwarped, smpte_start_explicit=smpte_explicit
+        )
     report, saved, warning = _finalize_report(report_path, report, project.compatibility_warnings)
     clip_count, audio_count = _als_audio_counts(als_path)
 
@@ -1207,7 +1225,9 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
         if from_ableton:
             project = parse_ableton_project(input_path)
         else:
-            project = parse_logic_project(input_path, alternative=args.alternative, smpte_start_seconds=args.smpte_start)
+            project = parse_logic_project(
+                input_path, alternative=args.alternative, smpte_start_seconds=_resolve_smpte_start(args)[0]
+            )
     except Exception as exc:
         return _emit_failure(
             mode=mode,

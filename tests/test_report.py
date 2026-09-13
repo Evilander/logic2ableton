@@ -186,3 +186,8 @@ def test_report_keep_unwarped_omitted_when_no_match():
     project = _demo_project(track_names=["Vocals"])
     report = generate_report(project, [], keep_unwarped=["Guitar*"])
     assert "Unwarped" not in report
+
+
+def test_report_smpte_start_explicit_default_value_is_labelled_as_passed():
+    report = generate_report(_demo_project(), [], smpte_start_explicit=True)
+    assert "SMPTE start: 01:00:00:00 (from --smpte-start)" in report

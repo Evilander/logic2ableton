@@ -726,3 +726,15 @@ def test_cli_report_only_warns_about_unmatched_keep_unwarped_pattern(tmp_path, c
     assert exit_code == 0
     assert "--keep-unwarped pattern 'Pilot*' did not match any track name." in captured.out
     assert "'Guitar*' did not match" not in captured.out
+
+
+def test_cli_smpte_start_qualifier_tells_explicit_from_default(tmp_path, capsys):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    write_smpte_stamped_wav(logicx / "Media" / "Audio Files" / "Guitar#01.wav", smpte_seconds=3600.0, sample_rate=44_100)
+    output_dir = tmp_path / "output"
+
+    assert main([str(logicx), "--output", str(output_dir), "--report-only"]) == 0
+    assert "SMPTE start: 01:00:00:00 (default)" in capsys.readouterr().out
+
+    assert main([str(logicx), "--output", str(output_dir), "--report-only", "--smpte-start", "01:00:00:00"]) == 0
+    assert "SMPTE start: 01:00:00:00 (from --smpte-start)" in capsys.readouterr().out

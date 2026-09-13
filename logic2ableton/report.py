@@ -8,14 +8,14 @@ from logic2ableton.plugin_matcher import PluginMatch
 from logic2ableton.timeline import beats_per_bar
 
 
-def _smpte_start_line(project: LogicProject) -> str:
+def _smpte_start_line(project: LogicProject, explicit: bool) -> str:
     formatted = format_smpte(project.smpte_start_seconds)
     if project.smpte_start_inferred:
         qualifier = "inferred from the earliest recording"
-    elif project.smpte_start_seconds == 3600.0:
-        qualifier = "default"
-    else:
+    elif explicit or project.smpte_start_seconds != 3600.0:
         qualifier = "from --smpte-start"
+    else:
+        qualifier = "default"
     return f"SMPTE start: {formatted} ({qualifier})"
 
 
@@ -50,6 +50,7 @@ def generate_report(
     plugin_matches: list[PluginMatch],
     *,
     keep_unwarped: list[str] | None = None,
+    smpte_start_explicit: bool = False,
 ) -> str:
     """Generate a text report summarizing the Logic-to-Ableton conversion.
 
@@ -58,6 +59,8 @@ def generate_report(
         plugin_matches: Plugin match results from match_plugins().
         keep_unwarped: --keep-unwarped patterns, if any, used to name the
             tracks generate_als wrote as unwarped clips.
+        smpte_start_explicit: whether the user passed --smpte-start, so an
+            explicit value equal to the default is still labelled as theirs.
 
     Returns:
         Multi-line string report.
@@ -72,7 +75,7 @@ def generate_report(
         f"{project.time_sig_numerator}/{project.time_sig_denominator} | "
         f"Sample Rate: {project.sample_rate}"
     )
-    lines.append(_smpte_start_line(project))
+    lines.append(_smpte_start_line(project, smpte_start_explicit))
     lines.append(_audio_files_line(project))
     unwarped_tracks = _matched_unwarped_tracks(project.track_names, keep_unwarped)
     if unwarped_tracks:
