@@ -11,7 +11,7 @@ import {
   isProToolsSource,
   sourceForDirection,
 } from "../conversion"
-import type { PreviewData } from "../hooks/useAppState"
+import type { PreviewData, PreviewSettingsError } from "../hooks/useAppState"
 import DAWMark from "./DAWMark"
 import SignalPath from "./SignalPath"
 
@@ -24,6 +24,7 @@ interface ProjectPreviewProps {
   smpteStart: string
   keepUnwarped: string
   timelinePath: string | null
+  settingsError: PreviewSettingsError | null
   onDirectionChange: (direction: ConversionDirection) => void
   onTempoChange: (tempo: number) => void
   onSmpteStartChange: (smpteStart: string) => void
@@ -50,6 +51,7 @@ export default function ProjectPreview({
   smpteStart,
   keepUnwarped,
   timelinePath,
+  settingsError,
   onDirectionChange,
   onTempoChange,
   onSmpteStartChange,
@@ -68,6 +70,13 @@ export default function ProjectPreview({
   const projectName = preview?.projectName || basename(sourcePath).replace(/\.(logicx|als|ptx|pts|ptf)$/i, "")
   const showTempoField = isProToolsSource(direction)
   const showSmpteField = source === "logic"
+  const fieldError = (field: NonNullable<PreviewSettingsError["field"]>) =>
+    settingsError?.field === field ? settingsError.message : null
+  const tempoError = fieldError("tempo")
+  const smpteError = fieldError("smpteStart")
+  const keepUnwarpedError = fieldError("keepUnwarped")
+  const timelineError = fieldError("timelinePath")
+  const generalSettingsError = settingsError && settingsError.field === null ? settingsError.message : null
 
   useEffect(() => setTempoDraft(String(tempo)), [tempo])
   useEffect(() => setSmpteDraft(smpteStart), [smpteStart])
@@ -136,6 +145,12 @@ export default function ProjectPreview({
         <section className="route-console rounded-2xl border border-border bg-surface p-5">
           <SignalPath direction={direction} />
 
+          {generalSettingsError && (
+            <p role="alert" className="mt-3 text-[11px] text-error">
+              {generalSettingsError}
+            </p>
+          )}
+
           <div className={`mt-5 grid gap-4 ${showTempoField || showSmpteField ? "grid-cols-[1fr_220px]" : "grid-cols-1"}`}>
             <div>
               <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
@@ -191,6 +206,11 @@ export default function ProjectPreview({
                   />
                   <span className="text-[11px] text-text-tertiary">BPM</span>
                 </div>
+                {tempoError && (
+                  <p role="alert" className="mt-1.5 text-[11px] text-error">
+                    {tempoError}
+                  </p>
+                )}
               </div>
             )}
 
@@ -212,6 +232,11 @@ export default function ProjectPreview({
                     className="min-w-0 flex-1 bg-transparent py-2.5 font-mono text-[15px] text-text-primary outline-none"
                   />
                 </div>
+                {smpteError && (
+                  <p role="alert" className="mt-1.5 text-[11px] text-error">
+                    {smpteError}
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -248,9 +273,15 @@ export default function ProjectPreview({
                     className="min-w-0 flex-1 bg-transparent py-2.5 font-mono text-[13px] text-text-primary outline-none"
                   />
                 </div>
-                <p className="mt-1.5 text-[11px] leading-relaxed text-text-tertiary">
-                  Matching tracks won't stretch when the Live tempo changes.
-                </p>
+                {keepUnwarpedError ? (
+                  <p role="alert" className="mt-1.5 text-[11px] text-error">
+                    {keepUnwarpedError}
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-text-tertiary">
+                    Matching tracks won't stretch when the Live tempo changes.
+                  </p>
+                )}
               </div>
 
               <div>
@@ -276,12 +307,17 @@ export default function ProjectPreview({
                     </button>
                   )}
                 </div>
+                {timelineError && (
+                  <p role="alert" className="mt-1.5 text-[11px] text-error">
+                    {timelineError}
+                  </p>
+                )}
               </div>
             </div>
           )}
         </section>
 
-        {loading || !preview ? (
+        {loading ? (
           <div className="flex min-h-52 items-center justify-center rounded-2xl border border-border bg-surface/55">
             <div className="flex items-center gap-3 text-[13px] text-text-secondary">
               <motion.span
@@ -291,6 +327,12 @@ export default function ProjectPreview({
               />
               Analyzing this route…
             </div>
+          </div>
+        ) : !preview ? (
+          <div className="flex min-h-52 items-center justify-center rounded-2xl border border-border bg-surface/55 px-8 text-center">
+            <p className="text-[13px] text-text-secondary">
+              {settingsError ? "Fix the setting above, then we'll analyze this route." : "Preparing preview…"}
+            </p>
           </div>
         ) : (
           <>
@@ -326,10 +368,15 @@ export default function ProjectPreview({
             </div>
 
             <div className="rounded-xl border border-border bg-surface p-4">
-              <div className="mb-2 text-[11px] uppercase tracking-[0.1em] text-text-secondary">
+              <div id="preview-report-heading" className="mb-2 text-[11px] uppercase tracking-[0.1em] text-text-secondary">
                 Preview report · {artifactLabel(direction)}
               </div>
-              <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-tertiary">
+              <pre
+                tabIndex={0}
+                role="region"
+                aria-labelledby="preview-report-heading"
+                className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg font-mono text-[11px] leading-relaxed text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose"
+              >
                 {preview.report}
               </pre>
             </div>

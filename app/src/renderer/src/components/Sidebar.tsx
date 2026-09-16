@@ -28,6 +28,7 @@ function CompactRoute({ direction }: { direction: ConversionDirection }) {
   const { source, destination } = MODE_META[direction]
   return (
     <span
+      role="img"
       className="inline-flex items-center gap-1.5 text-text-tertiary"
       aria-label={routeLabel(direction)}
       title={`${FORMAT_META[source].shortName} → ${FORMAT_META[destination].shortName}`}

@@ -55,10 +55,32 @@ def _supports_pcm_render(path: Path | None) -> bool:
     return path is not None and path.exists() and path.suffix.lower() in SUPPORTED_PCM_SUFFIXES
 
 
-def _clip_export_name(index: int, clip: AbletonAudioClip) -> str:
+def _clip_export_stem(index: int, clip: AbletonAudioClip) -> str:
     stem = _safe_name(clip.clip_name, f"clip_{index:03d}")
+    return f"{index:03d} - {stem} - {clip.start_beats:09.3f} beats"
+
+
+def _stem_with_extension(destination_stem: Path, extension: str) -> Path:
+    """Append an extension to a destination path by plain concatenation.
+
+    Path.with_suffix() misparses these stems: the beats value they embed
+    (e.g. "000001.250 beats") contains its own '.', which with_suffix()
+    treats as an existing suffix and strips - silently truncating the
+    filename to "000001.wav" and dropping "250 beats" entirely.
+    """
+    return destination_stem.with_name(f"{destination_stem.name}{extension}")
+
+
+def _clip_export_name(index: int, clip: AbletonAudioClip) -> str:
+    """Best-guess export filename before an actual render is attempted.
+
+    Used only for reference-only manifest entries (no file is written), so a
+    guessed extension can't disagree with real bytes on disk. Once copy_audio
+    actually runs, _render_clip_export decides the real filename from the
+    render outcome instead (see F11, 2026-09-15 review).
+    """
     extension = ".wav" if _supports_pcm_render(clip.source_path) else (clip.source_path.suffix if clip.source_path else ".wav")
-    return f"{index:03d} - {stem} - {clip.start_beats:09.3f} beats{extension}"
+    return f"{_clip_export_stem(index, clip)}{extension}"
 
 
 def _track_stem_name(index: int, track_name: str) -> str:
@@ -316,19 +338,31 @@ def _render_track_stem(
 
 def _render_clip_export(
     clip: AbletonAudioClip,
-    destination: Path,
+    destination_stem: Path,
     *,
     tempo: float,
     cache: dict[Path, DecodedAudio | None],
-) -> tuple[str, int | None]:
+) -> tuple[str, int | None, Path]:
+    """Render (or fall back to copying) one clip export.
+
+    The destination filename is chosen from the actual outcome, not guessed
+    beforehand: ".wav" only when PCM rendering actually produced RIFF/WAVE
+    bytes, and the source's own suffix (e.g. .aif/.aiff) for a fallback copy
+    of un-decodable audio, so the extension and the bytes on disk never
+    disagree (see F11, 2026-09-15 review).
+
+    Returns (mode, time_reference_samples, destination_path).
+    """
     if clip.source_path is None or not clip.source_path.exists():
-        return "reference-only", None
+        return "reference-only", None, _stem_with_extension(destination_stem, ".wav")
 
     decoded = _read_decoded_audio(clip.source_path, cache)
     if decoded is None:
+        destination = _stem_with_extension(destination_stem, clip.source_path.suffix or ".wav")
         shutil.copy2(clip.source_path, destination)
-        return "copied-source", None
+        return "copied-source", None, destination
 
+    destination = _stem_with_extension(destination_stem, ".wav")
     rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache)
 
     time_reference = _beats_to_frames(clip.start_beats, tempo, decoded.frame_rate)
@@ -340,7 +374,7 @@ def _render_clip_export(
         frames=rendered,
         time_reference_samples=time_reference,
     )
-    return ("timestamped-warp-approximation" if clip.is_warped else "timestamped-wav"), time_reference
+    return ("timestamped-warp-approximation" if clip.is_warped else "timestamped-wav"), time_reference, destination
 
 
 def build_logic_transfer_report(project: AbletonProject) -> str:
@@ -527,12 +561,13 @@ def generate_logic_transfer(
             export_mode = "reference-only"
             time_reference_samples: int | None = None
             if copy_audio and clip.source_path is not None and clip.source_path.exists():
-                export_mode, time_reference_samples = _render_clip_export(
+                export_mode, time_reference_samples, exported_path = _render_clip_export(
                     clip,
-                    exported_path,
+                    track_dir / _clip_export_stem(clip_index, clip),
                     tempo=project.tempo,
                     cache=decode_cache,
                 )
+                export_name = exported_path.name
                 if export_mode != "reference-only":
                     copied_audio_files += 1
                 if export_mode == "copied-source":

@@ -22,11 +22,11 @@ def _encode_extended_float80(value: float) -> bytes:
     return struct.pack(">H", biased_exponent) + mantissa.to_bytes(8, "big")
 
 
-def _write_test_aiff(path: Path, samples: list[int], *, sample_rate: int = 10) -> Path:
+def _write_test_aiff(path: Path, samples: list[int], *, sample_rate: int = 10, channels: int = 1) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     sound_data = b"".join(sample.to_bytes(2, "big", signed=True) for sample in samples)
     comm_payload = (
-        struct.pack(">hIh", 1, len(samples), 16)
+        struct.pack(">hIh", channels, len(samples) // channels, 16)
         + _encode_extended_float80(float(sample_rate))
     )
     ssnd_payload = struct.pack(">II", 0, 0) + sound_data
@@ -215,3 +215,44 @@ def test_generate_logic_transfer_exports_timestamped_wavs_from_aiff_sources(tmp_
     assert stem_frames[:20] == b"\x00" * 20
     assert stem_frames[20:40] == expected_frames
     assert _get_bwf_time_reference(exported) == 10
+
+
+def test_generate_logic_transfer_fallback_copy_keeps_source_extension(tmp_path):
+    """A four-channel AIFF can't go through the mono/stereo PCM renderer, so
+    it falls back to a raw copy. The exported filename must keep the
+    source's own extension (and bytes) instead of being labeled ".wav" while
+    containing AIFF/FORM bytes (F11, 2026-09-15 review)."""
+    aiff_path = _write_test_aiff(
+        tmp_path / "Samples" / "Imported" / "multichannel.aiff",
+        list(range(16)), sample_rate=10, channels=4,
+    )
+    track = AbletonTrack(
+        name="Multichannel Track",
+        clips=[
+            AbletonAudioClip(
+                clip_name="Multichannel",
+                track_name="Multichannel Track",
+                source_path=aiff_path,
+                relative_source_path="Samples/Imported/multichannel.aiff",
+                start_beats=0.0,
+                end_beats=1.0,
+            )
+        ],
+    )
+    project = AbletonProject(
+        name="Fallback Demo", tempo=60.0, time_sig_numerator=4, time_sig_denominator=4,
+        audio_tracks=[track], locators=[],
+    )
+
+    transfer = generate_logic_transfer(project, tmp_path / "output")
+
+    exported = [p for p in (transfer.package_path / "Audio Files").rglob("*") if p.is_file()]
+    assert len(exported) == 1
+    # The exact name (not just the suffix) guards against a fixed variant of
+    # this bug where Path.with_suffix() misparsed the beats value's own '.'
+    # as an existing suffix and silently truncated "000 beats" off the name.
+    assert exported[0].name == "001 - Multichannel - 00000.000 beats.aiff"
+    assert exported[0].read_bytes()[:4] == b"FORM"
+
+    for wav_path in transfer.package_path.rglob("*.wav"):
+        assert wav_path.read_bytes()[:4] == b"RIFF"

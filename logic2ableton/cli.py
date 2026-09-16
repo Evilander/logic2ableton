@@ -34,7 +34,7 @@ from logic2ableton.protools_transfer import (
 )
 from logic2ableton.report import generate_report
 from logic2ableton.smf import build_midi_note_file
-from logic2ableton.timeline import load_timeline
+from logic2ableton.timeline import MAX_TEMPO_BPM, MIN_TEMPO_BPM, load_timeline
 from logic2ableton.vst3_scanner import default_vst3_path
 
 FORWARD_MODE = "logic2ableton"
@@ -233,8 +233,10 @@ def _als_audio_counts(path: Path) -> tuple[int, int]:
 
 def _tempo_argument(value: str) -> float:
     tempo = float(value)
-    if not math.isfinite(tempo) or not 20 <= tempo <= 999:
-        raise argparse.ArgumentTypeError("Tempo must be a number between 20 and 999 BPM")
+    if not math.isfinite(tempo) or not MIN_TEMPO_BPM <= tempo <= MAX_TEMPO_BPM:
+        raise argparse.ArgumentTypeError(
+            f"Tempo must be a number between {MIN_TEMPO_BPM:g} and {MAX_TEMPO_BPM:g} BPM"
+        )
     return tempo
 
 
@@ -526,12 +528,18 @@ def _run_forward(args: argparse.Namespace) -> int:
 
     if args.timeline:
         try:
+            decoded_markers = project.timeline.markers if project.timeline is not None else []
             project.timeline = load_timeline(
                 Path(args.timeline),
                 numerator=project.time_sig_numerator,
                 denominator=project.time_sig_denominator,
                 base_tempo=project.tempo,
             )
+            # A --timeline file that only carries tempo changes keeps the
+            # markers decoded from the Logic project; one that lists markers
+            # replaces them.
+            if decoded_markers and not project.timeline.markers:
+                project.timeline.markers = decoded_markers
         except (OSError, ValueError) as exc:
             return _emit_failure(
                 mode=FORWARD_MODE,

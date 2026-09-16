@@ -1,4 +1,6 @@
 import gzip
+import math
+import struct
 import wave
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -10,6 +12,7 @@ from logic2ableton.ableton_generator import (
     generate_als,
     _pick_best_clip,
     _find_template,
+    _resolve_overlaps,
     unmatched_keep_unwarped_warnings,
 )
 from logic2ableton.ableton_metadata import main_track, parameter_events
@@ -18,6 +21,7 @@ from logic2ableton.models import AudioFileRef, LogicMidiNote, LogicMidiTrack, Lo
 from logic2ableton.timeline import TempoEvent, Timeline, TimelineMarker
 
 from conftest import TEST_PROJECT, TEST_PROJECT_NAME, write_test_wav
+from scripts.fixture_builders import build_synthetic_logicx
 
 
 @pytest.mark.needs_test_project
@@ -383,6 +387,78 @@ def test_generate_als_unique_critical_ids_synthetic(tmp_path):
     with gzip.open(als_path, "rb") as f:
         root = ET.fromstring(f.read())
     _assert_unique_critical_ids(root)
+
+
+def test_generate_als_writes_one_looping_clip_per_logic_region(tmp_path):
+    """Looped Logic regions become clips whose arrangement span exceeds their loop length,
+    and Live's own playback rules (ableton_parser) unroll them to the same notes."""
+    from logic2ableton import ableton_parser
+    from logic2ableton.models import LogicMidiRegion
+
+    audio_path = write_test_wav(tmp_path / "media" / "Stem.wav", frames=88_200)
+    click = LogicMidiRegion(
+        name="Click",
+        start_beats=8.0,
+        length_beats=2.0,
+        loop_span_beats=8.0,
+        notes=[
+            LogicMidiNote(pitch=60, start_beats=0.0, duration_beats=0.25, velocity=100),
+            LogicMidiNote(pitch=62, start_beats=1.0, duration_beats=0.25, velocity=90),
+        ],
+    )
+    cue = LogicMidiRegion(
+        name="Cue",
+        start_beats=20.0,
+        length_beats=4.0,
+        notes=[LogicMidiNote(pitch=48, start_beats=1.5, duration_beats=2.0, velocity=80)],
+    )
+    project = LogicProject(
+        name="Regions",
+        tempo=120.0,
+        time_sig_numerator=4,
+        time_sig_denominator=4,
+        sample_rate=44_100,
+        audio_files=[
+            AudioFileRef(
+                filename="Stem.wav",
+                track_name="Stems",
+                take_number=0,
+                is_comp=False,
+                comp_name="",
+                file_path=audio_path,
+                start_position_samples=0,  # ignored: the arrangement position wins
+                content_offset_samples=22_050,
+                content_duration_samples=44_100,
+                clip_name="Stem.1",
+                start_beats=12.0,
+            )
+        ],
+        plugins=[],
+        track_names=["Stems"],
+        alternative=0,
+        midi_tracks=[LogicMidiTrack(name="Clicks", notes=[], regions=[click, cue])],
+    )
+    project.midi_tracks[0].notes = [LogicMidiNote(pitch=60, start_beats=8.0, duration_beats=0.25, velocity=100)]
+    als_path = generate_als(project, tmp_path / "output", copy_audio=False, template_path=_BUNDLED_TEMPLATE)
+
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+    clips = root.findall(".//MidiTrack//MidiClip")
+    assert [c.find("Name").get("Value") for c in clips] == ["Click", "Cue"]
+    loop = clips[0].find("Loop")
+    assert (clips[0].find("CurrentStart").get("Value"), clips[0].find("CurrentEnd").get("Value")) == ("8", "16")
+    assert (loop.find("LoopStart").get("Value"), loop.find("LoopEnd").get("Value"), loop.find("LoopOn").get("Value")) == ("0", "2", "true")
+    assert clips[1].find("Loop").find("LoopOn").get("Value") == "false"
+    assert (clips[1].find("CurrentStart").get("Value"), clips[1].find("CurrentEnd").get("Value")) == ("20", "24")
+
+    rendered = ableton_parser.parse_ableton_project(als_path)
+    notes = sorted((n.start_beats, n.pitch) for n in rendered.midi_tracks[0].notes)
+    assert notes == [(8.0, 60), (9.0, 62), (10.0, 60), (11.0, 62), (12.0, 60), (13.0, 62), (14.0, 60), (15.0, 62), (21.5, 48)]
+
+    audio_clip = rendered.audio_tracks[0].clips[0]
+    assert (audio_clip.clip_name, audio_clip.start_beats, audio_clip.end_beats, audio_clip.source_in_beats) == (
+        "Stem.1", 12.0, 14.0, 1.0,
+    )
 
 
 @pytest.mark.needs_test_project
@@ -824,3 +900,152 @@ def test_write_locators_strips_control_characters_from_marker_name(tmp_path):
     root = ET.fromstring(xml_bytes)
     locator = root.find(".//Locators/Locators/Locator")
     assert locator.find("Name").get("Value") == "ChorusBell"
+
+
+# F02 (2026-09-15 review): _resolve_overlaps must compare clip extents in
+# seconds, not raw sample counts, since two clips can come from files
+# recorded at different sample rates.
+
+def _rate_ref(tmp_path: Path, name: str, *, frames: int, sample_rate: int, start_position_samples: int, take_number: int = 1) -> AudioFileRef:
+    path = write_test_wav(tmp_path / name, frames=frames, sample_rate=sample_rate)
+    return AudioFileRef(
+        filename=name, track_name="Guitar", take_number=take_number, is_comp=False, comp_name="",
+        file_path=path, start_position_samples=start_position_samples,
+    )
+
+
+def test_resolve_overlaps_adjacent_clips_different_rates_both_orders(tmp_path):
+    """A 48 kHz clip ending exactly at 1s and a 44.1 kHz clip starting
+    exactly at 1s are adjacent in real time, not overlapping, regardless of
+    which order they're given in."""
+    high_rate = _rate_ref(tmp_path, "high.wav", frames=48_000, sample_rate=48_000, start_position_samples=0)
+    low_rate = _rate_ref(tmp_path, "low.wav", frames=44_100, sample_rate=44_100, start_position_samples=44_100)
+
+    forward = _resolve_overlaps([high_rate, low_rate], sample_rate=44_100)
+    reversed_order = _resolve_overlaps([low_rate, high_rate], sample_rate=44_100)
+
+    assert {ref.filename for ref in forward} == {"high.wav", "low.wav"}
+    assert {ref.filename for ref in reversed_order} == {"high.wav", "low.wav"}
+
+
+def test_resolve_overlaps_true_overlap_across_rates_still_resolved(tmp_path):
+    """A later take that genuinely starts inside an earlier clip's real-time
+    span (even at a different sample rate) still collapses to one clip."""
+    first_take = _rate_ref(tmp_path, "take1.wav", frames=48_000, sample_rate=48_000, start_position_samples=0, take_number=1)
+    # Starts 0.5s in (22,050 @ 44.1kHz), well inside the first clip's 1s span.
+    second_take = _rate_ref(tmp_path, "take2.wav", frames=44_100, sample_rate=44_100, start_position_samples=22_050, take_number=2)
+
+    resolved = _resolve_overlaps([first_take, second_take], sample_rate=44_100)
+
+    assert len(resolved) == 1
+    assert resolved[0].filename == "take2.wav"  # latest take wins
+
+
+def test_resolve_overlaps_exact_boundary_same_rate_not_overlapping(tmp_path):
+    """Guard against a regression from the seconds-based rewrite: clips at
+    the same rate whose extents touch exactly at the boundary are still
+    adjacent, not overlapping."""
+    first = _rate_ref(tmp_path, "a.wav", frames=44_100, sample_rate=44_100, start_position_samples=0)
+    second = _rate_ref(tmp_path, "b.wav", frames=44_100, sample_rate=44_100, start_position_samples=44_100)
+
+    resolved = _resolve_overlaps([first, second], sample_rate=44_100)
+
+    assert {ref.filename for ref in resolved} == {"a.wav", "b.wav"}
+
+
+def test_resolve_overlaps_mixed_44_1_48_96_khz(tmp_path):
+    """Three clips at three different native sample rates, all adjacent in
+    real time, must all survive."""
+    a = _rate_ref(tmp_path, "a.wav", frames=44_100, sample_rate=44_100, start_position_samples=0)
+    b = _rate_ref(tmp_path, "b.wav", frames=48_000, sample_rate=48_000, start_position_samples=48_000)
+    c = _rate_ref(tmp_path, "c.wav", frames=96_000, sample_rate=96_000, start_position_samples=192_000)
+
+    resolved = _resolve_overlaps([a, b, c], sample_rate=44_100)
+
+    assert {ref.filename for ref in resolved} == {"a.wav", "b.wav", "c.wav"}
+
+
+def test_generate_als_keeps_adjacent_clips_at_mixed_sample_rates(tmp_path):
+    """End-to-end: two adjacent one-second recordings at different sample
+    rates must both survive into the generated .als (F02, 2026-09-15
+    review); a raw-sample-count comparison previously dropped one."""
+    refs = [
+        _rate_ref(tmp_path, "Guitar#01.wav", frames=48_000, sample_rate=48_000, start_position_samples=0, take_number=1),
+        _rate_ref(tmp_path, "Guitar#02.wav", frames=44_100, sample_rate=44_100, start_position_samples=44_100, take_number=2),
+    ]
+    project = _timeline_project("MixedRates", ["Guitar"], refs)
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    clips = root.findall(".//Events/AudioClip")
+    names = {clip.find("Name").get("Value") for clip in clips}
+    assert names == {"Guitar#01", "Guitar#02"}
+
+
+# F03 (2026-09-15 review): a Logic AIFF recording with a Start marker must be
+# placed at Timestamp+Start AND have playback trimmed to start there.
+
+def _encode_extended_float80(value: float) -> bytes:
+    if value == 0:
+        return b"\x00" * 10
+    fraction, exponent = math.frexp(abs(value))
+    mantissa = int(fraction * (1 << 64))
+    biased_exponent = exponent + 16382
+    return struct.pack(">H", biased_exponent) + mantissa.to_bytes(8, "big")
+
+
+def _write_aiff_with_markers(
+    path: Path, *, frames: int, sample_rate: int, timestamp_samples: int, start_offset_samples: int = 0,
+) -> Path:
+    sound_data = b"\x00\x00" * frames
+    comm_payload = struct.pack(">hIh", 1, frames, 16) + _encode_extended_float80(float(sample_rate))
+    ssnd_payload = struct.pack(">II", 0, 0) + sound_data
+
+    def marker(marker_id: int, position: int, name: str) -> bytes:
+        raw_name = name.encode("ascii")
+        payload = struct.pack(">HI", marker_id, position) + bytes([len(raw_name)]) + raw_name
+        if len(raw_name) % 2 == 0:
+            payload += b"\x00"
+        return payload
+
+    markers = [marker(2, 0, f"Timestamp: {timestamp_samples}")]
+    if start_offset_samples:
+        markers.append(marker(1, start_offset_samples, "Start"))
+    mark_payload = struct.pack(">H", len(markers)) + b"".join(markers)
+
+    body = (
+        b"AIFF"
+        + b"COMM" + struct.pack(">I", len(comm_payload)) + comm_payload
+        + b"SSND" + struct.pack(">I", len(ssnd_payload)) + ssnd_payload
+        + b"MARK" + struct.pack(">I", len(mark_payload)) + mark_payload
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"FORM" + struct.pack(">I", len(body)) + body)
+    return path
+
+
+def test_generate_als_aiff_start_marker_places_and_trims_preroll(tmp_path):
+    """A Logic AIFF with 1s of pre-roll before its Start marker must place
+    the clip at the marker's arrangement position AND trim playback to
+    start there, so the pre-roll isn't replayed a second time at the
+    shifted position (F03, 2026-09-15 review)."""
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    sample_rate = 44_100
+    _write_aiff_with_markers(
+        audio_dir / "Take.aif", frames=2 * sample_rate, sample_rate=sample_rate,
+        timestamp_samples=3_600 * sample_rate, start_offset_samples=sample_rate,
+    )
+
+    project = parse_logic_project(logicx, smpte_start_seconds=3600.0)  # tempo is 120 BPM (fixture default)
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+    clip = root.find(".//Events/AudioClip")
+
+    # 1s of pre-roll at 120 BPM is 2 beats.
+    assert float(clip.get("Time")) == 2.0
+    assert float(clip.find("Loop/LoopStart").get("Value")) == 2.0

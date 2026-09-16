@@ -13,7 +13,7 @@ import {
   isProToolsSource,
   sourceForDirection,
 } from "./conversion"
-import { useAppState, type ConversionRecord } from "./hooks/useAppState"
+import { useAppState, type ConversionRecord, type PreviewSettingsError, type PreviewSettingsField } from "./hooks/useAppState"
 
 type CleanupRef = MutableRefObject<(() => void) | null>
 
@@ -47,13 +47,20 @@ export default function App() {
   const state = useAppState()
   const reduceMotion = useReducedMotion()
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [settingsError, setSettingsError] = useState<PreviewSettingsError | null>(null)
   const [logs, setLogs] = useState<string[]>([])
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelled, setCancelled] = useState(false)
   const previewCleanupRef = useRef<(() => void) | null>(null)
   const conversionCleanupRef = useRef<(() => void) | null>(null)
   const previewRequestRef = useRef(0)
   const conversionStartingRef = useRef(false)
   const logsRef = useRef<string[]>([])
+  // Set while a conversion job owns activeJob in the main process; lets both
+  // the in-progress screen's Cancel button and navigation guards drive the
+  // same awaited cancel-and-report path instead of aborting silently.
+  const cancelConversionRef = useRef<(() => Promise<void>) | null>(null)
 
   const cleanupListeners = (ref: CleanupRef) => {
     ref.current?.()
@@ -100,6 +107,7 @@ export default function App() {
     smpteStart: string,
     keepUnwarped: string,
     timelinePath: string | null,
+    field: PreviewSettingsField = null,
   ) => {
     const requestId = previewRequestRef.current + 1
     previewRequestRef.current = requestId
@@ -116,8 +124,8 @@ export default function App() {
     }
     if (previewRequestRef.current !== requestId) return
 
-    state.setPreview(null)
     state.setError(null)
+    setSettingsError(null)
     state.setView("preview")
     setPreviewLoading(true)
 
@@ -178,7 +186,17 @@ export default function App() {
         ...extrasForDirection(direction, smpteStart, keepUnwarped, timelinePath),
       })
     } catch (error) {
-      failPreview(error instanceof Error ? error.message : String(error))
+      if (settled || previewRequestRef.current !== requestId) return
+      // The main process validates settings before a job ever starts (see
+      // normalizeSmpteStart et al. in main/index.ts), so a rejection here
+      // means this field's value is invalid, not that the route itself is
+      // broken. Report it inline and keep the last valid preview and the
+      // rest of the form intact instead of falling back to failPreview's
+      // terminal error view.
+      settled = true
+      cleanupListeners(previewCleanupRef)
+      setPreviewLoading(false)
+      setSettingsError({ field, message: error instanceof Error ? error.message : String(error) })
     }
   }
 
@@ -193,8 +211,11 @@ export default function App() {
     const direction = defaultDirectionForSource(sourceFormat)
     setSelectedHistoryId(null)
     cleanupListeners(conversionCleanupRef)
+    cancelConversionRef.current = null
     logsRef.current = []
     setLogs([])
+    setSettingsError(null)
+    setCancelled(false)
     state.setDirection(direction)
     state.setSourcePath(path)
     state.setOutputDir(null)
@@ -203,16 +224,20 @@ export default function App() {
     state.setKeepUnwarped("")
     state.setTimelinePath(null)
     state.setResult(null)
+    state.setPreview(null)
     void runPreview(path, direction, 120, "01:00:00:00", "", null)
   }
 
-  const requestPreviewWith = (overrides: Partial<{
-    direction: ConversionDirection
-    tempo: number
-    smpteStart: string
-    keepUnwarped: string
-    timelinePath: string | null
-  }>) => {
+  const requestPreviewWith = (
+    overrides: Partial<{
+      direction: ConversionDirection
+      tempo: number
+      smpteStart: string
+      keepUnwarped: string
+      timelinePath: string | null
+    }>,
+    field: PreviewSettingsField = null,
+  ) => {
     if (!state.sourcePath) return
     void runPreview(
       state.sourcePath,
@@ -221,6 +246,7 @@ export default function App() {
       overrides.smpteStart ?? state.smpteStart,
       overrides.keepUnwarped ?? state.keepUnwarped,
       "timelinePath" in overrides ? (overrides.timelinePath as string | null) : state.timelinePath,
+      field,
     )
   }
 
@@ -233,22 +259,22 @@ export default function App() {
 
   const handleTempoChange = (tempo: number) => {
     state.setTempo(tempo)
-    requestPreviewWith({ tempo })
+    requestPreviewWith({ tempo }, "tempo")
   }
 
   const handleSmpteStartChange = (smpteStart: string) => {
     state.setSmpteStart(smpteStart)
-    requestPreviewWith({ smpteStart })
+    requestPreviewWith({ smpteStart }, "smpteStart")
   }
 
   const handleKeepUnwarpedChange = (keepUnwarped: string) => {
     state.setKeepUnwarped(keepUnwarped)
-    requestPreviewWith({ keepUnwarped })
+    requestPreviewWith({ keepUnwarped }, "keepUnwarped")
   }
 
   const handleTimelinePathChange = (timelinePath: string | null) => {
     state.setTimelinePath(timelinePath)
-    requestPreviewWith({ timelinePath })
+    requestPreviewWith({ timelinePath }, "timelinePath")
   }
 
   const handleSelectTimelineJson = async () => {
@@ -295,14 +321,55 @@ export default function App() {
     state.setProgressStage("validation")
     state.setError(null)
     state.setResult(null)
+    setCancelled(false)
     logsRef.current = []
     setLogs([])
 
-    let outcome: "pending" | "success" | "failed" = "pending"
+    let outcome: "pending" | "success" | "failed" | "cancelled" = "pending"
 
     const recordFailure = (message: string) => {
       if (outcome !== "pending") return
       outcome = "failed"
+      cancelConversionRef.current = null
+      state.setError(message)
+      state.setView("error")
+
+      void persistHistory({
+        id: crypto.randomUUID(),
+        direction,
+        projectName,
+        inputPath: sourcePath,
+        outputPath: "",
+        date: new Date().toISOString(),
+        status: "failed",
+        report: message,
+      })
+    }
+
+    // Drives both the Cancel button on the progress screen and navigation
+    // guards. Once the main process acknowledges the cancellation it stops
+    // sending events for this job entirely, so there's no race with the
+    // onExit handler below once this resolves.
+    cancelConversionRef.current = async () => {
+      if (outcome !== "pending") return
+      setCancelling(true)
+      try {
+        await window.api.cancelActiveJob()
+      } catch (error) {
+        setCancelling(false)
+        appendLog(`Cancel failed: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+      if (outcome !== "pending") {
+        setCancelling(false)
+        return
+      }
+      outcome = "cancelled"
+      cancelConversionRef.current = null
+      cleanupListeners(conversionCleanupRef)
+      setCancelling(false)
+      setCancelled(true)
+      const message = `Conversion cancelled before it finished.${outputDir ? ` Check ${outputDir} for any partial output.` : ""}`
       state.setError(message)
       state.setView("error")
 
@@ -328,6 +395,7 @@ export default function App() {
         const outputPath = outputPathFromEvent(event, direction)
         if (event.stage === "complete" && outputPath && outcome === "pending") {
           outcome = "success"
+          cancelConversionRef.current = null
           const compatibilityWarnings = event.compatibility_warnings ?? []
           state.setResult({
             direction,
@@ -394,10 +462,25 @@ export default function App() {
     }
   }
 
-  const handleSelectRecord = (record: ConversionRecord) => {
+  // A running conversion writes real output, so navigating away can't just
+  // silently kill it the way canceling a preview can. Ask first, and only
+  // proceed once the cancellation the user agreed to has actually finished.
+  const confirmAndCancelRunningConversion = async (): Promise<boolean> => {
+    if (state.view !== "converting" || !cancelConversionRef.current) return true
+    const proceed = window.confirm(
+      "A conversion is still running. Cancel it and leave this screen? Any output written so far may be incomplete.",
+    )
+    if (!proceed) return false
+    await cancelConversionRef.current()
+    return true
+  }
+
+  const handleSelectRecord = async (record: ConversionRecord) => {
+    if (!(await confirmAndCancelRunningConversion())) return
     abortActiveWork()
     setSelectedHistoryId(record.id)
     setPreviewLoading(false)
+    setCancelled(false)
     logsRef.current = []
     setLogs([])
     state.setDirection(record.direction)
@@ -424,10 +507,12 @@ export default function App() {
     state.setView("error")
   }
 
-  const handleNewConversion = () => {
+  const handleNewConversion = async () => {
+    if (!(await confirmAndCancelRunningConversion())) return
     abortActiveWork()
     setSelectedHistoryId(null)
     setPreviewLoading(false)
+    setCancelled(false)
     logsRef.current = []
     setLogs([])
     state.reset()
@@ -471,6 +556,7 @@ export default function App() {
                 smpteStart={state.smpteStart}
                 keepUnwarped={state.keepUnwarped}
                 timelinePath={state.timelinePath}
+                settingsError={settingsError}
                 onDirectionChange={handleDirectionChange}
                 onTempoChange={handleTempoChange}
                 onSmpteStartChange={handleSmpteStartChange}
@@ -492,6 +578,8 @@ export default function App() {
                 progress={state.progress}
                 message={state.progressMessage}
                 logs={logs}
+                onCancel={() => void cancelConversionRef.current?.()}
+                cancelling={cancelling}
               />
             </motion.div>
           )}
@@ -502,6 +590,7 @@ export default function App() {
                 direction={state.direction}
                 result={state.result}
                 error={state.error}
+                cancelled={cancelled}
                 onConvertAnother={handleNewConversion}
               />
             </motion.div>

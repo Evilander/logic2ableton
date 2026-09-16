@@ -35,7 +35,14 @@ from logic2ableton.ableton_metadata import encode_meter, set_global_parameter, s
 from logic2ableton.paths import create_output_directory, safe_name
 from logic2ableton.timeline import TempoMap, beats_per_bar
 
-from logic2ableton.models import AudioFileRef, LogicMidiTrack, LogicProject, TrackMixerState, samples_to_beats
+from logic2ableton.models import (
+    AudioFileRef,
+    LogicMidiNote,
+    LogicMidiTrack,
+    LogicProject,
+    TrackMixerState,
+    samples_to_beats,
+)
 
 if TYPE_CHECKING:
     from logic2ableton.timeline import TimelineMarker
@@ -237,8 +244,12 @@ def _make_audio_clip_xml(
     offset_secs = offset_samples / timeline_sample_rate
     content_secs = content_samples / timeline_sample_rate
 
-    # Calculate timeline position from BWF timestamp
-    start_beats = tempo_map.samples_to_beats(ref.start_position_samples, timeline_sample_rate)
+    # Timeline position: the DAW's own region placement when it is known
+    # (Logic arrangements state it in beats), otherwise the BWF timestamp.
+    if ref.start_beats is not None:
+        start_beats = max(0.0, ref.start_beats)
+    else:
+        start_beats = tempo_map.samples_to_beats(ref.start_position_samples, timeline_sample_rate)
     start_seconds = tempo_map.beats_to_seconds(start_beats)
     # How many beats the content spans depends on where it sits once the
     # tempo changes, so measure from the clip's own position. Without a
@@ -387,12 +398,38 @@ def _pick_best_clip(clips: list[AudioFileRef]) -> AudioFileRef | None:
     return max(clips, key=lambda c: c.take_number)
 
 
-def _get_clip_end_samples(ref: AudioFileRef, sample_rate: int) -> int:
-    """Get the end position of a clip in samples (honoring source trims)."""
+def _clip_arrangement_rate(ref: AudioFileRef, project_sample_rate: int) -> int:
+    """The sample rate ref.start_position_samples/content_duration_samples are in.
+
+    Pro Tools imports carry an explicit ref.timeline_sample_rate (the
+    session's own clock); Logic recordings have no such override, so their
+    BWF/AIFF timestamps are sample counts against the source file's own
+    header rate. Mirrors the same fallback chain _make_audio_clip_xml uses
+    when placing a clip, so overlap resolution and placement never disagree.
+    """
+    file_sample_rate = _get_audio_info(ref.file_path)[1]
+    return ref.timeline_sample_rate or file_sample_rate or project_sample_rate
+
+
+def _clip_time_range_seconds(ref: AudioFileRef, project_sample_rate: int) -> tuple[float, float]:
+    """Get a clip's (start, end) arrangement position in seconds.
+
+    Comparing start_position_samples/content_duration_samples as raw
+    integers silently assumes every clip shares one sample clock. Files
+    recorded at different rates (e.g. 48 kHz next to 44.1 kHz) don't, so a
+    48,000-sample clip and a 44,100-sample clip that are both exactly one
+    second long would otherwise compare as overlapping when they are not
+    (see F02, 2026-09-15 review). Normalizing to seconds here keeps the
+    per-file sample counts in AudioFileRef untouched for actual rendering.
+    """
+    rate = _clip_arrangement_rate(ref, project_sample_rate)
+    start_seconds = ref.start_position_samples / rate
     if ref.content_duration_samples is not None:
-        return ref.start_position_samples + ref.content_duration_samples
-    duration_samples, _ = _get_audio_info(ref.file_path)
-    return ref.start_position_samples + duration_samples
+        duration_samples = ref.content_duration_samples
+    else:
+        file_duration_samples, _ = _get_audio_info(ref.file_path)
+        duration_samples = max(0, file_duration_samples - max(0, ref.content_offset_samples))
+    return start_seconds, start_seconds + duration_samples / rate
 
 
 def _resolve_overlaps(clips: list[AudioFileRef], sample_rate: int) -> list[AudioFileRef]:
@@ -401,6 +438,8 @@ def _resolve_overlaps(clips: list[AudioFileRef], sample_rate: int) -> list[Audio
     Clips at different timeline positions are all kept. When clips overlap
     in their actual time ranges (one starts before the other ends),
     _pick_best_clip selects the best: comp > bounce-in-place > latest take.
+    Overlap is judged in seconds (see _clip_time_range_seconds), not raw
+    sample counts, since clips can come from files at different rates.
     """
     if not clips:
         return []
@@ -413,22 +452,22 @@ def _resolve_overlaps(clips: list[AudioFileRef], sample_rate: int) -> list[Audio
         takes = [clip for clip in clips if clip.content_duration_samples is None]
         return sorted(placed + _resolve_overlaps(takes, sample_rate), key=lambda clip: clip.start_position_samples)
 
-    sorted_clips = sorted(clips, key=lambda c: c.start_position_samples)
+    sorted_clips = sorted(clips, key=lambda c: _clip_time_range_seconds(c, sample_rate)[0])
 
     # Group clips that overlap in time range using a sweep-line approach
     groups: list[list[AudioFileRef]] = []
     current_group: list[AudioFileRef] = [sorted_clips[0]]
-    group_end = _get_clip_end_samples(sorted_clips[0], sample_rate)
+    group_end = _clip_time_range_seconds(sorted_clips[0], sample_rate)[1]
 
     for clip in sorted_clips[1:]:
-        if clip.start_position_samples < group_end:
+        clip_start, clip_end = _clip_time_range_seconds(clip, sample_rate)
+        if clip_start < group_end:
             current_group.append(clip)
-            clip_end = _get_clip_end_samples(clip, sample_rate)
             group_end = max(group_end, clip_end)
         else:
             groups.append(current_group)
             current_group = [clip]
-            group_end = _get_clip_end_samples(clip, sample_rate)
+            group_end = clip_end
     groups.append(current_group)
 
     resolved = []
@@ -560,6 +599,47 @@ def _make_midi_clip_xml(
     time_sig_denominator: int,
     color: int = 0,
 ) -> ET.Element:
+    """One bar-aligned MidiClip holding every note of a track (legacy decodes)."""
+    bar_length_beats = beats_per_bar(time_sig_numerator, time_sig_denominator)
+    starts = [note.start_beats for note in midi_track.notes]
+    ends = [note.start_beats + note.duration_beats for note in midi_track.notes]
+    clip_start = math.floor(min(starts) / bar_length_beats) * bar_length_beats
+    clip_end = max(math.ceil(max(ends) / bar_length_beats) * bar_length_beats, clip_start + bar_length_beats)
+    relative_notes = [
+        LogicMidiNote(
+            pitch=note.pitch,
+            start_beats=note.start_beats - clip_start,
+            duration_beats=note.duration_beats,
+            velocity=note.velocity,
+        )
+        for note in midi_track.notes
+    ]
+    return _midi_clip_element(
+        allocator,
+        midi_track.name,
+        clip_start,
+        clip_end,
+        clip_end - clip_start,
+        False,
+        relative_notes,
+        time_sig_numerator,
+        time_sig_denominator,
+        color=color,
+    )
+
+
+def _midi_clip_element(
+    allocator: _IdAllocator,
+    name: str,
+    clip_start: float,
+    clip_end: float,
+    loop_length: float,
+    loop_on: bool,
+    notes: list[LogicMidiNote],
+    time_sig_numerator: int,
+    time_sig_denominator: int,
+    color: int = 0,
+) -> ET.Element:
     """Create a MidiClip element for arrangement view.
 
     The element shape mirrors what Ableton Live 12.2/12.3 writes for its own
@@ -568,13 +648,14 @@ def _make_midi_clip_xml(
     clip-local NoteIds, and NoteIdGenerator/NextId holds the next free id.
     Note times are relative to the clip content origin, which aligns with
     CurrentStart when StartRelative is 0.
+
+    ``loop_length`` is the content window (Loop/LoopEnd); a clip whose
+    arrangement span ``clip_end - clip_start`` exceeds it repeats the window,
+    which is how Logic's looped regions are reproduced (verified against
+    Live 12.4.3: playback wraps from LoopEnd to LoopStart until the clip's
+    arrangement length is consumed).
     """
-    bar_length_beats = beats_per_bar(time_sig_numerator, time_sig_denominator)
-    starts = [note.start_beats for note in midi_track.notes]
-    ends = [note.start_beats + note.duration_beats for note in midi_track.notes]
-    clip_start = math.floor(min(starts) / bar_length_beats) * bar_length_beats
-    clip_end = max(math.ceil(max(ends) / bar_length_beats) * bar_length_beats, clip_start + bar_length_beats)
-    length = clip_end - clip_start
+    length = loop_length
 
     clip = ET.Element("MidiClip")
     clip.set("Id", str(allocator.next()))
@@ -589,12 +670,12 @@ def _make_midi_clip_xml(
     _val(loop, "LoopStart", "0")
     _val(loop, "LoopEnd", _format_ableton_number(length))
     _val(loop, "StartRelative", "0")
-    _val(loop, "LoopOn", "false")
+    _val(loop, "LoopOn", "true" if loop_on else "false")
     _val(loop, "OutMarker", _format_ableton_number(length))
     _val(loop, "HiddenLoopStart", "0")
     _val(loop, "HiddenLoopEnd", _format_ableton_number(length))
 
-    _val(clip, "Name", midi_track.name)
+    _val(clip, "Name", name)
     _val(clip, "Annotation", "")
     _val(clip, "Color", str(color))
     _val(clip, "LaunchMode", "0")
@@ -657,7 +738,7 @@ def _make_midi_clip_xml(
     key_tracks = ET.SubElement(notes_elem, "KeyTracks")
 
     by_pitch: dict[int, list] = {}
-    for note in midi_track.notes:
+    for note in notes:
         by_pitch.setdefault(note.pitch, []).append(note)
 
     note_id = 1
@@ -667,7 +748,7 @@ def _make_midi_clip_xml(
         kt_notes = ET.SubElement(key_track, "Notes")
         for note in sorted(by_pitch[pitch], key=lambda n: n.start_beats):
             event = ET.SubElement(kt_notes, "MidiNoteEvent")
-            event.set("Time", _format_ableton_number(note.start_beats - clip_start))
+            event.set("Time", _format_ableton_number(note.start_beats))
             event.set("Duration", _format_ableton_number(note.duration_beats))
             event.set("Velocity", str(max(1, min(127, note.velocity))))
             event.set("OffVelocity", "64")
@@ -731,15 +812,36 @@ def _inject_midi_clip_into_track(
     for existing in list(events):
         events.remove(existing)
 
-    events.append(
-        _make_midi_clip_xml(
-            allocator=allocator,
-            midi_track=midi_track,
-            time_sig_numerator=time_sig_numerator,
-            time_sig_denominator=time_sig_denominator,
-            color=color,
+    regions = [region for region in midi_track.regions if region.notes]
+    if not regions:
+        events.append(
+            _make_midi_clip_xml(
+                allocator=allocator,
+                midi_track=midi_track,
+                time_sig_numerator=time_sig_numerator,
+                time_sig_denominator=time_sig_denominator,
+                color=color,
+            )
         )
-    )
+        return
+
+    # One clip per Logic region, at the region's own position; looped
+    # regions become clips whose arrangement span exceeds their loop length.
+    for region in sorted(regions, key=lambda r: r.start_beats):
+        events.append(
+            _midi_clip_element(
+                allocator,
+                region.name,
+                region.start_beats,
+                region.end_beats,
+                region.length_beats,
+                region.is_looping,
+                region.notes,
+                time_sig_numerator,
+                time_sig_denominator,
+                color=color,
+            )
+        )
 
 
 def generate_als(

@@ -1,4 +1,5 @@
 import json
+import math
 import plistlib
 import struct
 from pathlib import Path
@@ -202,8 +203,59 @@ def test_load_mixer_overrides(tmp_path):
 
 
 def test_load_mixer_overrides_missing_file():
-    result = load_mixer_overrides(Path("nonexistent.json"))
-    assert result == {}
+    """An explicit --mixer file is a deliberate override; a missing file is a
+    configuration error, not silently "no overrides" (F12, 2026-09-15 review)."""
+    with pytest.raises(ValueError, match="not found"):
+        load_mixer_overrides(Path("nonexistent.json"))
+
+
+def test_load_mixer_overrides_malformed_json_raises(tmp_path):
+    json_path = tmp_path / "mixer_overrides.json"
+    json_path.write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        load_mixer_overrides(json_path)
+
+
+def test_load_mixer_overrides_string_false_does_not_mute(tmp_path):
+    """bool("false") is True in Python; a JSON string must never be coerced
+    that way (F12, 2026-09-15 review)."""
+    json_path = tmp_path / "mixer_overrides.json"
+    json_path.write_text(json.dumps({"KICK IN": {"is_muted": "false"}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="is_muted"):
+        load_mixer_overrides(json_path)
+
+
+def test_load_mixer_overrides_rejects_out_of_range_pan(tmp_path):
+    json_path = tmp_path / "mixer_overrides.json"
+    json_path.write_text(json.dumps({"KICK IN": {"pan": 1.5}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="pan"):
+        load_mixer_overrides(json_path)
+
+
+def test_load_mixer_overrides_rejects_non_finite_volume_db(tmp_path):
+    json_path = tmp_path / "mixer_overrides.json"
+    json_path.write_text(json.dumps({"KICK IN": {"volume_db": float("nan")}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="volume_db"):
+        load_mixer_overrides(json_path)
+
+
+def test_load_mixer_overrides_valid_file_still_works(tmp_path):
+    data = {
+        "KICK IN": {"volume_db": -3.0, "pan": -0.5, "is_muted": False, "is_soloed": True},
+    }
+    json_path = tmp_path / "mixer_overrides.json"
+    json_path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = load_mixer_overrides(json_path)
+
+    assert result["KICK IN"].volume_db == -3.0
+    assert result["KICK IN"].pan == -0.5
+    assert result["KICK IN"].is_muted is False
+    assert result["KICK IN"].is_soloed is True
 
 
 def test_build_compatibility_warnings_for_missing_and_unpositioned_audio(tmp_path):
@@ -500,6 +552,136 @@ def test_clamped_files_warning_when_every_file_precedes_smpte_start(tmp_path):
 
     assert any("Every timestamped audio file" in w for w in project.compatibility_warnings)
     assert any("--smpte-start" in w for w in project.compatibility_warnings)
+
+
+def _set_audio_membership(logicx: Path, *, active: list[str], alternative: int = 0) -> None:
+    """Set an alternative's AudioFiles membership directly in MetaData.plist.
+
+    Reproduces Logic's real membership filtering (parse_logic_project keeps
+    only files listed here once "AudioFiles" is present) without needing
+    fixture_builders.build_synthetic_logicx to grow a membership parameter.
+    """
+    meta_path = logicx / "Alternatives" / f"{alternative:03d}" / "MetaData.plist"
+    with open(meta_path, "rb") as f:
+        data = plistlib.load(f)
+    data["AudioFiles"] = active
+    with open(meta_path, "wb") as f:
+        plistlib.dump(data, f)
+
+
+def test_smpte_auto_inference_ignores_excluded_audio(tmp_path):
+    """An audio file excluded by the alternative's AudioFiles membership must
+    never influence --smpte-start auto's inferred hour (F01, 2026-09-15
+    review): an excluded recording at hour 1 previously dragged the
+    inferred start down from the active recording's real hour 2."""
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    write_smpte_stamped_wav(audio_dir / "Current.wav", smpte_seconds=7210.0, sample_rate=44_100)
+    write_smpte_stamped_wav(audio_dir / "Excluded.wav", smpte_seconds=3610.0, sample_rate=44_100)
+    _set_audio_membership(logicx, active=["Current.wav"])
+
+    project = parse_logic_project(logicx, smpte_start_seconds=None)
+
+    assert project.smpte_start_inferred is True
+    assert project.smpte_start_seconds == 7200.0
+    assert [ref.filename for ref in project.audio_files] == ["Current.wav"]
+    current = project.audio_files[0]
+    assert current.start_position_samples == 10 * 44_100
+
+
+def test_smpte_auto_inference_ignores_excluded_audio_folder_layout(tmp_path):
+    logicx = build_folder_style_logicx(tmp_path, name="Folder")
+    audio_dir = logicx.parent / "Audio Files"
+    write_smpte_stamped_wav(audio_dir / "Current.wav", smpte_seconds=7210.0, sample_rate=44_100)
+    write_smpte_stamped_wav(audio_dir / "Excluded.wav", smpte_seconds=3610.0, sample_rate=44_100)
+    _set_audio_membership(logicx, active=["Current.wav"])
+
+    project = parse_logic_project(logicx, smpte_start_seconds=None)
+
+    assert project.smpte_start_inferred is True
+    assert project.smpte_start_seconds == 7200.0
+    assert [ref.filename for ref in project.audio_files] == ["Current.wav"]
+
+
+def _encode_extended_float80(value: float) -> bytes:
+    if value == 0:
+        return b"\x00" * 10
+    fraction, exponent = math.frexp(abs(value))
+    mantissa = int(fraction * (1 << 64))
+    biased_exponent = exponent + 16382
+    return struct.pack(">H", biased_exponent) + mantissa.to_bytes(8, "big")
+
+
+def _write_aiff_with_markers(
+    path: Path,
+    *,
+    frames: int,
+    sample_rate: int,
+    timestamp_samples: int,
+    start_offset_samples: int = 0,
+) -> Path:
+    """Write a minimal real AIFF with a Timestamp marker and, when nonzero, a
+    Start (pre-roll) marker - mirrors what Logic Pro embeds in its own AIFF
+    recordings (see _get_aiff_timestamp).
+    """
+    sound_data = b"\x00\x00" * frames
+    comm_payload = struct.pack(">hIh", 1, frames, 16) + _encode_extended_float80(float(sample_rate))
+    ssnd_payload = struct.pack(">II", 0, 0) + sound_data
+
+    def marker(marker_id: int, position: int, name: str) -> bytes:
+        raw_name = name.encode("ascii")
+        payload = struct.pack(">HI", marker_id, position) + bytes([len(raw_name)]) + raw_name
+        if len(raw_name) % 2 == 0:
+            payload += b"\x00"
+        return payload
+
+    markers = [marker(2, 0, f"Timestamp: {timestamp_samples}")]
+    if start_offset_samples:
+        markers.append(marker(1, start_offset_samples, "Start"))
+    mark_payload = struct.pack(">H", len(markers)) + b"".join(markers)
+
+    body = (
+        b"AIFF"
+        + b"COMM" + struct.pack(">I", len(comm_payload)) + comm_payload
+        + b"SSND" + struct.pack(">I", len(ssnd_payload)) + ssnd_payload
+        + b"MARK" + struct.pack(">I", len(mark_payload)) + mark_payload
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"FORM" + struct.pack(">I", len(body)) + body)
+    return path
+
+
+def test_parse_logic_project_aiff_zero_start_marker_leaves_no_content_offset(tmp_path):
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    _write_aiff_with_markers(
+        audio_dir / "Take.aif", frames=44_100, sample_rate=44_100, timestamp_samples=3_600 * 44_100,
+    )
+
+    project = parse_logic_project(logicx, smpte_start_seconds=3600.0)
+
+    take = next(ref for ref in project.audio_files if ref.filename == "Take.aif")
+    assert take.start_position_samples == 0
+    assert take.content_offset_samples == 0
+
+
+def test_parse_logic_project_aiff_nonzero_start_marker_sets_content_offset(tmp_path):
+    """A Start marker (pre-roll) must shift the arrangement position AND set
+    a matching content offset, so playback starts at the marker instead of
+    replaying the pre-roll a second time at the shifted position (F03,
+    2026-09-15 review)."""
+    logicx = build_synthetic_logicx(tmp_path, project_data=b"")
+    audio_dir = logicx / "Media" / "Audio Files"
+    _write_aiff_with_markers(
+        audio_dir / "Take.aif", frames=2 * 44_100, sample_rate=44_100,
+        timestamp_samples=3_600 * 44_100, start_offset_samples=44_100,
+    )
+
+    project = parse_logic_project(logicx, smpte_start_seconds=3600.0)
+
+    take = next(ref for ref in project.audio_files if ref.filename == "Take.aif")
+    assert take.start_position_samples == 44_100  # Timestamp + Start - smpte_start
+    assert take.content_offset_samples == 44_100  # trims the pre-roll on playback
 
 
 # Folder-style ("Save As" project folder) discovery

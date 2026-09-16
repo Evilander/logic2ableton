@@ -75,7 +75,14 @@ def generate_report(
         f"{project.time_sig_numerator}/{project.time_sig_denominator} | "
         f"Sample Rate: {project.sample_rate}"
     )
-    lines.append(_smpte_start_line(project, smpte_start_explicit))
+    if project.arrangement_decoded:
+        start_bar = project.project_start_bar if project.project_start_bar is not None else 1
+        lines.append(
+            f"Region positions: read from the Logic arrangement (project starts at bar {start_bar}; "
+            "audio timestamps and the SMPTE start are not used)"
+        )
+    else:
+        lines.append(_smpte_start_line(project, smpte_start_explicit))
     lines.append(_audio_files_line(project))
     unwarped_tracks = _matched_unwarped_tracks(project.track_names, keep_unwarped)
     if unwarped_tracks:
@@ -84,6 +91,15 @@ def generate_report(
 
     lines.append(f"TRACKS TRANSFERRED ({len(project.track_names)}):")
     for i, track_name in enumerate(project.track_names, 1):
+        if project.arrangement_decoded:
+            clips = [r for r in project.audio_files if r.track_name == track_name]
+            placed = []
+            for clip in sorted(clips, key=lambda r: r.start_beats or 0.0):
+                bar, beat = _bar_beat(clip.start_beats or 0.0, project.time_sig_numerator, project.time_sig_denominator)
+                placed.append(f"{clip.clip_name or clip.filename} at bar {bar} beat {beat:g}")
+            detail = " - " + "; ".join(placed) if placed else ""
+            lines.append(f"  {i}. {track_name}{detail}")
+            continue
         takes = [
             r
             for r in project.audio_files
@@ -150,14 +166,27 @@ def generate_report(
             f"MIDI TRACKS TRANSFERRED ({len(midi_tracks)}, {project.total_midi_notes} notes):"
         )
         for i, track in enumerate(midi_tracks, 1):
-            lines.append(f"  {i}. {track.name} - {track.note_count} note(s)")
+            detail = f"{track.note_count} note(s)"
+            if track.regions:
+                looped = sum(1 for region in track.regions if region.is_looping)
+                first = min(region.start_beats for region in track.regions)
+                bar, beat = _bar_beat(first, project.time_sig_numerator, project.time_sig_denominator)
+                detail = (
+                    f"{len(track.regions)} region(s) from bar {bar} beat {beat:g}"
+                    + (f", {looped} looped" if looped else "")
+                    + f", {track.note_count} note(s) once loops are unrolled"
+                )
+            lines.append(f"  {i}. {track.name} - {detail}")
         lines.append(
             "  Created as native MIDI tracks inside the .als (load instruments manually), "
             "and exported as Standard MIDI files in the MIDI/ folder."
         )
+        if any(track.regions for track in midi_tracks):
+            lines.append("  Looped Logic regions become looping arrangement clips in Live, one clip per region.")
         lines.append("")
 
     if project.timeline is not None:
+        from_project = project.timeline.source_path == "Logic project"
         lines.append("TIMELINE:")
         if project.timeline.tempo_events:
             lines.append("  Tempo changes:")
@@ -165,11 +194,14 @@ def generate_report(
                 bar, beat = _bar_beat(event.beat, project.time_sig_numerator, project.time_sig_denominator)
                 lines.append(f"    Bar {bar} beat {beat:g}: {event.bpm:g} BPM")
         if project.timeline.markers:
-            lines.append("  Markers:")
+            lines.append("  Markers" + (" (read from the Logic project):" if from_project else ":"))
             for marker in project.timeline.markers:
                 bar, beat = _bar_beat(marker.beat, project.time_sig_numerator, project.time_sig_denominator)
                 lines.append(f"    Bar {bar} beat {beat:g}: {marker.name}")
-        lines.append("  Live tempo automation and locators from --timeline are written into the .als (skipped when --report-only is used).")
+        if from_project:
+            lines.append("  Markers become Live locators in the .als (skipped when --report-only is used).")
+        else:
+            lines.append("  Live tempo automation and locators from --timeline are written into the .als (skipped when --report-only is used).")
         lines.append("")
 
     lines.append("COMPATIBILITY WARNINGS:")
@@ -187,6 +219,8 @@ def generate_report(
     lines.append("  - Bus/send routing (recreate manually in Ableton)")
     if project.timeline is None:
         lines.append("  - Logic tempo track and markers (not decoded yet; supply --timeline to reproduce them)")
+    elif not project.timeline.tempo_events:
+        lines.append("  - Logic tempo changes (only the project tempo is read; supply --timeline to reproduce a tempo map)")
     lines.append("")
     lines.append("=" * 60)
     return "\n".join(lines)

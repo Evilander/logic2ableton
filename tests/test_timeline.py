@@ -107,6 +107,29 @@ def test_load_timeline_negative_bpm_still_reports_non_positive(tmp_path):
         load_timeline(path, numerator=4, denominator=4, base_tempo=120)
 
 
+def test_load_timeline_rejects_tiny_positive_bpm_that_rounds_to_zero(tmp_path):
+    """0.0000001 BPM is technically positive but would serialize as Tempo
+    Manual '0' at the six-decimal precision Live's XML is written with -
+    reject it here instead of writing an unplayable tempo (F13, 2026-09-15
+    review)."""
+    path = _write(tmp_path, {"tempo": [{"bar": 1, "bpm": 0.0000001}]})
+    with pytest.raises(ValueError, match="between 20 and 999"):
+        load_timeline(path, numerator=4, denominator=4, base_tempo=120)
+
+
+def test_load_timeline_rejects_bpm_above_live_max(tmp_path):
+    path = _write(tmp_path, {"tempo": [{"bar": 1, "bpm": 1500}]})
+    with pytest.raises(ValueError, match="between 20 and 999"):
+        load_timeline(path, numerator=4, denominator=4, base_tempo=120)
+
+
+@pytest.mark.parametrize("bpm", [timeline.MIN_TEMPO_BPM, timeline.MAX_TEMPO_BPM, 128.5])
+def test_load_timeline_accepts_bpm_within_live_range(tmp_path, bpm):
+    path = _write(tmp_path, {"tempo": [{"bar": 1, "bpm": bpm}]})
+    result = load_timeline(path, numerator=4, denominator=4, base_tempo=120)
+    assert result.tempo_events[0].bpm == bpm
+
+
 def test_load_timeline_rejects_nan_bpm(tmp_path):
     path = tmp_path / "timeline.json"
     path.write_text(json.dumps({"tempo": [{"bar": 1, "bpm": None}]}).replace("null", "NaN"), encoding="utf-8")

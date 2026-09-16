@@ -15,6 +15,7 @@ export default function SignalPath({ direction, active = false, compact = false 
 
   return (
     <div
+      role="img"
       className={`signal-path ${compact ? "signal-path-compact" : ""}`}
       aria-label={`${FORMAT_META[source].name} to ${FORMAT_META[destination].name}`}
     >

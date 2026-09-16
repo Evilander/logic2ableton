@@ -21,6 +21,10 @@ class AudioFileRef:
     content_duration_samples: int | None = None  # Slice length; None = whole file
     clip_name: str | None = None           # Display name; None = filename stem
     timeline_sample_rate: int | None = None  # Explicit arrangement sample clock (Pro Tools)
+    # Arrangement position in beats from bar 1 when the DAW project states it
+    # directly (Logic region placements); takes precedence over
+    # start_position_samples, which then only serves overlap checks.
+    start_beats: float | None = None
 
 
 @dataclass
@@ -58,9 +62,35 @@ class LogicMidiNote:
 
 
 @dataclass
+class LogicMidiRegion:
+    """One MIDI region as placed on a Logic track.
+
+    ``notes`` are relative to the region start (beats) and already trimmed to
+    the region's content window. A looped region repeats that window across
+    ``loop_span_beats``; ``length_beats`` is the window itself.
+    """
+    name: str
+    start_beats: float      # absolute arrangement position
+    length_beats: float
+    notes: list[LogicMidiNote] = field(default_factory=list)
+    loop_span_beats: float | None = None
+    is_muted: bool = False
+
+    @property
+    def end_beats(self) -> float:
+        span = self.loop_span_beats if self.loop_span_beats else self.length_beats
+        return self.start_beats + span
+
+    @property
+    def is_looping(self) -> bool:
+        return bool(self.loop_span_beats) and self.loop_span_beats > self.length_beats
+
+
+@dataclass
 class LogicMidiTrack:
     name: str
-    notes: list[LogicMidiNote] = field(default_factory=list)
+    notes: list[LogicMidiNote] = field(default_factory=list)  # absolute, loops unrolled
+    regions: list[LogicMidiRegion] = field(default_factory=list)  # empty for legacy decodes
 
     @property
     def note_count(self) -> int:
@@ -89,6 +119,10 @@ class LogicProject:
     audio_dir: Path | None = None
     audio_layout: str = "package"
     timeline: "Timeline | None" = None
+    # True when regions, loops, markers and track names came from the
+    # project's own arrangement data rather than from audio timestamps.
+    arrangement_decoded: bool = False
+    project_start_bar: int | None = None
 
     @property
     def total_midi_notes(self) -> int:

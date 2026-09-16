@@ -22,33 +22,32 @@
   --color-error: #D06060;
   --color-text-primary: #E8E8E8;
   --color-text-secondary: #888888;
-  --color-text-tertiary: #555555;
+  --color-text-tertiary: #8C8C8C;
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/*
+ * Tailwind's own preflight already zeroes margin/padding/box-sizing on * and
+ * inherits font on button/input from inside its own @layer base, so we don't
+ * restate those here. What's left below is genuinely app-specific and lives
+ * in @layer base so utility classes (which Tailwind puts in @layer utilities,
+ * declared after base) still win the cascade instead of losing to unlayered
+ * rules.
+ */
+@layer base {
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text-primary);
+    font-family: "Geist Sans", system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow: hidden;
+    -webkit-app-region: no-drag;
+    user-select: none;
+  }
 
-body {
-  background-color: var(--color-bg);
-  color: var(--color-text-primary);
-  font-family: "Geist Sans", system-ui, -apple-system, sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
-  overflow: hidden;
-  -webkit-app-region: no-drag;
-  user-select: none;
-}
-
-button,
-input {
-  font: inherit;
-}
-
-button {
-  cursor: pointer;
+  button {
+    cursor: pointer;
+  }
 }
 
 .dropzone-texture {

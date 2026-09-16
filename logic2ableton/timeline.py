@@ -16,6 +16,16 @@ from pathlib import Path
 # it is almost certainly the wrong file, so reject before reading it fully.
 _MAX_TIMELINE_BYTES = 5 * 1024 * 1024
 
+# Live's own Tempo field only accepts 20-999 BPM. This is the one place that
+# bound is defined; cli._tempo_argument imports it too, so a --timeline tempo
+# entry and a --tempo argument are held to the same domain. A value outside
+# it (or one so small it rounds to "0" at the six-decimal precision Live's
+# XML is written with, e.g. 1e-7) can't be represented in a Live set, so it
+# must be rejected here instead of producing an unplayable tempo (see F13,
+# 2026-09-15 review).
+MIN_TEMPO_BPM = 20.0
+MAX_TEMPO_BPM = 999.0
+
 
 @dataclass
 class TempoEvent:
@@ -115,6 +125,10 @@ def load_timeline(path: Path, *, numerator: int, denominator: int, base_tempo: f
             raise ValueError(f"Tempo entry has a non-finite 'bpm': {entry}")
         if bpm <= 0:
             raise ValueError(f"Tempo entry has a non-positive 'bpm': {entry}")
+        if not MIN_TEMPO_BPM <= bpm <= MAX_TEMPO_BPM:
+            raise ValueError(
+                f"Tempo entry 'bpm' must be between {MIN_TEMPO_BPM:g} and {MAX_TEMPO_BPM:g}: {entry}"
+            )
         tempo_events.append(TempoEvent(beat=beat, bpm=float(bpm)))
 
     markers_raw = raw.get("markers") if raw.get("markers") is not None else []

@@ -9,7 +9,7 @@ interface DropZoneProps {
 }
 
 const browseButtonClass =
-  "inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2.5 text-[13px] font-medium text-text-primary transition-colors hover:border-stone/50 hover:bg-surface-hover"
+  "inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-2.5 text-[13px] font-medium text-text-primary transition-colors hover:border-stone/50 hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose"
 
 export default function DropZone({ onProjectSelected }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false)
@@ -76,23 +76,21 @@ export default function DropZone({ onProjectSelected }: DropZoneProps) {
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
+      {/*
+        This region is a mouse convenience only (click anywhere to browse for
+        a file). It intentionally carries no interactive role or tabIndex: the
+        two buttons below are the real, independently focusable controls, and
+        a role="button" wrapper around them used to swallow their Enter/Space
+        keydowns before the buttons could handle their own activation.
+      */}
       <motion.div
-        role="button"
-        tabIndex={0}
-        aria-label="Select a session to convert"
         animate={{
           borderColor: isDragging ? "#C4868E" : "#353340",
           scale: isDragging ? 1.008 : 1,
         }}
         transition={{ type: "spring", stiffness: 380, damping: 30 }}
-        className="dropzone-texture relative isolate w-full max-w-2xl overflow-hidden rounded-3xl border-2 border-dashed px-10 py-14 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose"
+        className="dropzone-texture relative isolate w-full max-w-2xl overflow-hidden rounded-3xl border-2 border-dashed px-10 py-14 cursor-pointer"
         onClick={() => void handleBrowse("file")}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault()
-            void handleBrowse("file")
-          }
-        }}
       >
         <div className="relative z-10 flex flex-col items-center gap-6 text-center">
           <motion.div

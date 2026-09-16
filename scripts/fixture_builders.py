@@ -170,6 +170,224 @@ def build_folder_style_logicx(
     return logicx_path
 
 
+_LOGIC_SEQUENCE_ORIGIN = 38400
+_LOGIC_PROJECT_START = 34560
+_LOGIC_TICKS_PER_BAR = 3840
+
+
+def _logic_object(
+    tag: str,
+    payload: bytes,
+    *,
+    kind: int = 1,
+    class_id: int = 0x17,
+    id1: int = 0,
+    id2: int | None = None,
+    version: int = 1,
+    wide_sentinel: bool = False,
+) -> bytes:
+    """Serialise one Logic object: reversed tag, ids, sentinel, version, size, payload."""
+    if wide_sentinel:
+        ids = struct.pack("<I", id1) + b"\xff\xff\xff\xff\xff\xff\xff\x7f"
+    elif id2 is None:
+        ids = struct.pack("<I", id1) + b"\xff\xff\xff\xff\xff\xff\xff\xff"
+    else:
+        ids = struct.pack("<II", id1, id2) + b"\xff\xff\xff\xff"
+    header = tag.encode("ascii")[::-1] + struct.pack("<HI", kind, class_id) + ids
+    assert len(header) == 22
+    return header + b"\x02\x00\x00\x00" + bytes([version, 0]) + struct.pack("<I", len(payload)) + payload
+
+
+def _logic_event_sequence(records: bytes, *, id1: int, id2: int, version: int = 1) -> bytes:
+    payload = b"\x00\x00\x00\x00" + records + b"\xf1\x00\x00\x00\xff\xff\xff\x3f\x00\x00\x00\x00"
+    return _logic_object("EvSq", payload, kind=1, id1=id1, id2=id2, version=version)
+
+
+def logic_note_record(
+    rel_tick: int,
+    pitch: int,
+    velocity: int,
+    duration: int,
+    *,
+    flag: int = 0x01,
+    variant: int = 0x40,
+    nudge: int = 0,
+    extension: bool = False,
+) -> bytes:
+    """A 32-byte note event (status 0x90); ``extension`` appends the trailing
+    data record Logic writes for some notes (status bit 0x4000)."""
+    status = 0x90 | (0x4000 if extension else 0)
+    record = (
+        struct.pack("<II", status, _LOGIC_SEQUENCE_ORIGIN + rel_tick)
+        + b"\x00\x80\x24"
+        + bytes([velocity, pitch, 0, 0, flag, variant, 0, 0, 0])
+        + struct.pack("<h", nudge)
+        + b"\x00\x89\x00\x00\x00\x00"
+        + struct.pack("<I", duration)
+    )
+    assert len(record) == 32
+    if extension:
+        record += b"\xe4\xd9\x01\x00" + b"\x00" * 28
+    return record
+
+
+def _logic_marker_record(tick: int, marker_id: int, length: int) -> bytes:
+    return (
+        struct.pack("<II", 0x12, tick)
+        + b"\x00\x00\x00\x00\x00\x00\x00\x01"
+        + struct.pack("<I", marker_id)
+        + b"\x00\x00\x00\x88\x00\x00\x00\x00"
+        + struct.pack("<I", length)
+        + b"\x00\x00\x00\x00\x00\x00\x00\x88"
+        + b"\x00" * 8
+    )
+
+
+def _logic_placement_record(
+    *,
+    audio: bool,
+    tick: int,
+    track: int,
+    lane: int,
+    flags: int,
+    loop_span: int | None,
+    sequence: int = 0,
+    audio_index: int = 0,
+    audio_file: int = 0,
+) -> bytes:
+    span = 0x3FFFFFFF if loop_span is None else loop_span
+    record = (
+        struct.pack("<II", 0x24 if audio else 0x20, tick)
+        + struct.pack("<I", 0 if audio else sequence)
+        + struct.pack("<I", flags)
+        + struct.pack("<I", track)
+        + bytes([lane, 0, 0, 0x89])
+        + b"\x00\x00\x00\x00"
+        + struct.pack("<I", span)
+        + (b"\xff\xff\xff\xff" if audio else struct.pack("<I", sequence))
+        + (b"\x00\x00\x00\xbc" if audio else b"\x00\x00\x00\x88")
+        + struct.pack("<II", audio_index if audio else 0, audio_file if audio else 0)
+        + b"\x00" * 32
+    )
+    assert len(record) == 80
+    return record
+
+
+def _logic_rtf(text: str) -> bytes:
+    body = text.encode("cp1252", errors="replace")
+    escaped = "".join(f"\\'{b:02x}" if b >= 0x80 or chr(b) in "{}\\" else chr(b) for b in body)
+    return (
+        "{\\rtf1\\ansi\\ansicpg1252\\cocoartf2513\n{\\fonttbl\\f0\\fswiss\\fcharset0 Helvetica;}\n"
+        "{\\colortbl;\\red255\\green255\\blue255;}\n\\pard\\tx560\\pardirnatural\\partightenfactor0\n\n"
+        f"\\f0\\fs24 \\cf2 {escaped}}}"
+    ).encode("latin-1")
+
+
+def build_logic_arrangement_project_data(
+    *,
+    tracks: dict[int, str],
+    sequences: list[dict],
+    midi_regions: list[dict],
+    audio_files: dict[int, str] | None = None,
+    audio_regions: list[dict] | None = None,
+    audio_placements: list[dict] | None = None,
+    markers: list[tuple[int, int, str]] | None = None,
+    project_start_bar: int | None = 1,
+    tempo: float = 120.0,
+    version: int = 1,
+) -> bytes:
+    """ProjectData in the object layout logic_project_data decodes.
+
+    ``sequences``: {"id", "name", "notes": [(rel_tick, pitch, velocity, duration)] or
+    prebuilt record bytes, "start": content start ticks, "length": content ticks}.
+    ``midi_regions``: {"bar", "track", "sequence", "loop_bars", "muted", "lane"}.
+    ``audio_regions``: {"file", "index", "name", "offset", "length"}.
+    ``audio_placements``: {"bar", "track", "file", "index", "muted", "lane"}.
+    ``markers``: (bar, marker_id, name). Bars are 1-based arrangement bars.
+    """
+    start_bar = 1 if project_start_bar is None else project_start_bar
+
+    def region_tick(bar: float) -> int:
+        return _LOGIC_PROJECT_START + int(round((bar - start_bar) * _LOGIC_TICKS_PER_BAR))
+
+    header = bytearray(400)
+    struct.pack_into("<II", header, 170, int(round(tempo * 10_000)), int(round(tempo * 10_000)))
+    if project_start_bar is not None:
+        struct.pack_into("<I", header, 364, _LOGIC_SEQUENCE_ORIGIN + (project_start_bar - 1) * _LOGIC_TICKS_PER_BAR)
+    blob = bytes(header)
+
+    for track_id, name in tracks.items():
+        encoded = name.encode("utf-8")
+        payload = b"\x00" * 162 + struct.pack("<H", len(encoded)) + encoded + b"\x00" * 16
+        blob += _logic_object("Envi", payload, kind=5, class_id=0x14, id1=track_id, version=version)
+
+    for spec in sequences:
+        encoded = spec["name"].encode("utf-8")
+        trailer = bytearray(80)
+        struct.pack_into("<I", trailer, 4, spec.get("start", 0))
+        struct.pack_into("<I", trailer, 60, spec["length"])
+        payload = (
+            b"\x00" * 4 + b"\x2e\x03\x01\x00" + b"\x00" * 12
+            + struct.pack("<H", len(encoded)) + encoded + (b"\x00" if len(encoded) & 1 else b"")
+            + bytes(trailer)
+        )
+        blob += _logic_object("MSeq", payload, kind=2, id1=spec["id"], version=version)
+        blob += _logic_object("Trak", b"\x00" * 4, kind=4, id1=spec["id"], version=version, wide_sentinel=True)
+        records = b""
+        for note in spec.get("notes", []):
+            records += note if isinstance(note, bytes) else logic_note_record(*note)
+        blob += _logic_event_sequence(records, id1=spec["id"], id2=spec["id"] + 1000, version=version)
+
+    placements = b""
+    for spec in sorted(midi_regions, key=lambda r: r["bar"]):
+        flags = 0x400 | (0x1000 if spec.get("loop_bars") else 0) | (0x1 if spec.get("muted") else 0)
+        placements += _logic_placement_record(
+            audio=False,
+            tick=region_tick(spec["bar"]),
+            track=spec["track"],
+            lane=spec.get("lane", 1),
+            flags=flags,
+            loop_span=int(spec["loop_bars"] * _LOGIC_TICKS_PER_BAR) if spec.get("loop_bars") else None,
+            sequence=spec["sequence"],
+        )
+    for spec in sorted(audio_placements or [], key=lambda r: r["bar"]):
+        placements += _logic_placement_record(
+            audio=True,
+            tick=region_tick(spec["bar"]),
+            track=spec["track"],
+            lane=spec.get("lane", 1),
+            flags=0x1 if spec.get("muted") else 0,
+            loop_span=None,
+            audio_index=spec.get("index", 0),
+            audio_file=spec["file"],
+        )
+    blob += _logic_object("MSeq", b"\x00" * 20 + b"\x00\x00" + b"\x00" * 80, kind=2, id1=4, version=version)
+    blob += _logic_event_sequence(placements, id1=4, id2=9004, version=version)
+
+    marker_records = b""
+    for bar, marker_id, name in sorted(markers or []):
+        tick = _LOGIC_SEQUENCE_ORIGIN + int(round((bar - 1) * _LOGIC_TICKS_PER_BAR))
+        marker_records += _logic_marker_record(tick, marker_id, _LOGIC_TICKS_PER_BAR)
+        blob += _logic_object("TxSq", b"\x00" * 100 + _logic_rtf(name), kind=1, class_id=0x20, id1=marker_id, version=version)
+    if marker_records:
+        blob += _logic_event_sequence(marker_records, id1=8, id2=9008, version=version)
+
+    for file_id, filename in (audio_files or {}).items():
+        encoded = filename.encode("utf-16-le")
+        payload = b"\x00" * 12 + struct.pack("<H", len(filename)) + encoded + b"\x00" * 8
+        blob += _logic_object("AuFl", payload, kind=1, class_id=0x0B, id1=file_id, version=version)
+    for spec in audio_regions or []:
+        encoded = spec["name"].encode("utf-8")
+        payload = bytearray(78)  # name length lands at object offset 110
+        struct.pack_into("<Q", payload, 10, spec.get("offset", 0))
+        struct.pack_into("<Q", payload, 26, spec["length"])
+        payload += struct.pack("<H", len(encoded)) + encoded + b"\x00" * 8
+        blob += _logic_object(
+            "AuRg", bytes(payload), kind=1, class_id=0x0B, id1=spec["file"], id2=spec.get("index", 0), version=version,
+        )
+    return blob
+
+
 def write_smpte_stamped_wav(
     path: Path,
     *,

@@ -25,6 +25,16 @@ export interface ConversionResult {
   compatibilityWarnings: string[]
 }
 
+// A field-level preview validation failure. `field` is null for errors that
+// aren't tied to one input (e.g. switching destination format), in which
+// case the message is shown as a general notice instead of under a field.
+export type PreviewSettingsField = "tempo" | "smpteStart" | "keepUnwarped" | "timelinePath" | null
+
+export interface PreviewSettingsError {
+  field: PreviewSettingsField
+  message: string
+}
+
 export interface ConversionRecord {
   id: string
   direction: ConversionDirection

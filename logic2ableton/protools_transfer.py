@@ -15,10 +15,12 @@ from logic2ableton.logic_transfer import (
     DecodedAudio,
     _beats_to_frames,
     _clip_export_name,
+    _clip_export_stem,
     _midi_track_name,
     _read_decoded_audio,
     _iter_clip_pcm,
     _safe_name,
+    _stem_with_extension,
     _supports_pcm_render,
 )
 from logic2ableton.models import (
@@ -62,24 +64,28 @@ def _representative_sample_rate(rates: list[int], default: int = 44100) -> int:
 
 def _render_protools_clip_export(
     clip: AbletonAudioClip,
-    destination: Path,
+    destination_stem: Path,
     *,
     tempo: float,
     cache: dict[Path, DecodedAudio | None],
-) -> tuple[str, int | None]:
+) -> tuple[str, int | None, Path]:
     """Render one Ableton clip as a Pro Tools-ready timestamped WAV.
 
     Mirrors logic_transfer's PCM re-render and non-PCM copy-as-reference
     fallback, but always stamps a pure from-zero TimeReference (no offset).
+    The destination filename is chosen from the render outcome (see
+    _clip_export_name's docstring / F11, 2026-09-15 review).
     """
     if clip.source_path is None or not clip.source_path.exists():
-        return "reference-only", None
+        return "reference-only", None, _stem_with_extension(destination_stem, ".wav")
 
     decoded = _read_decoded_audio(clip.source_path, cache)
     if decoded is None:
+        destination = _stem_with_extension(destination_stem, clip.source_path.suffix or ".wav")
         shutil.copy2(clip.source_path, destination)
-        return "copied-source", None
+        return "copied-source", None, destination
 
+    destination = _stem_with_extension(destination_stem, ".wav")
     rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache)
 
     time_reference = _beats_to_frames(clip.start_beats, tempo, decoded.frame_rate)
@@ -91,37 +97,45 @@ def _render_protools_clip_export(
         frames=rendered,
         time_reference_samples=time_reference,
     )
-    return ("timestamped-warp-approximation" if clip.is_warped else "timestamped-wav"), time_reference
+    return ("timestamped-warp-approximation" if clip.is_warped else "timestamped-wav"), time_reference, destination
+
+
+def _logic_audio_export_stem(index: int, ref: AudioFileRef, *, tempo: float, sample_rate: int) -> str:
+    stem = _safe_name(Path(ref.filename).stem, f"clip_{index:03d}")
+    beats = samples_to_beats(ref.start_position_samples, tempo, sample_rate)
+    return f"{index:03d} - {stem} - {beats:09.3f} beats"
 
 
 def _logic_audio_export_name(index: int, ref: AudioFileRef, *, tempo: float, sample_rate: int) -> str:
-    stem = _safe_name(Path(ref.filename).stem, f"clip_{index:03d}")
-    beats = samples_to_beats(ref.start_position_samples, tempo, sample_rate)
     extension = ".wav" if _supports_pcm_render(ref.file_path) else (Path(ref.filename).suffix or ".wav")
-    return f"{index:03d} - {stem} - {beats:09.3f} beats{extension}"
+    return f"{_logic_audio_export_stem(index, ref, tempo=tempo, sample_rate=sample_rate)}{extension}"
 
 
 def _render_protools_logic_audio_export(
     ref: AudioFileRef,
-    destination: Path,
+    destination_stem: Path,
     *,
     cache: dict[Path, DecodedAudio | None],
-) -> tuple[str, int | None]:
+) -> tuple[str, int | None, Path]:
     """Render one Logic-sourced audio file as a Pro Tools-ready timestamped WAV.
 
     Logic's own audio files already represent a single recorded region, so no
     clip-level slicing is needed here - only re-stamping the bext
     TimeReference to the file's start position, which the Logic parser has
     already normalized to be relative to bar 1 (no further offset applied).
+    The destination filename is chosen from the render outcome (see
+    _clip_export_name's docstring / F11, 2026-09-15 review).
     """
     if not ref.file_path.exists():
-        return "reference-only", None
+        return "reference-only", None, _stem_with_extension(destination_stem, ".wav")
 
     decoded = _read_decoded_audio(ref.file_path, cache)
     if decoded is None:
+        destination = _stem_with_extension(destination_stem, ref.file_path.suffix or ".wav")
         shutil.copy2(ref.file_path, destination)
-        return "copied-source", None
+        return "copied-source", None, destination
 
+    destination = _stem_with_extension(destination_stem, ".wav")
     _write_pt_wav_with_bext(
         destination,
         sample_rate=decoded.frame_rate,
@@ -130,7 +144,7 @@ def _render_protools_logic_audio_export(
         frames=decoded.iter_frames(),
         time_reference_samples=ref.start_position_samples,
     )
-    return "timestamped-wav", ref.start_position_samples
+    return "timestamped-wav", ref.start_position_samples, destination
 
 
 def _export_ableton_audio(
@@ -155,14 +169,14 @@ def _export_ableton_audio(
 
         for clip_index, clip in enumerate(track.clips, start=1):
             export_name = _clip_export_name(clip_index, clip)
-            destination = track_dir / export_name
             export_mode = "reference-only"
             time_reference_samples: int | None = None
 
             if copy_audio and clip.source_path is not None and clip.source_path.exists():
-                export_mode, time_reference_samples = _render_protools_clip_export(
-                    clip, destination, tempo=project.tempo, cache=cache,
+                export_mode, time_reference_samples, destination = _render_protools_clip_export(
+                    clip, track_dir / _clip_export_stem(clip_index, clip), tempo=project.tempo, cache=cache,
                 )
+                export_name = destination.name
                 if export_mode != "reference-only":
                     copied_audio_files += 1
                     decoded = cache.get(clip.source_path)
@@ -220,14 +234,15 @@ def _export_logic_audio(
             export_name = _logic_audio_export_name(
                 file_index, ref, tempo=project.tempo, sample_rate=project.sample_rate
             )
-            destination = track_dir / export_name
             export_mode = "reference-only"
             time_reference_samples: int | None = None
 
             if copy_audio and ref.file_path.exists():
-                export_mode, time_reference_samples = _render_protools_logic_audio_export(
-                    ref, destination, cache=cache
+                stem = _logic_audio_export_stem(file_index, ref, tempo=project.tempo, sample_rate=project.sample_rate)
+                export_mode, time_reference_samples, destination = _render_protools_logic_audio_export(
+                    ref, track_dir / stem, cache=cache
                 )
+                export_name = destination.name
                 if export_mode != "reference-only":
                     copied_audio_files += 1
                 if export_mode == "copied-source":

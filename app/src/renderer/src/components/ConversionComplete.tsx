@@ -17,6 +17,7 @@ interface ConversionCompleteProps {
   direction: ConversionDirection
   result: ConversionResult | null
   error: string | null
+  cancelled?: boolean
   onConvertAnother: () => void
 }
 
@@ -26,6 +27,7 @@ export default function ConversionComplete({
   direction,
   result,
   error,
+  cancelled = false,
   onConvertAnother,
 }: ConversionCompleteProps) {
   const [showReport, setShowReport] = useState(false)
@@ -41,12 +43,12 @@ export default function ConversionComplete({
           transition={SPRING}
           className="mx-auto w-full max-w-2xl space-y-4"
         >
-          <section className="rounded-2xl border border-error/70 bg-surface p-6">
+          <section className={`rounded-2xl border bg-surface p-6 ${cancelled ? "border-border" : "border-error/70"}`}>
             <SignalPath direction={routeDirection} />
             <div className="mt-6 flex items-center gap-3">
-              <XCircle size={24} weight="fill" className="text-error" />
+              <XCircle size={24} weight="fill" className={cancelled ? "text-text-secondary" : "text-error"} />
               <div>
-                <h1 className="text-[15px] font-semibold">Conversion failed</h1>
+                <h1 className="text-[15px] font-semibold">{cancelled ? "Conversion cancelled" : "Conversion failed"}</h1>
                 <p className="text-[11px] text-text-tertiary">{routeLabel(routeDirection)}</p>
               </div>
             </div>

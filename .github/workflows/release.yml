@@ -118,7 +118,7 @@ jobs:
             electron_override: ""
             mac_min_os_version: ""
             builder_args: ""
-          - os: macos-14
+          - os: macos-15
             platform: mac
             arch: arm64
             artifact_name: installer-mac-arm64
@@ -127,11 +127,11 @@ jobs:
             electron_override: ""
             mac_min_os_version: ""
             builder_args: ""
-          # This leg is built, smoke-tested, and packaged entirely on the macos-14 runner
+          # This leg is built, smoke-tested, and packaged entirely on the macos-15 runner
           # above, not on real macOS 11 hardware. Green CI here confirms the artifact was
           # produced with the pinned Electron version and minimumSystemVersion, not that it
           # actually launches on macOS 11 — treat that as unverified until checked by hand.
-          - os: macos-14
+          - os: macos-15
             platform: mac
             arch: arm64
             artifact_name: installer-mac-arm64-macos11

@@ -1,5 +1,8 @@
 import json
+import math
+import struct
 import wave
+from pathlib import Path
 
 from conftest import create_test_als, write_test_wav
 
@@ -295,3 +298,97 @@ def test_generate_protools_transfer_flags_missing_source_as_reference_only(tmp_p
     assert clip_row["export_mode"] == "reference-only"
     assert clip_row["source_issue"] == "missing-file-reference"
     assert result.copied_audio_files == 0
+
+
+# F11 (2026-09-15 review): a fallback-copied AIFF must keep its own
+# extension (and bytes), not be labeled ".wav" from the pre-render guess.
+
+def _encode_extended_float80(value: float) -> bytes:
+    if value == 0:
+        return b"\x00" * 10
+    fraction, exponent = math.frexp(abs(value))
+    mantissa = int(fraction * (1 << 64))
+    biased_exponent = exponent + 16382
+    return struct.pack(">H", biased_exponent) + mantissa.to_bytes(8, "big")
+
+
+def _write_multichannel_aiff(path: Path, *, channels: int = 4, frames: int = 4, sample_rate: int = 10) -> Path:
+    """A channel count outside (1, 2) can't be decoded by the PCM renderer,
+    forcing the copy-as-reference fallback."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sound_data = b"\x00\x00" * (frames * channels)
+    comm_payload = struct.pack(">hIh", channels, frames, 16) + _encode_extended_float80(float(sample_rate))
+    ssnd_payload = struct.pack(">II", 0, 0) + sound_data
+    form_payload = (
+        b"AIFF"
+        + b"COMM" + struct.pack(">I", len(comm_payload)) + comm_payload
+        + b"SSND" + struct.pack(">I", len(ssnd_payload)) + ssnd_payload
+    )
+    path.write_bytes(b"FORM" + struct.pack(">I", len(form_payload)) + form_payload)
+    return path
+
+
+def test_generate_protools_transfer_fallback_copy_keeps_source_extension(tmp_path):
+    aiff_path = _write_multichannel_aiff(tmp_path / "Samples" / "Imported" / "multichannel.aiff")
+    track = AbletonTrack(
+        name="Multichannel Track",
+        clips=[
+            AbletonAudioClip(
+                clip_name="Multichannel",
+                track_name="Multichannel Track",
+                source_path=aiff_path,
+                relative_source_path="Samples/Imported/multichannel.aiff",
+                start_beats=0.0,
+                end_beats=1.0,
+            )
+        ],
+    )
+    project = AbletonProject(
+        name="Fallback Demo", tempo=60.0, time_sig_numerator=4, time_sig_denominator=4,
+        audio_tracks=[track], locators=[],
+    )
+
+    result = generate_protools_transfer(project, tmp_path / "output")
+
+    exported = [p for p in (result.package_path / "Audio Files").rglob("*") if p.is_file()]
+    assert len(exported) == 1
+    # The exact name (not just the suffix) guards against a fixed variant of
+    # this bug where Path.with_suffix() misparsed the beats value's own '.'
+    # as an existing suffix and silently truncated "000 beats" off the name.
+    assert exported[0].name == "001 - Multichannel - 00000.000 beats.aiff"
+    assert exported[0].read_bytes()[:4] == b"FORM"
+    for wav_path in result.package_path.rglob("*.wav"):
+        assert wav_path.read_bytes()[:4] == b"RIFF"
+
+
+def test_generate_protools_transfer_from_logic_fallback_copy_keeps_source_extension(tmp_path):
+    aiff_path = _write_multichannel_aiff(tmp_path / "audio" / "MULTI#01.aiff")
+    ref = AudioFileRef(
+        filename="MULTI#01.aiff",
+        track_name="Multi",
+        take_number=1,
+        is_comp=False,
+        comp_name="",
+        file_path=aiff_path,
+        start_position_samples=0,
+    )
+    project = LogicProject(
+        name="Logic Fallback Demo",
+        tempo=120.0,
+        time_sig_numerator=4,
+        time_sig_denominator=4,
+        sample_rate=44100,
+        audio_files=[ref],
+        plugins=[],
+        track_names=["Multi"],
+        alternative=0,
+    )
+
+    result = generate_protools_transfer_from_logic(project, tmp_path / "output")
+
+    exported = [p for p in (result.package_path / "Audio Files").rglob("*") if p.is_file()]
+    assert len(exported) == 1
+    assert exported[0].name == "001 - MULTI#01 - 00000.000 beats.aiff"
+    assert exported[0].read_bytes()[:4] == b"FORM"
+    for wav_path in result.package_path.rglob("*.wav"):
+        assert wav_path.read_bytes()[:4] == b"RIFF"

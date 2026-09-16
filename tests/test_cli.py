@@ -1,3 +1,4 @@
+import argparse
 import gzip
 import subprocess
 import sys
@@ -6,13 +7,26 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from logic2ableton.cli import main
+from logic2ableton.cli import _tempo_argument, main
 from logic2ableton import __version__
 from logic2ableton.models import LogicProject
+from logic2ableton.timeline import MAX_TEMPO_BPM, MIN_TEMPO_BPM
 
 from scripts.fixture_builders import build_logic_project_data, build_synthetic_logicx, write_smpte_stamped_wav
 
 from conftest import TEST_PROJECT, TEST_PROJECT_NAME
+
+
+@pytest.mark.parametrize("bpm", [MIN_TEMPO_BPM, MAX_TEMPO_BPM, 128.5])
+def test_tempo_argument_accepts_live_range(bpm):
+    assert _tempo_argument(str(bpm)) == bpm
+
+
+@pytest.mark.parametrize("bpm", [0.0000001, MIN_TEMPO_BPM - 0.001, MAX_TEMPO_BPM + 0.001, 5000])
+def test_tempo_argument_rejects_outside_live_range(bpm):
+    """Shares its bound with the --timeline loader (F13, 2026-09-15 review)."""
+    with pytest.raises(argparse.ArgumentTypeError):
+        _tempo_argument(str(bpm))
 
 
 @pytest.mark.needs_test_project
@@ -579,7 +593,43 @@ def test_cli_timeline_loaded_and_attached(tmp_path, monkeypatch, capsys):
     assert "Bridge" in captured.out
 
 
-@pytest.mark.parametrize("write_timeline", [None, "missing", "invalid"])
+@pytest.mark.parametrize("json_markers", [False, True])
+def test_cli_timeline_keeps_decoded_markers_unless_it_lists_its_own(tmp_path, monkeypatch, capsys, json_markers):
+    from logic2ableton.timeline import Timeline, TimelineMarker
+
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
+
+    def _decoded_project(*_args, **_kwargs):
+        project = _minimal_project(name="Decoded")
+        project.timeline = Timeline(
+            tempo_events=[], markers=[TimelineMarker(beat=8.0, name="Count")], source_path="Logic project",
+        )
+        return project
+
+    monkeypatch.setattr("logic2ableton.cli.parse_logic_project", _decoded_project)
+    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+
+    spec = {"tempo": [{"bar": 3, "bpm": 90}]}
+    if json_markers:
+        spec["markers"] = [{"bar": 5, "name": "Bridge"}]
+    timeline_path = tmp_path / "timeline.json"
+    timeline_path.write_text(json.dumps(spec))
+
+    exit_code = main([
+        str(project_path), "--output", str(tmp_path / "output"), "--report-only",
+        "--timeline", str(timeline_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "90 BPM" in captured.out
+    assert ("Count" in captured.out) is not json_markers
+    assert ("Bridge" in captured.out) is json_markers
+
+
+@pytest.mark.parametrize("write_timeline", [None, "missing", "invalid", "tiny_bpm", "huge_bpm"])
 def test_cli_timeline_missing_or_invalid_file_exits_1(tmp_path, monkeypatch, write_timeline):
     project_path = tmp_path / "project.logicx"
     project_path.mkdir()
@@ -594,6 +644,15 @@ def test_cli_timeline_missing_or_invalid_file_exits_1(tmp_path, monkeypatch, wri
     if write_timeline == "invalid":
         timeline_path = tmp_path / "timeline.json"
         timeline_path.write_text(json.dumps({"tempo": [{"bar": 1}]}))  # missing 'bpm'
+    elif write_timeline == "tiny_bpm":
+        # 0.0000001 BPM would serialize as Tempo Manual "0" - reject before
+        # any output is created rather than writing an unplayable tempo
+        # (F13, 2026-09-15 review).
+        timeline_path = tmp_path / "timeline.json"
+        timeline_path.write_text(json.dumps({"tempo": [{"bar": 1, "bpm": 0.0000001}]}))
+    elif write_timeline == "huge_bpm":
+        timeline_path = tmp_path / "timeline.json"
+        timeline_path.write_text(json.dumps({"tempo": [{"bar": 1, "bpm": 5000}]}))
     else:
         timeline_path = tmp_path / "missing.json"
 
@@ -605,6 +664,8 @@ def test_cli_timeline_missing_or_invalid_file_exits_1(tmp_path, monkeypatch, wri
     report_path = output_dir / "Broken Timeline_conversion_report.txt"
     assert report_path.exists()
     assert "Stage: timeline" in report_path.read_text(encoding="utf-8")
+    # Timeline validation failed before generation ever ran: no .als output.
+    assert not list(output_dir.rglob("*.als"))
 
 
 def test_cli_batch_two_inputs_produce_two_reports_and_json_lines(tmp_path, capsys):

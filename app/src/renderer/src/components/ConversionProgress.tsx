@@ -1,4 +1,4 @@
-import { Check } from "@phosphor-icons/react"
+import { Check, XCircle } from "@phosphor-icons/react"
 import { motion } from "motion/react"
 import type { ConversionDirection } from "../conversion"
 import { artifactLabel, FORMAT_META, sourceForDirection } from "../conversion"
@@ -10,6 +10,8 @@ interface ConversionProgressProps {
   progress: number
   message: string
   logs: string[]
+  onCancel: () => void
+  cancelling: boolean
 }
 
 const STAGES = ["Validate", "Parse", "Generate", "Done"] as const
@@ -28,6 +30,8 @@ export default function ConversionProgress({
   progress,
   message,
   logs,
+  onCancel,
+  cancelling,
 }: ConversionProgressProps) {
   const activeIndex = activeStageIndex(stage, progress)
   const source = sourceForDirection(direction)
@@ -98,6 +102,16 @@ export default function ConversionProgress({
             )}
           </div>
         </section>
+
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={cancelling}
+          className="flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-surface px-4 py-2.5 text-[13px] text-text-secondary transition-colors hover:border-error/50 hover:text-error disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <XCircle size={16} />
+          {cancelling ? "Cancelling…" : "Cancel conversion"}
+        </button>
       </motion.div>
     </div>
   )

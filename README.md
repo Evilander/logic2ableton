@@ -45,14 +45,15 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 ### Logic to Ableton
 
 - Audio tracks into Ableton Arrangement View
-- Timeline placement from bundled WAV BWF timestamps and Logic AIFF `MARK` chunks
+- Region placement read from the Logic project itself: audio regions land where Logic had them, trimmed to the same slice of their file, on tracks named after the Logic tracks; older saves the decoder cannot read fall back to WAV BWF timestamps and Logic AIFF `MARK` chunks
 - Tempo and time signature
 - Overlap resolution for takes and comp bounces
 - Audio membership follows the selected Logic alternative; unused and unreferenced takes are excluded
 - Distinct per-track colors, with arrangement clips matching their track color
-- MIDI notes decoded from Logic's binary project data land as **native Ableton MIDI tracks** inside the `.als` (and as Standard MIDI file exports), placed at their absolute arrangement positions
-- `--smpte-start` sets the SMPTE time bar 1 plays at (or infers it with `auto`), for projects synced to timecode
-- `--timeline` supplies a tempo map and markers Logic's project file doesn't expose yet; they become Live tempo automation, locators, and warp markers that follow the map (verified by opening the generated set in Live 12.4.3 and reading back its values)
+- MIDI regions decoded from Logic's binary project data land as **native Ableton MIDI tracks** inside the `.als` (and as Standard MIDI file exports): one clip per region at its arrangement position, and looped Logic regions become looping Live clips
+- Logic markers become Live locators; muted regions are left out, as Logic would not play them
+- `--smpte-start` sets the SMPTE time bar 1 plays at (or infers it with `auto`), for projects whose placement comes from audio timestamps
+- `--timeline` supplies a tempo map (and, optionally, markers that replace the decoded ones); it becomes Live tempo automation, locators, and warp markers that follow the map (verified by opening the generated set in Live 12.4.3 and reading back its values)
 - `--keep-unwarped` keeps matching tracks (sync tone, pilot tracks, timecode) as unwarped Live clips so they never stretch when the tempo changes
 - Folder-saved Logic projects (a `.logicx` package next to a sibling `Audio Files` folder) are read the same as package-saved ones
 - Multiple `.logicx` inputs in one run, converted and reported one after another
@@ -96,15 +97,14 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 ### Logic to Ableton
 
 - MIDI notes transfer as native MIDI tracks (and `.mid` exports), but the software instruments, their settings, and MIDI effects are not recreated — reload instruments in Ableton
-- MIDI tracks are named `MIDI 1`, `MIDI 2`, ... (binding Logic's track names to its binary note sequences is still being reverse-engineered)
-- Notes placed before Logic's bar-1 anchor fall back to relative placement, with a warning in the report
-- Older Logic save formats store notes in a binary variant this project cannot decode yet; the report says so explicitly instead of pretending
-- Logic's tempo track and markers are not decoded from the project file yet; supply them with `--timeline`
-- `--smpte-start` must match the project's own synchronization setting (default `01:00:00:00`); the report lists any files it placed at bar 1 because their timestamp precedes it
+- Region placement, loops, track names and markers come from the project's own arrangement data. That decoding was worked out on Logic 10.6 and Logic 11 saves; the report says "Region positions: read from the Logic arrangement" when it applies. Saves it cannot read fall back to audio timestamps, `MIDI 1`, `MIDI 2`, ... track names, and a warning
+- Regions that start before bar 1 are moved to bar 1 (audio is trimmed by the same amount) because a Live arrangement cannot start earlier
+- Logic's tempo track is not decoded (only the project tempo is); supply tempo changes with `--timeline`
+- `--smpte-start` only matters for the timestamp fallback; it must then match the project's own synchronization setting (default `01:00:00:00`), and the report lists any files placed at bar 1 because their timestamp precedes it
 - Automation is not recreated
 - Bus and send routing are not recreated
 - Plugin parameters are not recreated
-- Imported audio without embedded timestamps defaults to bar 1
+- In the timestamp fallback, imported audio without embedded timestamps defaults to bar 1
 - Media outside `Media/Audio Files` is not copied automatically
 - WAV duration detection includes IEEE float recordings. Sources whose duration cannot be read are skipped with a report warning
 
@@ -322,7 +322,7 @@ summary at the end.
 
 ### Timeline JSON
 
-`--timeline` supplies a tempo map and markers that Logic's project file doesn't expose to the parser yet:
+`--timeline` supplies a tempo map, which the parser does not read from Logic's tempo track, and optionally markers. Markers decoded from the project are kept unless the file lists its own, which then replace them:
 
 ```json
 {
