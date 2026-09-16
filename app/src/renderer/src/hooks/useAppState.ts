@@ -10,7 +10,9 @@ export interface PreviewData {
   clips?: number
   audioFiles: number
   plugins?: number
+  midiTracks?: number
   midiNotes?: number
+  compatibilityWarnings: string[]
   report: string
 }
 
@@ -21,6 +23,7 @@ export interface ConversionResult {
   tracks: number
   clips: number
   audioFiles: number
+  midiTracks?: number
   midiNotes?: number
   compatibilityWarnings: string[]
 }
@@ -49,6 +52,7 @@ export interface ConversionRecord {
     tracks: number
     clips?: number
     audioFiles: number
+    midiTracks?: number
     midiNotes?: number
   }
 }

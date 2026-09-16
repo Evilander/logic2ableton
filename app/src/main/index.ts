@@ -10,6 +10,7 @@ interface ConversionStats {
   tracks: number
   clips?: number
   audioFiles: number
+  midiTracks?: number
   midiNotes?: number
 }
 
@@ -280,6 +281,7 @@ function isConversionStats(value: unknown): value is ConversionStats {
   return typeof stats.tracks === "number"
     && typeof stats.audioFiles === "number"
     && (stats.clips === undefined || typeof stats.clips === "number")
+    && (stats.midiTracks === undefined || typeof stats.midiTracks === "number")
     && (stats.midiNotes === undefined || typeof stats.midiNotes === "number")
 }
 

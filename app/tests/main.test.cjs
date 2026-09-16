@@ -109,6 +109,8 @@ function harness(t) {
     cancel: () => handlers.get('cancel-active-job')(),
     reveal: (file) => handlers.get('show-in-folder')({}, file),
     open: (file) => handlers.get('open-file')({}, file),
+    getHistory: () => handlers.get('get-history')(),
+    addHistory: (record) => handlers.get('add-history')({}, record),
     destroy: () => { destroyed = true },
     failNextStart: () => { failStart = true },
     runTimers: (delay) => {
@@ -166,6 +168,29 @@ test('dotted approved directories can be revealed and opened', async (t) => {
   await h.reveal(directory)
   await h.open(directory)
   assert.deepEqual(h.opened, [directory, directory])
+})
+
+test('conversion history round-trips MIDI track and note counts', async (t) => {
+  const h = harness(t)
+  const record = {
+    id: 'abc123',
+    direction: 'logic2ableton',
+    projectName: 'Song',
+    inputPath: 'Song.logicx',
+    outputPath: path.join(h.scratch, 'out', 'Song.als'),
+    date: new Date().toISOString(),
+    status: 'success',
+    report: 'report text',
+    stats: { tracks: 0, clips: 0, audioFiles: 0, midiTracks: 1, midiNotes: 4 },
+  }
+
+  const afterAdd = await h.addHistory(record)
+  assert.equal(afterAdd[0].stats.midiTracks, 1)
+  assert.equal(afterAdd[0].stats.midiNotes, 4)
+
+  const history = await h.getHistory()
+  assert.equal(history[0].stats.midiTracks, 1)
+  assert.equal(history[0].stats.midiNotes, 4)
 })
 
 test('file opening keeps approval and extension restrictions', async (t) => {

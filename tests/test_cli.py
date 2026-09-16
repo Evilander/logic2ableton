@@ -789,6 +789,25 @@ def test_cli_report_only_warns_about_unmatched_keep_unwarped_pattern(tmp_path, c
     assert "'Guitar*' did not match" not in captured.out
 
 
+def test_cli_report_only_includes_midi_totals_for_a_midi_only_project(tmp_path, capsys):
+    """A recoverable MIDI sequence with no audio must still surface in the preview."""
+    blob = build_logic_project_data([[(60, 100, 38400, 960)]])
+    logicx = build_synthetic_logicx(tmp_path, project_data=blob)
+    output_dir = tmp_path / "output"
+
+    exit_code = main([
+        str(logicx), "--output", str(output_dir), "--report-only", "--json-progress",
+    ])
+    lines = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    complete = [line for line in lines if line["stage"] == "complete"][0]
+
+    assert exit_code == 0
+    assert complete["tracks"] == 0
+    assert complete["audio_files"] == 0
+    assert complete["midi_tracks"] == 1
+    assert complete["midi_notes"] == 1
+
+
 def test_cli_smpte_start_qualifier_tells_explicit_from_default(tmp_path, capsys):
     logicx = build_synthetic_logicx(tmp_path, project_data=b"")
     write_smpte_stamped_wav(logicx / "Media" / "Audio Files" / "Guitar#01.wav", smpte_seconds=3600.0, sample_rate=44_100)

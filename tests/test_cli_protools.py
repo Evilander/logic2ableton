@@ -1,7 +1,10 @@
 """CLI integration tests for the Pro Tools lanes."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
+
+import pytest
 
 from scripts.fixture_builders import (
     build_logic_project_data,
@@ -96,6 +99,129 @@ def test_ableton2protools_creates_transfer_package(tmp_path, capsys):
     assert manifest["target"] == "protools"
     assert (package / "IMPORT GUIDE.txt").exists()
     assert payload["tracks"] == 2
+
+
+@pytest.mark.parametrize("mode", ["protools2ableton", "protools2logic"])
+def test_protools_report_only_names_missing_media(tmp_path, capsys, mode):
+    """Preview and conversion must both report missing source media."""
+    ptx = build_synthetic_ptx(tmp_path)
+    # Guitar.wav is referenced by the session but deliberately never written.
+    out_dir = tmp_path / "out"
+
+    preview_rc = main([mode, str(ptx), "--output", str(out_dir), "--report-only", "--json-progress"])
+    preview_lines = _json_lines(capsys)
+    preview_complete = [line for line in preview_lines if line["stage"] == "complete"][0]
+
+    assert preview_rc == 0
+    assert any("Guitar.wav" in w for w in preview_complete["compatibility_warnings"])
+    assert "Guitar.wav [missing]" in preview_complete["report"]
+    assert "1 referenced, 0 found, 1 missing, 0 skipped" in preview_complete["report"]
+    assert Path(preview_complete["report_path"]).read_text(encoding="utf-8") == preview_complete["report"]
+
+    conversion_rc = main([mode, str(ptx), "--output", str(out_dir), "--json-progress"])
+    conversion_lines = _json_lines(capsys)
+    conversion_complete = [line for line in conversion_lines if line["stage"] == "complete"][0]
+
+    assert conversion_rc == 0
+    assert any("Guitar.wav" in w for w in conversion_complete["compatibility_warnings"])
+    assert set(preview_complete["compatibility_warnings"]) <= set(conversion_complete["compatibility_warnings"])
+
+
+@pytest.mark.parametrize("mode", ["protools2ableton", "protools2logic"])
+def test_protools_preflight_failure_returns_a_structured_error(tmp_path, capsys, monkeypatch, mode):
+    source = build_synthetic_ptx(tmp_path)
+
+    def fail_resolution(session):
+        raise PermissionError("source directory is unreadable")
+
+    monkeypatch.setattr("logic2ableton.cli.resolve_protools_media", fail_resolution)
+    assert main([mode, str(source), "--output", str(tmp_path / "out"), "--report-only", "--json-progress"]) == 1
+    complete = _json_lines(capsys)[-1]
+    assert complete["stage"] == "error"
+    assert "source directory is unreadable" in complete["message"]
+
+
+@pytest.mark.parametrize("mode", ["protools2ableton", "protools2logic"])
+def test_protools_preview_counts_merged_tracks_and_nonempty_midi(tmp_path, capsys, monkeypatch, mode):
+    from logic2ableton.protools_parser import ProToolsMidiTrack, parse_protools_session
+
+    ptx = build_synthetic_ptx(tmp_path)
+    write_test_wav(ptx.parent / "Audio Files" / "Guitar.wav", frames=118050, sample_rate=48000)
+    session = parse_protools_session(ptx)
+    session.tracks.append(deepcopy(session.tracks[0]))
+    session.midi_tracks.append(ProToolsMidiTrack(name="Empty", notes=[]))
+    monkeypatch.setattr("logic2ableton.cli.parse_protools_session", lambda _: session)
+    args = [mode, str(ptx), "--output", str(tmp_path / "out"), "--json-progress"]
+
+    assert main([*args, "--report-only"]) == 0
+    preview = _json_lines(capsys)[-1]
+    assert main(args) == 0
+    complete = _json_lines(capsys)[-1]
+
+    for event in (preview, complete):
+        assert event["tracks"] == 1
+        assert event["clips"] == 1
+        assert event["midi_tracks"] == 1
+        assert event["midi_notes"] == 2
+
+
+@pytest.mark.parametrize("mode", [
+    "logic2ableton", "logic2protools", "ableton2logic", "ableton2protools",
+    "protools2ableton", "protools2logic",
+])
+def test_mixed_preview_and_conversion_use_the_same_track_counts(tmp_path, capsys, mode):
+    from logic2ableton.ableton_generator import generate_als
+    from logic2ableton.logic_parser import parse_logic_project
+
+    if mode.startswith("protools"):
+        source = build_synthetic_ptx(tmp_path)
+        write_test_wav(source.parent / "Audio Files" / "Guitar.wav", frames=118050, sample_rate=48000)
+        notes = 2
+    else:
+        blob = build_logic_project_data([[(60, 100, 38400, 960)]])
+        source = build_synthetic_logicx(tmp_path, project_data=blob)
+        write_test_wav(source / "Media" / "Audio Files" / "Guitar.wav")
+        if mode.startswith("ableton"):
+            source = generate_als(parse_logic_project(source), tmp_path / "live")
+        notes = 1
+    args = [mode, str(source), "--output", str(tmp_path / "out"), "--json-progress"]
+    assert main([*args, "--report-only"]) == 0
+    preview = _json_lines(capsys)[-1]
+    assert main(args) == 0
+    complete = _json_lines(capsys)[-1]
+
+    for event in (preview, complete):
+        assert event["tracks"] == 1
+        assert event["midi_tracks"] == 1
+        assert event["midi_notes"] == notes
+
+
+@pytest.mark.parametrize("mode", ["logic2ableton", "protools2ableton"])
+def test_native_midi_count_survives_a_failed_sidecar_export(tmp_path, capsys, monkeypatch, mode):
+    import gzip
+    import xml.etree.ElementTree as ET
+
+    if mode == "protools2ableton":
+        source = build_synthetic_ptx(tmp_path)
+    else:
+        blob = build_logic_project_data([[(60, 100, 38400, 960)]])
+        source = build_synthetic_logicx(tmp_path, project_data=blob)
+    original_write = Path.write_bytes
+
+    def fail_midi_write(path, data):
+        if path.suffix == ".mid":
+            raise PermissionError("MIDI sidecar is read-only")
+        return original_write(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_midi_write)
+    assert main([mode, str(source), "--output", str(tmp_path / "out"), "--json-progress"]) == 0
+    complete = _json_lines(capsys)[-1]
+    with gzip.open(complete["als_path"]) as handle:
+        root = ET.parse(handle).getroot()
+    assert len(root.findall(".//MidiTrack")) == 1
+    assert complete["midi_tracks"] == 1
+    assert complete["midi_files"] == 0
+    assert any("MIDI export failed" in warning for warning in complete["compatibility_warnings"])
 
 
 def test_logic2protools_report_only(tmp_path, capsys, monkeypatch):

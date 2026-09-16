@@ -334,7 +334,8 @@ def test_midi_export_failure_preserves_successful_files_and_warns(tmp_path, monk
     monkeypatch.setattr(Path, "write_bytes", write)
     assert main(["logic2ableton", str(bundle), "--output", str(tmp_path / "out"), "--json-progress"]) == 0
     payload = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert payload["midi_tracks"] == 1
+    assert payload["midi_tracks"] == 2
+    assert payload["midi_files"] == 1
     assert "simulated MIDI write failure" in payload["report"]
     assert len(list((Path(payload["als_path"]).parent / "MIDI").glob("*.mid"))) == 1
 

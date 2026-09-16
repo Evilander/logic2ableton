@@ -11,6 +11,7 @@ from logic2ableton.protools_import import (
     build_protools_import_report,
     protools_to_ableton_project,
     protools_to_logic_project,
+    resolve_protools_media,
 )
 from logic2ableton.protools_parser import (
     ProToolsMidiNote,
@@ -121,6 +122,73 @@ def test_import_to_ableton_project_positions_are_tempo_consistent(tmp_path):
     assert round(clip.start_beats * 60 * sr / project.tempo) == 48000
     assert round(clip.source_in_beats * 60 * sr / project.tempo) == 100
     assert round(clip.duration_beats * 60 * sr / project.tempo) == 24000
+
+
+def test_resolve_protools_media_names_missing_file(tmp_path):
+    session = _stereo_session(tmp_path)
+    preflight = resolve_protools_media(session)
+
+    assert preflight.referenced_files == ["Keys.wav"]
+    assert preflight.missing_files == ["Keys.wav"]
+    assert preflight.found_files == []
+    assert any("not found" in w and "Keys.wav" in w for w in preflight.warnings)
+
+
+def test_resolve_protools_media_reports_found_file(tmp_path):
+    session = _stereo_session(tmp_path)
+    audio_dir = tmp_path / "Audio Files"
+    audio_dir.mkdir()
+    (audio_dir / "Keys.wav").write_bytes(b"RIFF____WAVEfmt ")
+
+    preflight = resolve_protools_media(session)
+
+    assert preflight.missing_files == []
+    assert preflight.found_files == ["Keys.wav"]
+    assert preflight.warnings == []
+
+
+@pytest.mark.parametrize("filename", ["../Keys.wav", "Keys.exe"])
+def test_resolve_protools_media_does_not_count_skipped_references_as_found(tmp_path, filename):
+    session = _stereo_session(tmp_path)
+    for track in session.tracks:
+        track.regions[0].filename = filename
+    preflight = resolve_protools_media(session)
+
+    assert preflight.referenced_files == [filename]
+    assert preflight.found_files == []
+    assert filename not in preflight.resolved_files
+    assert preflight.warnings
+
+
+def test_resolve_protools_media_does_not_count_a_directory_as_found(tmp_path):
+    session = _stereo_session(tmp_path)
+    (tmp_path / "Audio Files" / "Keys.wav").mkdir(parents=True)
+    preflight = resolve_protools_media(session)
+
+    assert preflight.found_files == []
+    assert preflight.missing_files == ["Keys.wav"]
+
+
+def test_mappers_reuse_a_shared_preflight_without_rechecking_disk(tmp_path, monkeypatch):
+    """protools_to_logic_project and protools_to_ableton_project must agree with
+    whatever preflight the caller already resolved, matching what the CLI's
+    report-only branch and its conversion branch now share.
+    """
+    session = _stereo_session(tmp_path)
+    preflight = resolve_protools_media(session)
+
+    def unexpected_resolution(*args):
+        raise AssertionError("media paths were resolved again")
+
+    monkeypatch.setattr("logic2ableton.protools_import._source_audio_path", unexpected_resolution)
+
+    logic_project = protools_to_logic_project(session, tempo=120.0, preflight=preflight)
+    ableton_project = protools_to_ableton_project(session, tempo=120.0, preflight=preflight)
+
+    assert any("Keys.wav" in w for w in logic_project.compatibility_warnings)
+    assert any("Keys.wav" in w for w in ableton_project.compatibility_warnings)
+    (clip,) = ableton_project.audio_tracks[0].clips
+    assert clip.source_issue == "missing-file-reference"
 
 
 def test_import_report_mentions_session_and_limits(tmp_path):

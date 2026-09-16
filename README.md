@@ -290,6 +290,15 @@ logic2ableton "/path/to/MySong.logicx" --output ./output --json-progress
 ableton2logic "/path/to/MySet.als" --output ./output --json-progress
 ```
 
+Progress events report audio counts (`tracks`, `clips`, `audio_files`) separately
+from `midi_tracks` and `midi_notes`. Previews include recovered MIDI content.
+For Ableton output, the completion event's `midi_tracks` counts native tracks in
+the set; `midi_files` separately counts exported `.mid` sidecars.
+
+Pro Tools previews check referenced audio on disk. The report lists found,
+missing, and skipped sources, and `compatibility_warnings` names missing media
+before conversion begins. These notes also appear in the desktop preview.
+
 ## CLI Options
 
 Every lane's input argument accepts one or more paths. Pass several to convert

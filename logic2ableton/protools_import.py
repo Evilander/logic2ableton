@@ -15,6 +15,7 @@ correct real-time positions - the warning spells that out.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from logic2ableton.audio import AUDIO_SUFFIXES
@@ -103,21 +104,81 @@ def _tempo_warning(tempo: float) -> str:
     )
 
 
+@dataclass
+class ProToolsMediaPreflight:
+    """Resolved audio-media state for a Pro Tools session.
+
+    Built once from the session's regions so the report-only preview and the
+    real conversion agree on which referenced files are missing, instead of
+    the preview trusting declared filenames and the conversion checking disk.
+    """
+    referenced_files: list[str] = field(default_factory=list)
+    resolved_files: dict[str, Path] = field(default_factory=dict)
+    missing_files: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def found_files(self) -> list[str]:
+        missing = set(self.missing_files)
+        return sorted(name for name in self.resolved_files if name not in missing)
+
+
+def resolve_protools_media(session: ProToolsSession) -> ProToolsMediaPreflight:
+    """Resolve every region's source audio against disk once.
+
+    Both ``protools_to_logic_project`` and ``protools_to_ableton_project`` accept
+    the result so they don't repeat this check, and the CLI's report-only branch
+    uses it directly so a missing file is named in the preview, not just at
+    conversion time.
+    """
+    audio_dir = _resolve_audio_dir(session)
+    warnings: list[str] = []
+    referenced: set[str] = set()
+    resolved: dict[str, Path] = {}
+    missing: list[str] = []
+    for track in _merge_stereo_lanes(session.tracks):
+        for region in track.regions:
+            if not region.filename or region.filename in referenced:
+                continue
+            referenced.add(region.filename)
+            file_path = _source_audio_path(audio_dir, region.filename, warnings)
+            if file_path is None:
+                continue
+            resolved[region.filename] = file_path
+            if not file_path.is_file():
+                missing.append(region.filename)
+
+    unique_missing = sorted(set(missing))
+    if unique_missing:
+        examples = ", ".join(unique_missing[:5]) + (", ..." if len(unique_missing) > 5 else "")
+        warnings.append(
+            f"{len(unique_missing)} source audio file(s) were not found in {audio_dir.name}/ "
+            f"next to the session; their clips reference missing media: {examples}"
+        )
+
+    return ProToolsMediaPreflight(
+        referenced_files=sorted(referenced),
+        resolved_files=resolved,
+        missing_files=unique_missing,
+        warnings=warnings,
+    )
+
+
 def protools_to_logic_project(
     session: ProToolsSession,
     *,
     tempo: float | None = None,
+    preflight: ProToolsMediaPreflight | None = None,
 ) -> LogicProject:
     """Build a LogicProject view of a Pro Tools session for the Ableton generator."""
     tempo_value = tempo or DEFAULT_PROTOOLS_TEMPO
-    audio_dir = _resolve_audio_dir(session)
+    media = preflight if preflight is not None else resolve_protools_media(session)
     warnings = list(session.compatibility_warnings)
     warnings.append(_tempo_warning(tempo_value))
 
     tracks = _merge_stereo_lanes(session.tracks)
     audio_refs: list[AudioFileRef] = []
     track_names: list[str] = []
-    missing: list[str] = []
     for track in tracks:
         if not track.regions:
             continue
@@ -125,11 +186,9 @@ def protools_to_logic_project(
         for region in track.regions:
             if not region.filename:
                 continue
-            file_path = _source_audio_path(audio_dir, region.filename, warnings)
+            file_path = media.resolved_files.get(region.filename)
             if file_path is None:
                 continue
-            if not file_path.exists():
-                missing.append(region.filename)
             audio_refs.append(
                 AudioFileRef(
                     filename=region.filename,
@@ -146,13 +205,7 @@ def protools_to_logic_project(
                 )
             )
 
-    if missing:
-        unique = sorted(set(missing))
-        examples = ", ".join(unique[:5]) + (", ..." if len(unique) > 5 else "")
-        warnings.append(
-            f"{len(unique)} source audio file(s) were not found in {audio_dir.name}/ "
-            f"next to the session; their clips reference missing media: {examples}"
-        )
+    warnings.extend(media.warnings)
 
     midi_tracks = [
         LogicMidiTrack(
@@ -190,6 +243,7 @@ def protools_to_ableton_project(
     session: ProToolsSession,
     *,
     tempo: float | None = None,
+    preflight: ProToolsMediaPreflight | None = None,
 ) -> AbletonProject:
     """Build an AbletonProject view of a Pro Tools session for the Logic package lane.
 
@@ -197,7 +251,8 @@ def protools_to_ableton_project(
     inside the Logic transfer renderer regardless of the tempo chosen.
     """
     tempo_value = tempo or DEFAULT_PROTOOLS_TEMPO
-    audio_dir = _resolve_audio_dir(session)
+    media = preflight if preflight is not None else resolve_protools_media(session)
+    missing_files = set(media.missing_files)
     warnings = list(session.compatibility_warnings)
     warnings.append(_tempo_warning(tempo_value))
 
@@ -206,19 +261,15 @@ def protools_to_ableton_project(
 
     tracks = _merge_stereo_lanes(session.tracks)
     audio_tracks: list[AbletonTrack] = []
-    missing: list[str] = []
     for track in tracks:
         clips: list[AbletonAudioClip] = []
         for region in track.regions:
             if not region.filename:
                 continue
-            file_path = _source_audio_path(audio_dir, region.filename, warnings)
+            file_path = media.resolved_files.get(region.filename)
             if file_path is None:
                 continue
-            source_issue = None
-            if not file_path.exists():
-                missing.append(region.filename)
-                source_issue = "missing-file-reference"
+            source_issue = "missing-file-reference" if region.filename in missing_files else None
             start_beats = to_beats(region.start_samples)
             clips.append(
                 AbletonAudioClip(
@@ -236,13 +287,7 @@ def protools_to_ableton_project(
         if clips:
             audio_tracks.append(AbletonTrack(name=track.name, clips=clips))
 
-    if missing:
-        unique = sorted(set(missing))
-        examples = ", ".join(unique[:5]) + (", ..." if len(unique) > 5 else "")
-        warnings.append(
-            f"{len(unique)} source audio file(s) were not found in {audio_dir.name}/ "
-            f"next to the session; their clips reference missing media: {examples}"
-        )
+    warnings.extend(media.warnings)
 
     midi_tracks: list[AbletonMidiTrack] = []
     for track in session.midi_tracks:
@@ -279,8 +324,12 @@ def protools_to_ableton_project(
     )
 
 
-def build_protools_import_report(session: ProToolsSession, *, destination: str, tempo: float) -> str:
+def build_protools_import_report(
+    session: ProToolsSession, *, destination: str, tempo: float,
+    preflight: ProToolsMediaPreflight | None = None,
+) -> str:
     """Human-readable report for a Pro Tools import conversion."""
+    media = preflight if preflight is not None else resolve_protools_media(session)
     lines = []
     lines.append("=" * 60)
     lines.append(f"  Pro Tools to {destination} Conversion Report")
@@ -298,16 +347,28 @@ def build_protools_import_report(session: ProToolsSession, *, destination: str, 
         lines.append(f"  {i}. {track.name} - {len(track.regions)} clip(s)")
     lines.append("")
 
-    if session.midi_tracks:
+    midi_tracks = [track for track in session.midi_tracks if track.note_count > 0]
+    if midi_tracks:
         total_notes = session.total_midi_notes
-        lines.append(f"MIDI TRACKS ({len(session.midi_tracks)}, {total_notes} notes):")
-        for i, track in enumerate(session.midi_tracks, 1):
+        lines.append(f"MIDI TRACKS ({len(midi_tracks)}, {total_notes} notes):")
+        for i, track in enumerate(midi_tracks, 1):
             lines.append(f"  {i}. {track.name} - {track.note_count} note(s)")
         lines.append("")
 
-    lines.append(f"SOURCE AUDIO FILES ({len(session.audio_files)}):")
-    for wav in session.audio_files:
-        lines.append(f"  - {wav.filename}")
+    skipped = len(media.referenced_files) - len(media.resolved_files)
+    lines.append(
+        f"SOURCE AUDIO FILES ({len(media.referenced_files)} referenced, "
+        f"{len(media.found_files)} found, {len(media.missing_files)} missing, {skipped} skipped):"
+    )
+    missing = set(media.missing_files)
+    for filename in media.referenced_files:
+        status = "missing" if filename in missing else "found" if filename in media.resolved_files else "skipped"
+        lines.append(f"  - {filename} [{status}]")
+    lines.append("")
+
+    lines.append("COMPATIBILITY NOTES:")
+    for warning in [*session.compatibility_warnings, _tempo_warning(tempo), *media.warnings]:
+        lines.append(f"  - {warning}")
     lines.append("")
 
     lines.append("NOT TRANSFERRED:")

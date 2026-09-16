@@ -155,7 +155,9 @@ export default function App() {
           clips: event.clips,
           audioFiles: event.audio_files ?? 0,
           plugins: event.plugins,
+          midiTracks: event.midi_tracks,
           midiNotes: event.midi_notes,
+          compatibilityWarnings: event.compatibility_warnings ?? [],
           report: event.report ?? "",
         })
         setPreviewLoading(false)
@@ -404,6 +406,7 @@ export default function App() {
             tracks: event.tracks ?? 0,
             clips: event.clips ?? 0,
             audioFiles: event.audio_files ?? 0,
+            midiTracks: event.midi_tracks,
             midiNotes: event.midi_notes,
             compatibilityWarnings,
           })
@@ -423,6 +426,7 @@ export default function App() {
               tracks: event.tracks ?? 0,
               clips: event.clips,
               audioFiles: event.audio_files ?? 0,
+              midiTracks: event.midi_tracks,
               midiNotes: event.midi_notes,
             },
           })
@@ -494,6 +498,7 @@ export default function App() {
         tracks: record.stats?.tracks ?? 0,
         clips: record.stats?.clips ?? 0,
         audioFiles: record.stats?.audioFiles ?? 0,
+        midiTracks: record.stats?.midiTracks,
         midiNotes: record.stats?.midiNotes,
         compatibilityWarnings: record.compatibilityWarnings ?? [],
       })

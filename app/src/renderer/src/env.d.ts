@@ -56,6 +56,7 @@ interface ConversionRecord {
     tracks: number
     clips?: number
     audioFiles: number
+    midiTracks?: number
     midiNotes?: number
   }
 }

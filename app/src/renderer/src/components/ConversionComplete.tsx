@@ -73,14 +73,21 @@ export default function ConversionComplete({
 
   const outputLabel = artifactLabel(result.direction)
   const warnings = result.compatibilityWarnings
-  const thirdStat = (result.midiNotes ?? 0) > 0
-    ? { value: result.midiNotes ?? 0, label: "MIDI notes" }
-    : { value: result.audioFiles, label: "Audio files" }
-  const stats = [
-    { value: result.tracks, label: "Tracks" },
-    { value: result.clips, label: "Clips" },
-    thirdStat,
-  ]
+  const hasMidi = (result.midiTracks ?? 0) > 0
+  const stats = hasMidi
+    ? [
+        { value: result.tracks, label: "Audio tracks" },
+        { value: result.midiTracks ?? 0, label: "MIDI tracks" },
+        { value: result.clips, label: "Audio clips" },
+        { value: result.midiNotes ?? 0, label: "MIDI notes" },
+      ]
+    : [
+        { value: result.tracks, label: "Tracks" },
+        { value: result.clips, label: "Clips" },
+        (result.midiNotes ?? 0) > 0
+          ? { value: result.midiNotes ?? 0, label: "MIDI notes" }
+          : { value: result.audioFiles, label: "Audio files" },
+      ]
 
   return (
     <div className="flex-1 overflow-y-auto px-8 pb-10 pt-8">
@@ -101,7 +108,7 @@ export default function ConversionComplete({
             </div>
           </div>
 
-          <div className="mt-5 grid grid-cols-3 gap-3">
+          <div className={`mt-5 grid gap-3 ${stats.length > 3 ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3"}`}>
             {stats.map((stat) => (
               <div key={stat.label} className="rounded-xl border border-border bg-bg/70 px-3 py-3 text-center">
                 <div className="font-mono text-xl font-semibold text-text-primary">{stat.value}</div>

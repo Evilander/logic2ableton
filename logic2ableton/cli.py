@@ -25,6 +25,7 @@ from logic2ableton.protools_import import (
     build_protools_import_report,
     protools_to_ableton_project,
     protools_to_logic_project,
+    resolve_protools_media,
 )
 from logic2ableton.protools_parser import parse_protools_session
 from logic2ableton.protools_transfer import (
@@ -671,6 +672,7 @@ def _run_forward(args: argparse.Namespace) -> int:
                 compatibility_warnings=project.compatibility_warnings,
             )
         if jp:
+            midi_track_count = sum(1 for track in project.midi_tracks if track.note_count > 0)
             _emit(
                 "complete",
                 1.0,
@@ -683,6 +685,8 @@ def _run_forward(args: argparse.Namespace) -> int:
                 tracks=len(project.track_names),
                 audio_files=len(project.audio_files),
                 plugins=len(project.plugins),
+                midi_tracks=midi_track_count,
+                midi_notes=project.total_midi_notes,
                 compatibility_warnings=project.compatibility_warnings,
             )
         else:
@@ -739,7 +743,8 @@ def _run_forward(args: argparse.Namespace) -> int:
             tracks=len(project.track_names),
             clips=clip_count,
             audio_files=audio_count,
-            midi_tracks=midi_files,
+            midi_tracks=sum(1 for track in project.midi_tracks if track.note_count > 0),
+            midi_files=midi_files,
             midi_notes=project.total_midi_notes,
             compatibility_warnings=project.compatibility_warnings,
             **({"warning": warning} if warning else {}),
@@ -1016,7 +1021,16 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
         )
 
     try:
-        report = build_protools_import_report(session, destination=destination, tempo=tempo)
+        # Share resolved media and counts between preview and conversion.
+        media_preflight = resolve_protools_media(session)
+        project = (
+            protools_to_logic_project(session, tempo=args.tempo, preflight=media_preflight)
+            if to_ableton else
+            protools_to_ableton_project(session, tempo=args.tempo, preflight=media_preflight)
+        )
+        report = build_protools_import_report(
+            session, destination=destination, tempo=tempo, preflight=media_preflight,
+        )
     except Exception as exc:
         return _emit_failure(
             mode=mode,
@@ -1067,12 +1081,12 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
                 artifact_path=str(report_path),
                 report=report,
                 report_path=str(report_path),
-                tracks=len(session.tracks),
-                clips=session.total_regions,
-                audio_files=len(session.audio_files),
-                midi_tracks=len(session.midi_tracks),
-                midi_notes=session.total_midi_notes,
-                compatibility_warnings=session.compatibility_warnings,
+                tracks=len(project.track_names) if to_ableton else len(project.audio_tracks),
+                clips=len(project.audio_files) if to_ableton else len(project.clips),
+                audio_files=len(media_preflight.referenced_files),
+                midi_tracks=sum(1 for track in project.midi_tracks if track.note_count > 0),
+                midi_notes=project.total_midi_notes,
+                compatibility_warnings=project.compatibility_warnings,
             )
         else:
             print(f"\nReport: {report_path}")
@@ -1084,7 +1098,6 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
         print(f"\nGenerating {destination} output in {output_dir}...")
 
     if to_ableton:
-        project = protools_to_logic_project(session, tempo=args.tempo)
         template_path = Path(args.template) if args.template else None
         try:
             als_path = generate_als(
@@ -1127,7 +1140,8 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
                 tracks=len(project.track_names),
                 clips=clip_count,
                 audio_files=audio_count,
-                midi_tracks=midi_files,
+                midi_tracks=sum(1 for track in project.midi_tracks if track.note_count > 0),
+                midi_files=midi_files,
                 midi_notes=project.total_midi_notes,
                 compatibility_warnings=project.compatibility_warnings,
                 **({"warning": warning} if warning else {}),
@@ -1144,7 +1158,6 @@ def _run_protools_import(args: argparse.Namespace, mode: str) -> int:
             print("\nDone!")
         return 0
 
-    project = protools_to_ableton_project(session, tempo=args.tempo)
     try:
         transfer = generate_logic_transfer(project, output_dir, copy_audio=not args.no_copy)
     except Exception as exc:

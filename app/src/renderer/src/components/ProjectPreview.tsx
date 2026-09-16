@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ArrowRight, FolderOpen, MusicNote, MusicNotes, Plugs, Waveform, X } from "@phosphor-icons/react"
+import { ArrowRight, FolderOpen, MusicNote, MusicNotes, Plugs, Warning, Waveform, X } from "@phosphor-icons/react"
 import { motion } from "motion/react"
 import type { ConversionDirection } from "../conversion"
 import {
@@ -109,18 +109,22 @@ export default function ProjectPreview({
     if (trimmed !== keepUnwarped) onKeepUnwarpedChange(trimmed)
   }
 
+  const hasMidi = (preview?.midiTracks ?? 0) > 0
   const cards = preview
     ? [
-        { label: "Tracks", value: preview.tracks, icon: MusicNote },
+        hasMidi
+          ? { label: "Audio tracks", value: preview.tracks, icon: MusicNote }
+          : { label: "Tracks", value: preview.tracks, icon: MusicNote },
+        hasMidi ? { label: "MIDI tracks", value: preview.midiTracks ?? 0, icon: MusicNotes } : null,
         preview.clips !== undefined
-          ? { label: "Clips", value: preview.clips, icon: Waveform }
+          ? { label: hasMidi ? "Audio clips" : "Clips", value: preview.clips, icon: Waveform }
           : { label: "Audio files", value: preview.audioFiles, icon: Waveform },
-        (preview.midiNotes ?? 0) > 0
+        hasMidi || (preview.midiNotes ?? 0) > 0
           ? { label: "MIDI notes", value: preview.midiNotes ?? 0, icon: MusicNotes }
           : preview.plugins !== undefined
             ? { label: "Plugins", value: preview.plugins, icon: Plugs }
             : { label: "Audio files", value: preview.audioFiles, icon: Waveform },
-      ]
+      ].filter((card): card is { label: string; value: number; icon: typeof MusicNote } => card !== null)
     : []
 
   return (
@@ -336,7 +340,7 @@ export default function ProjectPreview({
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-3 gap-3">
+            <div className={`grid gap-3 ${cards.length > 3 ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3"}`}>
               {cards.map(({ label, value, icon: Icon }) => (
                 <div key={label} className="rounded-xl border border-border bg-surface p-4">
                   <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-[0.08em] text-text-secondary">
@@ -347,6 +351,20 @@ export default function ProjectPreview({
                 </div>
               ))}
             </div>
+
+            {preview.compatibilityWarnings.length > 0 && (
+              <div className="rounded-xl border border-gold/45 bg-gold/5 p-4">
+                <div className="mb-2 flex items-center gap-2 text-[13px] font-medium text-gold">
+                  <Warning size={17} weight="fill" />
+                  Compatibility notes
+                </div>
+                <ul className="space-y-2 pl-5 text-[11px] leading-relaxed text-stone">
+                  {preview.compatibilityWarnings.map((warning, index) => (
+                    <li key={`${index}-${warning}`} className="list-disc">{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             <div className="rounded-xl border border-border bg-surface p-4">
               <div className="flex items-center justify-between gap-4">
