@@ -178,3 +178,42 @@ def test_generation_failure_is_written_into_the_saved_report(tmp_path, capsys):
     saved = Path(event["report_path"]).read_text(encoding="utf-8")
     assert "CONVERSION FAILED" in saved and "No AudioTrack found" in saved
     assert "TRACKS TRANSFERRED" in saved  # the analysis report is kept
+
+
+def test_undo_history_snapshots_are_not_read_as_the_current_arrangement(tmp_path):
+    """Logic keeps undo history in the save: extra Song objects followed by old copies of
+    whatever each step changed. Only the state before the second Song is current."""
+    old_state = dict(
+        tracks={1: "Gtr old name"},
+        sequences=[{"id": 44, "name": "Riff", "length": 3840, "notes": [(0, 40, 90, 240), (960, 41, 90, 240)]}],
+        midi_regions=[{"bar": 9, "track": 2, "sequence": 44, "lane": 2}],
+        audio_files={10: "Guitar.wav"},
+        audio_regions=[{"file": 10, "index": 0, "name": "Old trim", "offset": 0, "length": RATE}],
+        audio_placements=[{"bar": 5, "track": 1, "file": 10, "lane": 1}],
+        markers=[(17, 12, "Old marker")],
+    )
+    data = build_logic_arrangement_project_data(
+        tracks={1: "Guitar", 2: "Keys"},
+        sequences=[{"id": 44, "name": "Riff", "length": 3840, "notes": [(0, 60, 100, 240)]}],
+        midi_regions=[{"bar": 2, "track": 2, "sequence": 44, "lane": 2}],
+        audio_files={10: "Guitar.wav"},
+        audio_regions=[{"file": 10, "index": 0, "name": "Middle", "offset": 2 * RATE, "length": 2 * RATE}],
+        audio_placements=[{"bar": 3, "track": 1, "file": 10, "lane": 1}],
+        markers=[(5, 12, "Verse")],
+        history=[old_state, old_state, old_state],
+    )
+    arrangement = decode_project_data(data)
+    assert arrangement.history_steps == 3
+    assert len(arrangement.regions) == 2
+    assert arrangement.track_names == {1: "Guitar", 2: "Keys"}
+
+    logicx = build_synthetic_logicx(tmp_path / "source", project_data=data)
+    _three_level_wav(logicx / "Media" / "Audio Files" / "Guitar.wav")
+    project = parse_logic_project(logicx)
+
+    assert [(c.track_name, c.clip_name, c.start_beats, c.content_offset_samples) for c in project.audio_files] == [
+        ("Guitar", "Middle", 8.0, 2 * RATE),
+    ]
+    assert [(t.name, len(t.regions), t.regions[0].start_beats) for t in project.midi_tracks] == [("Keys", 1, 4.0)]
+    assert [(n.pitch, n.start_beats) for n in project.midi_tracks[0].notes] == [(60, 4.0)]
+    assert [(m.beat, m.name) for m in project.timeline.markers] == [(16.0, "Verse")]

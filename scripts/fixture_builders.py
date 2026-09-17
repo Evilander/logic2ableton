@@ -295,8 +295,14 @@ def build_logic_arrangement_project_data(
     project_start_bar: int | None = 1,
     tempo: float = 120.0,
     version: int = 1,
+    history: list[dict] | None = None,
 ) -> bytes:
     """ProjectData in the object layout logic_project_data decodes.
+
+    ``history``: undo-history steps appended after the current state, as Logic
+    saves them: each dict takes the same keys as this function (tracks,
+    sequences, midi_regions, audio_*, markers) and is written as a further
+    Song object followed by those old object copies.
 
     ``sequences``: {"id", "name", "notes": [(rel_tick, pitch, velocity, duration)] or
     prebuilt record bytes, "start": content start ticks, "length": content ticks}.
@@ -310,11 +316,19 @@ def build_logic_arrangement_project_data(
     def region_tick(bar: float) -> int:
         return _LOGIC_PROJECT_START + int(round((bar - start_bar) * _LOGIC_TICKS_PER_BAR))
 
-    header = bytearray(400)
-    struct.pack_into("<II", header, 170, int(round(tempo * 10_000)), int(round(tempo * 10_000)))
+    # The file opens with 24 bytes and then the Song object, whose payload
+    # holds the header fields at fixed file offsets (tempo 170/174, project
+    # start 364).
+    song_payload = bytearray(376)
+    struct.pack_into("<II", song_payload, 170 - 56, int(round(tempo * 10_000)), int(round(tempo * 10_000)))
     if project_start_bar is not None:
-        struct.pack_into("<I", header, 364, _LOGIC_SEQUENCE_ORIGIN + (project_start_bar - 1) * _LOGIC_TICKS_PER_BAR)
-    blob = bytes(header)
+        struct.pack_into(
+            "<I", song_payload, 364 - 56,
+            _LOGIC_SEQUENCE_ORIGIN + (project_start_bar - 1) * _LOGIC_TICKS_PER_BAR,
+        )
+    blob = b"\x00" * 24 + _logic_object(
+        "Song", bytes(song_payload), kind=3, class_id=0xFFFFFFFF, id1=0xFFFFFFFF, version=version,
+    )
 
     for track_id, name in tracks.items():
         encoded = name.encode("utf-8")
@@ -385,6 +399,20 @@ def build_logic_arrangement_project_data(
         blob += _logic_object(
             "AuRg", bytes(payload), kind=1, class_id=0x0B, id1=spec["file"], id2=spec.get("index", 0), version=version,
         )
+    for step in history or []:
+        snapshot = build_logic_arrangement_project_data(
+            tracks=step.get("tracks", {}),
+            sequences=step.get("sequences", []),
+            midi_regions=step.get("midi_regions", []),
+            audio_files=step.get("audio_files"),
+            audio_regions=step.get("audio_regions"),
+            audio_placements=step.get("audio_placements"),
+            markers=step.get("markers"),
+            project_start_bar=project_start_bar,
+            tempo=tempo,
+            version=version,
+        )
+        blob += snapshot[24:]  # its Song object and the old object copies
     return blob
 
 

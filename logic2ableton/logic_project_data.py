@@ -35,6 +35,11 @@ and later) and a u32 payload size. The objects read here:
   first id is the AuFl id; the second id tells apart regions cut from one
   file.
 
+The file opens with a ``Song`` object (its payload holds the header fields
+read below). A project saved with undo history has further ``Song`` objects
+after the current state, one per history step, each followed by old copies of
+the objects that step changed; decoding stops at the second ``Song``.
+
 Ticks are 960 per quarter note and three tick frames coexist: note ticks are
 region-relative with the content origin at 38400; marker ticks count from
 38400 = bar 1; region placements count from 34560 = the project start, whose
@@ -175,6 +180,7 @@ class LogicArrangement:
     audio_files: dict[int, str] = field(default_factory=dict)
     audio_regions: dict[tuple[int, int], LogicAudioRegion] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    history_steps: int = 0  # undo-history snapshots found after the current state and ignored
 
     @property
     def regions(self) -> list[LogicPlacement]:
@@ -435,6 +441,16 @@ def decode_project_data(data: bytes, *, beats_per_bar: float = 4.0) -> LogicArra
     objects = scan_objects(data)
     if not objects:
         return arrangement
+    # A project saved with undo history carries one extra Song object per
+    # history step, each followed by the old copies of whatever that step
+    # changed (arrangement sequences, regions, tracks, audio regions). Only
+    # the objects before the second Song are the project's current state;
+    # reading the rest would stack every past arrangement on top of it and let
+    # stale names and trims overwrite current ones.
+    song_offsets = [obj.offset for obj in objects if obj.tag == "Song"]
+    if len(song_offsets) > 1:
+        arrangement.history_steps = len(song_offsets) - 1
+        objects = [obj for obj in objects if obj.offset < song_offsets[1]]
     arrangement.format_version = max(set(obj.version for obj in objects), key=[obj.version for obj in objects].count)
     arrangement.sequences = _sequences(data, objects)
     arrangement.track_names = _track_names(data, objects)
