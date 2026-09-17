@@ -72,6 +72,10 @@ export function useAppState() {
   const [progressStage, setProgressStage] = useState("")
   const [result, setResult] = useState<ConversionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The full persisted report for a failure, kept separate from `error` (the
+  // headline) so the desktop can show the specific exception up front and
+  // leave the longer report behind a toggle instead of burying one in the other.
+  const [errorReport, setErrorReport] = useState<string | null>(null)
   const [history, setHistory] = useState<ConversionRecord[]>([])
 
   const reset = () => {
@@ -89,6 +93,7 @@ export function useAppState() {
     setProgressStage("")
     setResult(null)
     setError(null)
+    setErrorReport(null)
   }
 
   return {
@@ -106,6 +111,7 @@ export function useAppState() {
     progressStage, setProgressStage,
     result, setResult,
     error, setError,
+    errorReport, setErrorReport,
     history, setHistory,
     reset,
   }

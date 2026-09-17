@@ -148,6 +148,30 @@ test('cancellation waits for child exit and suppresses all canceled job events',
   assert.deepEqual(h.events.map((event) => event.channel), ['preview-progress', 'preview-exit'])
 })
 
+test('preview error progress forwards failure_stage, error, and report unchanged', async (t) => {
+  // The 2026-09-16 review found the desktop hiding the specific exception
+  // behind a preferred report and sending setting-derived failures (e.g. a
+  // malformed --timeline file) to the terminal error screen. Both fixes rely
+  // on these CLI-emitted fields reaching the renderer's preview-progress
+  // listener untouched; this locks in that the main process doesn't strip or
+  // reorder them on the way through.
+  const h = harness(t)
+  await h.preview()
+  h.jobs[0].progress({
+    stage: 'error',
+    progress: 0.2,
+    message: 'Failed during timeline: Expecting property name enclosed in double quotes.',
+    failure_stage: 'timeline',
+    error: 'Expecting property name enclosed in double quotes.',
+    report: 'CONVERSION FAILED\n  Stage: timeline\n  Error: Expecting property name enclosed in double quotes.\n',
+  })
+  h.jobs[0].exit(1)
+  const event = h.events.find((entry) => entry.channel === 'preview-progress')
+  assert.equal(event.data.failure_stage, 'timeline')
+  assert.equal(event.data.error, 'Expecting property name enclosed in double quotes.')
+  assert.match(event.data.report, /Stage: timeline/)
+})
+
 test('two cancellation requests both wait for the same child', async (t) => {
   const h = harness(t)
   await h.preview()

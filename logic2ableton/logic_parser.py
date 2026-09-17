@@ -912,10 +912,55 @@ def _unroll_regions(regions: list[LogicMidiRegion]) -> list[LogicMidiNote]:
     return notes
 
 
+def _unique_track_names(arrangement: LogicArrangement, warnings: list[str]) -> dict[int, str]:
+    """Display name per Logic track id, numbering tracks that share a name.
+
+    Outputs group clips by track name, so two Logic tracks both called
+    "Guitar" would otherwise merge into one track. The first track (by lane,
+    then position) keeps the plain name; later ones become "Guitar (2)", ...
+    """
+    first_seen: dict[int, tuple[int, int]] = {}
+    for placement in arrangement.regions:
+        # Only tracks that produce output compete for a name.
+        if placement.muted:
+            continue
+        if placement.kind == "midi":
+            sequence = arrangement.sequences.get(placement.sequence_id)
+            if sequence is None or not sequence.notes:
+                continue
+        elif placement.audio_file_id not in arrangement.audio_files:
+            continue
+        key = (placement.lane, placement.tick)
+        if placement.track_id not in first_seen or key < first_seen[placement.track_id]:
+            first_seen[placement.track_id] = key
+    names: dict[int, str] = {}
+    used: set[str] = set()
+    renamed: list[str] = []
+    for track_id in sorted(first_seen, key=lambda tid: (first_seen[tid], tid)):
+        base = arrangement.track_name(track_id)
+        name = base
+        number = 2
+        while name.casefold() in used:
+            name = f"{base} ({number})"
+            number += 1
+        used.add(name.casefold())
+        names[track_id] = name
+        if name != base:
+            renamed.append(name)
+    if renamed:
+        examples = ", ".join(renamed[:5]) + (", ..." if len(renamed) > 5 else "")
+        warnings.append(
+            f"{len(renamed)} Logic track(s) share a name with another track and were numbered "
+            f"to keep them separate: {examples}"
+        )
+    return names
+
+
 def _arrangement_midi_tracks(
     arrangement: LogicArrangement,
     *,
     bar_beats: float,
+    track_names_by_id: dict[int, str],
     warnings: list[str],
 ) -> list[LogicMidiTrack]:
     """One LogicMidiTrack per Logic track that has audible MIDI regions."""
@@ -929,7 +974,7 @@ def _arrangement_midi_tracks(
     for track_id, placements in sorted(
         by_track.items(), key=lambda item: (min(p.lane for p in item[1]), min(p.tick for p in item[1]))
     ):
-        track_name = arrangement.track_name(track_id)
+        track_name = track_names_by_id.get(track_id) or arrangement.track_name(track_id)
         regions: list[LogicMidiRegion] = []
         for placement in sorted(placements, key=lambda p: p.tick):
             sequence = arrangement.sequences.get(placement.sequence_id)
@@ -982,14 +1027,16 @@ def _arrangement_audio_refs(
     *,
     tempo: float,
     bar_beats: float,
+    track_names_by_id: dict[int, str],
     warnings: list[str],
 ) -> tuple[list[AudioFileRef], list[str]]:
-    """Audio clips as Logic placed them: one ref per region, on the Logic track's name."""
+    """Audio clips as Logic placed them: one ref per region, one per repetition when looped."""
     by_name = {ref.filename.casefold(): ref for ref in discovered}
     refs: list[AudioFileRef] = []
     lanes: dict[str, int] = {}
     missing: list[str] = []
     muted: list[str] = []
+    looped: list[str] = []
     for placement in sorted(arrangement.regions, key=lambda p: (p.tick, p.lane)):
         if placement.kind != "audio":
             continue
@@ -997,43 +1044,75 @@ def _arrangement_audio_refs(
         if not filename:
             continue
         source = by_name.get(filename.casefold())
-        track_name = arrangement.track_name(placement.track_id)
+        track_name = track_names_by_id.get(placement.track_id) or arrangement.track_name(placement.track_id)
         if source is None:
             missing.append(filename)
             continue
         region = arrangement.audio_regions.get((placement.audio_file_id, placement.audio_region_index))
         region_name = region.name if region and region.name else None
+        label = region_name or filename
         if placement.muted:
-            muted.append(f"{track_name}: {region_name or filename}")
+            muted.append(f"{track_name}: {label}")
             continue
         file_rate = _get_audio_sample_rate(source.file_path)
+        samples_per_beat = 60.0 / tempo * file_rate
         start_beats = arrangement.region_beats(placement.tick, bar_beats)
         content_offset = region.content_offset if region else 0
         content_length = region.content_length if region else None
-        if start_beats < 0:
-            # Live's arrangement starts at bar 1: keep the audio in sync by
-            # trimming the part that would sit before it.
-            trimmed = round(-start_beats * 60.0 / tempo * file_rate)
-            content_offset += trimmed
-            if content_length is not None:
-                content_length = max(0, content_length - trimmed)
-                if content_length == 0:
-                    warnings.append(
-                        f"Audio region '{region_name or filename}' on '{track_name}' ends before bar 1 "
-                        "and was skipped."
+
+        # (start beats, source offset, source length) for each pass the region plays.
+        passes: list[tuple[float, int, int | None]] = [(start_beats, content_offset, content_length)]
+        if placement.looped and content_length:
+            # Logic repeats the region end to end across the loop span and cuts
+            # the last pass at the span's end. Passes are spaced at the project
+            # tempo, which is exact unless the tempo changes under the loop.
+            span_beats = placement.loop_span / PPQ
+            length_beats = content_length / samples_per_beat
+            if span_beats > length_beats * (1 + 1e-9):
+                passes = []
+                repetition = 0
+                while repetition * length_beats < span_beats - 1e-9:
+                    remaining_beats = span_beats - repetition * length_beats
+                    length = (
+                        content_length if remaining_beats >= length_beats
+                        else round(remaining_beats * samples_per_beat)
                     )
-                    continue
-            start_beats = 0.0
-        refs.append(replace(
-            source,
-            track_name=track_name,
-            start_position_samples=max(0, round(start_beats * 60.0 / tempo * file_rate)),
-            content_offset_samples=content_offset,
-            content_duration_samples=content_length,
-            clip_name=region_name,
-            start_beats=start_beats,
-        ))
-        lanes.setdefault(track_name, placement.lane)
+                    passes.append((start_beats + repetition * length_beats, content_offset, length))
+                    repetition += 1
+                looped.append(f"{track_name}: {label} x{len(passes)}")
+
+        for pass_start, pass_offset, pass_length in passes:
+            if pass_start < 0:
+                # The Live arrangement starts at bar 1: keep the audio in sync
+                # by trimming the part that would sit before it.
+                trimmed = round(-pass_start * samples_per_beat)
+                pass_offset += trimmed
+                if pass_length is not None:
+                    pass_length -= trimmed
+                    if pass_length <= 0:
+                        warnings.append(
+                            f"Audio region '{label}' on '{track_name}' ends before bar 1 and was skipped."
+                        )
+                        continue
+                pass_start = 0.0
+            if pass_length is not None and pass_length <= 0:
+                continue
+            refs.append(replace(
+                source,
+                track_name=track_name,
+                start_position_samples=max(0, round(pass_start * samples_per_beat)),
+                content_offset_samples=pass_offset,
+                content_duration_samples=pass_length,
+                clip_name=region_name,
+                start_beats=pass_start,
+            ))
+            lanes.setdefault(track_name, placement.lane)
+    if looped:
+        examples = ", ".join(looped[:5]) + (", ..." if len(looped) > 5 else "")
+        warnings.append(
+            f"{len(looped)} looped audio region(s) were written as repeated clips spaced at the project "
+            f"tempo; check them if the song changes tempo under the loop: {examples}"
+        )
     if missing:
         unique = sorted(set(missing))
         examples = ", ".join(unique[:5]) + (", ..." if len(unique) > 5 else "")
@@ -1118,9 +1197,17 @@ def parse_logic_project(
         # The project's own arrangement says where every region sits, how it
         # loops and which track owns it, so audio timestamps and the SMPTE
         # start are not needed for placement.
-        midi_tracks = _arrangement_midi_tracks(arrangement, bar_beats=bar_beats, warnings=midi_warnings)
+        track_names_by_id = _unique_track_names(arrangement, midi_warnings)
+        midi_tracks = _arrangement_midi_tracks(
+            arrangement, bar_beats=bar_beats, track_names_by_id=track_names_by_id, warnings=midi_warnings,
+        )
         audio_files, track_names = _arrangement_audio_refs(
-            arrangement, audio_files, tempo=meta["tempo"], bar_beats=bar_beats, warnings=midi_warnings,
+            arrangement,
+            audio_files,
+            tempo=meta["tempo"],
+            bar_beats=bar_beats,
+            track_names_by_id=track_names_by_id,
+            warnings=midi_warnings,
         )
         regions = {ref.filename: ref.start_position_samples for ref in audio_files}
         timeline = _arrangement_timeline(arrangement)

@@ -405,7 +405,7 @@ export default function ProjectPreview({
               whileTap={{ scale: 0.99 }}
               transition={SPRING}
               onClick={onConvert}
-              disabled={!outputDir}
+              disabled={!outputDir || Boolean(settingsError)}
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-rose px-6 py-3 text-[15px] font-semibold text-bg transition-colors hover:bg-rose-hover disabled:cursor-not-allowed disabled:opacity-40"
             >
               Create {artifactLabel(direction)}

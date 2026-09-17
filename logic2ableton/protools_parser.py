@@ -382,8 +382,12 @@ def _parse_midi(reader: _SessionReader, blocks: list[_Block]) -> list[ProToolsMi
         k = block.offset
         end = block.offset + block.size
         while k + 35 < end:
-            found = data.find(b"MdNLB", k, len(data))
-            if found < 0:
+            # Search, header and events all stay inside this block: trailing
+            # bytes after one chunk must not let the scan reach the next
+            # block's marker, which would parse that chunk twice and shift
+            # every later chunk index.
+            found = data.find(b"MdNLB", k, end)
+            if found < 0 or found + 20 > end:
                 break
             k = found + 11
             n_events = reader.u32(k)
@@ -391,7 +395,7 @@ def _parse_midi(reader: _SessionReader, blocks: list[_Block]) -> list[ProToolsMi
             zero_ticks = reader.u40(k)
             events: list[tuple[int, int, int, int]] = []
             for _ in range(n_events):
-                if k + 35 > len(data):
+                if k + 35 > end:
                     break
                 pos = reader.u40(k) - zero_ticks
                 note = data[k + 8]

@@ -17,6 +17,7 @@ interface ConversionCompleteProps {
   direction: ConversionDirection
   result: ConversionResult | null
   error: string | null
+  errorReport: string | null
   cancelled?: boolean
   onConvertAnother: () => void
 }
@@ -27,10 +28,12 @@ export default function ConversionComplete({
   direction,
   result,
   error,
+  errorReport,
   cancelled = false,
   onConvertAnother,
 }: ConversionCompleteProps) {
   const [showReport, setShowReport] = useState(false)
+  const [showErrorReport, setShowErrorReport] = useState(false)
   const [openError, setOpenError] = useState<string | null>(null)
   const routeDirection = result?.direction ?? direction
 
@@ -55,6 +58,31 @@ export default function ConversionComplete({
             <pre className="mt-4 max-h-72 overflow-y-auto whitespace-pre-wrap rounded-xl bg-bg p-4 font-mono text-[11px] leading-relaxed text-text-secondary">
               {error}
             </pre>
+            {errorReport && (
+              <button
+                type="button"
+                onClick={() => setShowErrorReport((visible) => !visible)}
+                className="mt-3 flex items-center gap-2 text-[12px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+              >
+                <FileText size={14} />
+                {showErrorReport ? "Hide report" : "Show report"}
+              </button>
+            )}
+            <AnimatePresence initial={false}>
+              {errorReport && showErrorReport && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={SPRING}
+                  className="mt-3 overflow-hidden rounded-xl bg-bg"
+                >
+                  <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap p-4 font-mono text-[11px] leading-relaxed text-text-secondary">
+                    {errorReport}
+                  </pre>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </section>
           <button
             type="button"

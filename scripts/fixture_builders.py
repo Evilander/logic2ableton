@@ -302,7 +302,7 @@ def build_logic_arrangement_project_data(
     prebuilt record bytes, "start": content start ticks, "length": content ticks}.
     ``midi_regions``: {"bar", "track", "sequence", "loop_bars", "muted", "lane"}.
     ``audio_regions``: {"file", "index", "name", "offset", "length"}.
-    ``audio_placements``: {"bar", "track", "file", "index", "muted", "lane"}.
+    ``audio_placements``: {"bar", "track", "file", "index", "muted", "lane", "loop_beats"}.
     ``markers``: (bar, marker_id, name). Bars are 1-based arrangement bars.
     """
     start_bar = 1 if project_start_bar is None else project_start_bar
@@ -356,8 +356,8 @@ def build_logic_arrangement_project_data(
             tick=region_tick(spec["bar"]),
             track=spec["track"],
             lane=spec.get("lane", 1),
-            flags=0x1 if spec.get("muted") else 0,
-            loop_span=None,
+            flags=(0x1000 if spec.get("loop_beats") else 0) | (0x1 if spec.get("muted") else 0),
+            loop_span=int(spec["loop_beats"] * 960) if spec.get("loop_beats") else None,
             audio_index=spec.get("index", 0),
             audio_file=spec["file"],
         )

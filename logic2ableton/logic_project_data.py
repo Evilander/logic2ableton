@@ -445,6 +445,6 @@ def decode_project_data(data: bytes, *, beats_per_bar: float = 4.0) -> LogicArra
     arrangement.project_start_bar = _project_start_bar(
         data, arrangement.format_version, int(round(beats_per_bar * PPQ)) or PPQ * 4,
     )
-    if len(data) >= 174 and _u32(data, 170) == _u32(data, 174) and 0 < _u32(data, 170) < 10_000_000:
+    if len(data) >= 178 and _u32(data, 170) == _u32(data, 174) and 0 < _u32(data, 170) < 10_000_000:
         arrangement.tempo_bpm = _u32(data, 170) / 10_000
     return arrangement

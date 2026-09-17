@@ -278,12 +278,21 @@ def _emit_failure(
     report_path = _report_path(
         output_dir, input_path, project_name=project_name, suffix=report_suffix, unique=unique
     )
-    report_text = report or _build_failure_report(mode, input_path, stage, error)
+    if report:
+        # A failure after analysis keeps the analysis report, but the saved
+        # report must still say what failed and why.
+        report_text = (
+            f"{report.rstrip()}\n\nCONVERSION FAILED\n  Stage: {stage}\n  Error: {error}\n"
+        )
+    else:
+        report_text = _build_failure_report(mode, input_path, stage, error)
     _, report_note = _persist_report_with_note(report_path, report_text)
     message = f"Failed during {stage}: {error}.{report_note}"
     payload: dict[str, object] = {
         "direction": mode,
         "input": str(input_path),
+        "failure_stage": stage,
+        "error": error,
         "report": report_text,
         "report_path": str(report_path),
         "artifact_path": str(report_path),

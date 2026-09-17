@@ -1,6 +1,6 @@
 {
   "name": "logic2ableton",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "description": "Session transfer between Logic Pro, Ableton Live, and Pro Tools",
   "main": "./out/main/index.js",
   "author": {
@@ -32,7 +32,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",
-    "electron": "^40.6.0",
+    "electron": "^43.7.1",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "tailwindcss": "^4.2.0",

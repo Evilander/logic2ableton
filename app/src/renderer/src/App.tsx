@@ -17,6 +17,25 @@ import { useAppState, type ConversionRecord, type PreviewSettingsError, type Pre
 
 type CleanupRef = MutableRefObject<(() => void) | null>
 
+// Preview failures at these stages come from a choice the user can change on
+// the preview screen (the timeline file, or the output folder the report is
+// written to), so the form stays up with the error beside it. Every other
+// stage, and an event with no failure_stage at all (an early exit or a
+// stderr/exit-code fallback), means the session or the converter itself
+// failed: nothing on the form would fix it, so it goes to the error screen.
+const SETTINGS_PREVIEW_FAILURE_STAGES = new Set(["timeline", "report-write"])
+
+function isTerminalPreviewFailure(failureStage: string | undefined): boolean {
+  return failureStage === undefined || !SETTINGS_PREVIEW_FAILURE_STAGES.has(failureStage)
+}
+
+// Maps a settings failure stage to the preview field it belongs to, so the
+// error lands next to that control. Stages without a field of their own
+// ("report-write") show as a general settings error.
+function settingsFieldForFailureStage(failureStage: string | undefined): PreviewSettingsField {
+  return failureStage === "timeline" ? "timelinePath" : null
+}
+
 function outputPathFromEvent(event: ProgressEvent, direction: ConversionDirection): string | null {
   if (destinationForDirection(direction) === "ableton") {
     return event.als_path || event.artifact_path || null
@@ -59,8 +78,10 @@ export default function App() {
   const logsRef = useRef<string[]>([])
   // Set while a conversion job owns activeJob in the main process; lets both
   // the in-progress screen's Cancel button and navigation guards drive the
-  // same awaited cancel-and-report path instead of aborting silently.
-  const cancelConversionRef = useRef<(() => Promise<void>) | null>(null)
+  // same awaited cancel-and-report path instead of aborting silently. Resolves
+  // true once the job has actually stopped (or was already done), false if
+  // the stop attempt itself failed - callers must not treat false as success.
+  const cancelConversionRef = useRef<(() => Promise<boolean>) | null>(null)
 
   const cleanupListeners = (ref: CleanupRef) => {
     ref.current?.()
@@ -117,6 +138,7 @@ export default function App() {
     } catch (error) {
       if (previewRequestRef.current === requestId) {
         state.setError(error instanceof Error ? error.message : String(error))
+        state.setErrorReport(null)
         state.setView("error")
         setPreviewLoading(false)
       }
@@ -125,16 +147,18 @@ export default function App() {
     if (previewRequestRef.current !== requestId) return
 
     state.setError(null)
+    state.setErrorReport(null)
     setSettingsError(null)
     state.setView("preview")
     setPreviewLoading(true)
 
     let settled = false
-    const failPreview = (message: string) => {
+    const failPreview = (message: string, report?: string) => {
       if (settled || previewRequestRef.current !== requestId) return
       settled = true
       setPreviewLoading(false)
       state.setError(message)
+      state.setErrorReport(report ?? null)
       state.setView("error")
       cleanupListeners(previewCleanupRef)
     }
@@ -143,7 +167,21 @@ export default function App() {
       window.api.onPreviewProgress((event) => {
         if (previewRequestRef.current !== requestId || settled) return
         if (event.stage === "error") {
-          failPreview(event.report || event.message)
+          if (isTerminalPreviewFailure(event.failure_stage)) {
+            failPreview(event.message, event.report)
+          } else {
+            // A setting-derived failure (e.g. malformed --timeline JSON) still
+            // leaves the session itself readable, so keep the preview form
+            // up, show the error by the field that caused it, and leave the
+            // last valid preview in place until a new one arrives.
+            settled = true
+            setPreviewLoading(false)
+            setSettingsError({
+              field: settingsFieldForFailureStage(event.failure_stage),
+              message: event.error ?? event.message,
+            })
+            cleanupListeners(previewCleanupRef)
+          }
           return
         }
         if (event.stage !== "complete") return
@@ -206,6 +244,7 @@ export default function App() {
     const sourceFormat = detectSourceFormat(path)
     if (!sourceFormat) {
       state.setError("Choose a supported Logic, Ableton, or Pro Tools session.")
+      state.setErrorReport(null)
       state.setView("error")
       return
     }
@@ -309,6 +348,7 @@ export default function App() {
     } catch (error) {
       if (previewRequestRef.current === requestId) {
         state.setError(error instanceof Error ? error.message : String(error))
+        state.setErrorReport(null)
         state.setView("error")
       }
       return
@@ -322,6 +362,7 @@ export default function App() {
     state.setProgressMessage("Validating session…")
     state.setProgressStage("validation")
     state.setError(null)
+    state.setErrorReport(null)
     state.setResult(null)
     setCancelled(false)
     logsRef.current = []
@@ -329,11 +370,12 @@ export default function App() {
 
     let outcome: "pending" | "success" | "failed" | "cancelled" = "pending"
 
-    const recordFailure = (message: string) => {
+    const recordFailure = (message: string, report?: string) => {
       if (outcome !== "pending") return
       outcome = "failed"
       cancelConversionRef.current = null
       state.setError(message)
+      state.setErrorReport(report ?? null)
       state.setView("error")
 
       void persistHistory({
@@ -344,7 +386,7 @@ export default function App() {
         outputPath: "",
         date: new Date().toISOString(),
         status: "failed",
-        report: message,
+        report: report ?? message,
       })
     }
 
@@ -353,23 +395,20 @@ export default function App() {
     // sending events for this job entirely, so there's no race with the
     // onExit handler below once this resolves.
     cancelConversionRef.current = async () => {
-      if (outcome !== "pending") return
+      if (outcome !== "pending") return true
       setCancelling(true)
       try {
         await window.api.cancelActiveJob()
       } catch (error) {
         setCancelling(false)
         appendLog(`Cancel failed: ${error instanceof Error ? error.message : String(error)}`)
-        return
+        return false
       }
-      if (outcome !== "pending") {
-        setCancelling(false)
-        return
-      }
+      setCancelling(false)
+      if (outcome !== "pending") return true
       outcome = "cancelled"
       cancelConversionRef.current = null
       cleanupListeners(conversionCleanupRef)
-      setCancelling(false)
       setCancelled(true)
       const message = `Conversion cancelled before it finished.${outputDir ? ` Check ${outputDir} for any partial output.` : ""}`
       state.setError(message)
@@ -385,6 +424,7 @@ export default function App() {
         status: "failed",
         report: message,
       })
+      return true
     }
 
     const cleanups = [
@@ -432,7 +472,7 @@ export default function App() {
           })
         }
 
-        if (event.stage === "error") recordFailure(event.report || event.message)
+        if (event.stage === "error") recordFailure(event.message, event.report)
       }),
       window.api.onError((error) => appendLog(`ERROR: ${error}`)),
       window.api.onExit((code) => {
@@ -468,14 +508,23 @@ export default function App() {
 
   // A running conversion writes real output, so navigating away can't just
   // silently kill it the way canceling a preview can. Ask first, and only
-  // proceed once the cancellation the user agreed to has actually finished.
+  // proceed once the cancellation the user agreed to has actually finished -
+  // if the stop attempt itself fails (e.g. the child won't terminate in
+  // time), stay put: the current screen and progress listeners keep tracking
+  // the job that's still actually running in the main process.
   const confirmAndCancelRunningConversion = async (): Promise<boolean> => {
     if (state.view !== "converting" || !cancelConversionRef.current) return true
     const proceed = window.confirm(
       "A conversion is still running. Cancel it and leave this screen? Any output written so far may be incomplete.",
     )
     if (!proceed) return false
-    await cancelConversionRef.current()
+    const stopped = await cancelConversionRef.current()
+    if (!stopped) {
+      window.alert(
+        "The conversion could not be cancelled and is still running. Use Cancel conversion on the progress screen to try again.",
+      )
+      return false
+    }
     return true
   }
 
@@ -503,12 +552,14 @@ export default function App() {
         compatibilityWarnings: record.compatibilityWarnings ?? [],
       })
       state.setError(null)
+      state.setErrorReport(null)
       state.setView("complete")
       return
     }
 
     state.setResult(null)
     state.setError(record.report)
+    state.setErrorReport(null)
     state.setView("error")
   }
 
@@ -595,6 +646,7 @@ export default function App() {
                 direction={state.direction}
                 result={state.result}
                 error={state.error}
+                errorReport={state.errorReport}
                 cancelled={cancelled}
                 onConvertAnother={handleNewConversion}
               />

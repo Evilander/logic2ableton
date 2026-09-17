@@ -35,6 +35,8 @@ export interface ProgressEvent {
   package_path?: string
   report?: string
   report_path?: string
+  failure_stage?: string
+  error?: string
   tracks?: number
   clips?: number
   audio_files?: number

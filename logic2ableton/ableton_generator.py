@@ -314,33 +314,39 @@ def _make_audio_clip_xml(
     _val(ts_remote, "Denominator", str(time_sig_denominator))
     _val(ts_remote, "Time", "0")
 
-    # WarpMarkers — start and end always; warped clips that cross a tempo
-    # breakpoint get an extra marker at each one so Live's playback speed
-    # tracks the song's actual tempo curve instead of one flat ratio for
-    # the whole file. With no timeline, this reduces to the plain
-    # single-tempo formula (no map lookups) so output is unchanged.
+    # WarpMarkers map source seconds to clip-content beats — start and end
+    # always; warped clips that cross a tempo breakpoint get an extra marker at
+    # each one so Live's playback speed tracks the song's actual tempo curve
+    # instead of one flat ratio for the whole file. With no timeline, this
+    # reduces to the plain single-tempo formula (no map lookups) so output is
+    # unchanged.
+    #
+    # Under a tempo map the played slice starts at source second offset_secs,
+    # which sits at the clip's arrangement position. Source audio before the
+    # slice never plays and keeps the flat base-tempo ratio, so LoopStart
+    # (offset_beats, computed at the base tempo) still lands on offset_secs;
+    # from there on, content beats follow the tempo map from start_beats.
+    marker_points: list[tuple[float, float]] = [(0.0, 0.0)]
     if tempo_map.events:
-        end_abs_beat = tempo_map.seconds_to_beats(start_seconds + duration_secs)
-        warp_end_beat_time = end_abs_beat - start_beats
-        breakpoints = tempo_map.breakpoints_between(start_beats, end_abs_beat) if is_warped else []
+        end_abs_beat = tempo_map.seconds_to_beats(start_seconds + duration_secs - offset_secs)
+        if offset_secs > 0:
+            marker_points.append((offset_secs, offset_beats))
+        if is_warped:
+            for event in tempo_map.breakpoints_between(start_beats, end_abs_beat):
+                marker_points.append((
+                    offset_secs + tempo_map.beats_to_seconds(event.beat) - start_seconds,
+                    offset_beats + event.beat - start_beats,
+                ))
+        marker_points.append((duration_secs, offset_beats + end_abs_beat - start_beats))
     else:
-        warp_end_beat_time = duration_secs * tempo_map.base_tempo / 60
-        breakpoints = []
+        marker_points.append((duration_secs, duration_secs * tempo_map.base_tempo / 60))
 
     warp_markers = ET.SubElement(clip, "WarpMarkers")
-    wm_start = ET.SubElement(warp_markers, "WarpMarker")
-    wm_start.set("Id", str(allocator.next()))
-    wm_start.set("SecTime", "0")
-    wm_start.set("BeatTime", "0")
-    for event in breakpoints:
-        wm_mid = ET.SubElement(warp_markers, "WarpMarker")
-        wm_mid.set("Id", str(allocator.next()))
-        wm_mid.set("SecTime", str(tempo_map.beats_to_seconds(event.beat) - start_seconds))
-        wm_mid.set("BeatTime", str(event.beat - start_beats))
-    wm_end = ET.SubElement(warp_markers, "WarpMarker")
-    wm_end.set("Id", str(allocator.next()))
-    wm_end.set("SecTime", str(duration_secs))
-    wm_end.set("BeatTime", str(warp_end_beat_time))
+    for sec_time, beat_time in marker_points:
+        marker = ET.SubElement(warp_markers, "WarpMarker")
+        marker.set("Id", str(allocator.next()))
+        marker.set("SecTime", "0" if sec_time == 0 else str(sec_time))
+        marker.set("BeatTime", "0" if beat_time == 0 else str(beat_time))
 
     # WarpMode: 0 = Beats (default for arrangement clips)
     _val(clip, "WarpMode", "0")

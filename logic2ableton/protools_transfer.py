@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Iterable
 
-from logic2ableton.audio import write_pcm_wav
+from logic2ableton.audio import BLOCK_FRAMES, write_pcm_wav
 
 from logic2ableton.logic_transfer import (
     DecodedAudio,
@@ -102,7 +102,9 @@ def _render_protools_clip_export(
 
 def _logic_audio_export_stem(index: int, ref: AudioFileRef, *, tempo: float, sample_rate: int) -> str:
     stem = _safe_name(Path(ref.filename).stem, f"clip_{index:03d}")
-    beats = samples_to_beats(ref.start_position_samples, tempo, sample_rate)
+    beats = ref.start_beats if ref.start_beats is not None else samples_to_beats(
+        ref.start_position_samples, tempo, sample_rate
+    )
     return f"{index:03d} - {stem} - {beats:09.3f} beats"
 
 
@@ -117,12 +119,12 @@ def _render_protools_logic_audio_export(
     *,
     cache: dict[Path, DecodedAudio | None],
 ) -> tuple[str, int | None, Path]:
-    """Render one Logic-sourced audio file as a Pro Tools-ready timestamped WAV.
+    """Render one Logic region as a Pro Tools-ready timestamped WAV.
 
-    Logic's own audio files already represent a single recorded region, so no
-    clip-level slicing is needed here - only re-stamping the bext
-    TimeReference to the file's start position, which the Logic parser has
-    already normalized to be relative to bar 1 (no further offset applied).
+    Only the slice of the source the region plays is written: from
+    ``content_offset_samples`` for ``content_duration_samples`` (the rest of
+    the file when unset). The bext TimeReference is the region's arrangement
+    position, which the Logic parser has already made relative to bar 1.
     The destination filename is chosen from the render outcome (see
     _clip_export_name's docstring / F11, 2026-09-15 review).
     """
@@ -135,13 +137,21 @@ def _render_protools_logic_audio_export(
         shutil.copy2(ref.file_path, destination)
         return "copied-source", None, destination
 
+    start = max(0, min(decoded.frame_count, ref.content_offset_samples))
+    available = decoded.frame_count - start
+    count = available if ref.content_duration_samples is None else max(0, min(available, ref.content_duration_samples))
+
+    def window() -> Iterable[bytes]:
+        for position in range(start, start + count, BLOCK_FRAMES):
+            yield decoded.read_frames(position, min(BLOCK_FRAMES, start + count - position))
+
     destination = _stem_with_extension(destination_stem, ".wav")
     _write_pt_wav_with_bext(
         destination,
         sample_rate=decoded.frame_rate,
         channels=decoded.channels,
         sample_width=decoded.sample_width,
-        frames=decoded.iter_frames(),
+        frames=window(),
         time_reference_samples=ref.start_position_samples,
     )
     return "timestamped-wav", ref.start_position_samples, destination
@@ -246,16 +256,22 @@ def _export_logic_audio(
                 if export_mode != "reference-only":
                     copied_audio_files += 1
                 if export_mode == "copied-source":
+                    trimmed = ref.content_offset_samples > 0 or ref.content_duration_samples is not None
                     project.compatibility_warnings.append(
-                        f"Audio '{ref.filename}' was copied without a new timestamp; place it using the manifest."
+                        f"Audio '{ref.filename}' was copied without a new timestamp"
+                        + (" or trim" if trimmed else "")
+                        + "; place it using the manifest."
                     )
 
             manifest_files.append(
                 {
                     "file_index": file_index,
                     "filename": ref.filename,
+                    "clip_name": ref.clip_name or Path(ref.filename).stem,
                     "export_name": export_name,
                     "start_position_samples": ref.start_position_samples,
+                    "content_offset_samples": ref.content_offset_samples,
+                    "content_duration_samples": ref.content_duration_samples,
                     "take_number": ref.take_number,
                     "is_comp": ref.is_comp,
                     "comp_name": ref.comp_name,

@@ -99,6 +99,8 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - MIDI notes transfer as native MIDI tracks (and `.mid` exports), but the software instruments, their settings, and MIDI effects are not recreated — reload instruments in Ableton
 - Region placement, loops, track names and markers come from the project's own arrangement data. That decoding was worked out on Logic 10.6 and Logic 11 saves; the report says "Region positions: read from the Logic arrangement" when it applies. Saves it cannot read fall back to audio timestamps, `MIDI 1`, `MIDI 2`, ... track names, and a warning
 - Regions that start before bar 1 are moved to bar 1 (audio is trimmed by the same amount) because a Live arrangement cannot start earlier
+- Looped audio regions are written as repeated clips, spaced at the project tempo. If the tempo changes under a looped audio region, check the repeats; the report lists every region it unrolled
+- Logic tracks that share a name are kept apart by numbering the later ones (`Guitar`, `Guitar (2)`), and the report says which were renamed
 - Logic's tempo track is not decoded (only the project tempo is); supply tempo changes with `--timeline`
 - `--smpte-start` only matters for the timestamp fallback; it must then match the project's own synchronization setting (default `01:00:00:00`), and the report lists any files placed at bar 1 because their timestamp precedes it
 - Automation is not recreated
@@ -294,6 +296,11 @@ Progress events report audio counts (`tracks`, `clips`, `audio_files`) separatel
 from `midi_tracks` and `midi_notes`. Previews include recovered MIDI content.
 For Ableton output, the completion event's `midi_tracks` counts native tracks in
 the set; `midi_files` separately counts exported `.mid` sidecars.
+
+A failed run ends with an `error` event whose `failure_stage` names the step that
+failed (for example `timeline`, `parsing` or `generating`) and whose `error`
+holds the reason. The saved report keeps any analysis already done and ends
+with the same stage and reason.
 
 Pro Tools previews check referenced audio on disk. The report lists found,
 missing, and skipped sources, and `compatibility_warnings` names missing media
