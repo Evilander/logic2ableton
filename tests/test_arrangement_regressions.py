@@ -217,3 +217,119 @@ def test_undo_history_snapshots_are_not_read_as_the_current_arrangement(tmp_path
     assert [(t.name, len(t.regions), t.regions[0].start_beats) for t in project.midi_tracks] == [("Keys", 1, 4.0)]
     assert [(n.pitch, n.start_beats) for n in project.midi_tracks[0].notes] == [(60, 4.0)]
     assert [(m.beat, m.name) for m in project.timeline.markers] == [(16.0, "Verse")]
+
+
+def _overlap_project(tmp_path: Path, *, audio_regions, audio_placements, sequences=(), midi_regions=()) -> Path:
+    """A 120 BPM project (two beats per second) over a 12-second Guitar.wav."""
+    data = build_logic_arrangement_project_data(
+        tracks={1: "Guitar", 2: "Keys"},
+        sequences=list(sequences),
+        midi_regions=list(midi_regions),
+        audio_files={10: "Guitar.wav"},
+        audio_regions=audio_regions,
+        audio_placements=audio_placements,
+    )
+    logicx = build_synthetic_logicx(tmp_path / "source", project_data=data)
+    wav = logicx / "Media" / "Audio Files" / "Guitar.wav"
+    wav.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(wav), "wb") as handle:
+        handle.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+        handle.writeframes(struct.pack("<h", 1000) * RATE * 12)
+    return logicx
+
+
+def test_audio_region_on_top_of_a_longer_one_cuts_it_instead_of_overlapping(tmp_path):
+    # "Long" covers beats 0-16; "Patch" is dropped on top of it at beats 4-8.
+    logicx = _overlap_project(
+        tmp_path,
+        audio_regions=[
+            {"file": 10, "index": 0, "name": "Long", "offset": 0, "length": 8 * RATE},
+            {"file": 10, "index": 1, "name": "Patch", "offset": 8 * RATE, "length": 2 * RATE},
+        ],
+        audio_placements=[
+            {"bar": 1, "track": 1, "file": 10, "lane": 1},
+            {"bar": 2, "track": 1, "file": 10, "lane": 1, "index": 1},
+        ],
+    )
+    project = parse_logic_project(logicx)
+
+    clips = sorted((c.start_beats, c.clip_name, c.content_offset_samples, c.content_duration_samples) for c in project.audio_files)
+    assert clips == [
+        (0.0, "Long", 0, 2 * RATE),
+        (4.0, "Patch", 8 * RATE, 2 * RATE),
+        (8.0, "Long", 4 * RATE, 4 * RATE),
+    ]
+    assert any("Guitar: Long under Patch" in warning for warning in project.compatibility_warnings)
+
+    als = generate_als(project, tmp_path / "out", copy_audio=False, template_path=_BUNDLED_TEMPLATE)
+    rendered = sorted((c.start_beats, c.end_beats) for c in parse_ableton_project(als).clips)
+    assert rendered == [(0.0, 4.0), (4.0, 8.0), (8.0, 16.0)]
+
+
+def test_audio_region_running_into_the_next_one_ends_where_it_starts(tmp_path):
+    logicx = _overlap_project(
+        tmp_path,
+        audio_regions=[
+            {"file": 10, "index": 0, "name": "First", "offset": 0, "length": 4 * RATE},
+            {"file": 10, "index": 1, "name": "Second", "offset": 6 * RATE, "length": 4 * RATE},
+        ],
+        audio_placements=[
+            {"bar": 1, "track": 1, "file": 10, "lane": 1},
+            {"bar": 2, "track": 1, "file": 10, "lane": 1, "index": 1},
+        ],
+    )
+    project = parse_logic_project(logicx)
+
+    clips = [(c.start_beats, c.clip_name, c.content_offset_samples, c.content_duration_samples) for c in project.audio_files]
+    assert clips == [(0.0, "First", 0, 2 * RATE), (4.0, "Second", 6 * RATE, 4 * RATE)]
+
+
+def test_regions_that_only_touch_are_left_alone(tmp_path):
+    logicx = _overlap_project(
+        tmp_path,
+        audio_regions=[
+            {"file": 10, "index": 0, "name": "First", "offset": 0, "length": 2 * RATE},
+            {"file": 10, "index": 1, "name": "Second", "offset": 2 * RATE, "length": 2 * RATE},
+        ],
+        audio_placements=[
+            {"bar": 1, "track": 1, "file": 10, "lane": 1},
+            {"bar": 2, "track": 1, "file": 10, "lane": 1, "index": 1},
+            # the same slice again on another track at the same time is not an overlap
+            {"bar": 1, "track": 2, "file": 10, "lane": 2},
+        ],
+    )
+    project = parse_logic_project(logicx)
+
+    clips = sorted((c.track_name, c.start_beats, c.content_offset_samples, c.content_duration_samples) for c in project.audio_files)
+    assert clips == [("Guitar", 0.0, 0, 2 * RATE), ("Guitar", 4.0, 2 * RATE, 2 * RATE), ("Keys", 0.0, 0, 2 * RATE)]
+    assert not any("overlap" in warning for warning in project.compatibility_warnings)
+
+
+def test_overlapping_midi_regions_become_one_clip_with_all_their_notes(tmp_path):
+    # A four-bar region with a note on every beat, and a one-bar region laid over its second bar.
+    logicx = _overlap_project(
+        tmp_path,
+        audio_regions=[],
+        audio_placements=[],
+        sequences=[
+            {"id": 44, "name": "Long", "length": 4 * 3840, "notes": [(960 * beat, 60, 100, 240) for beat in range(16)]},
+            {"id": 45, "name": "Short", "length": 3840, "notes": [(0, 72, 90, 240), (0, 60, 127, 240)]},
+        ],
+        midi_regions=[
+            {"bar": 1, "track": 2, "sequence": 44, "lane": 2},
+            {"bar": 2, "track": 2, "sequence": 45, "lane": 2},
+        ],
+    )
+    project = parse_logic_project(logicx)
+
+    track = project.midi_tracks[0]
+    assert [(r.start_beats, r.end_beats, r.is_looping) for r in track.regions] == [(0.0, 16.0, False)]
+    # 16 notes from the long region, one new pitch from the short one; the doubled note at beat 4 is kept once
+    assert len(track.notes) == 17
+    assert [(n.pitch, n.velocity) for n in track.notes if n.start_beats == 4.0] == [(60, 127), (72, 90)]
+    assert any("Keys: Long + Short" in warning for warning in project.compatibility_warnings)
+
+    als = generate_als(project, tmp_path / "out", copy_audio=False, template_path=_BUNDLED_TEMPLATE)
+    root = ET.fromstring(gzip.decompress(als.read_bytes()))
+    clips = root.findall(".//Tracks/MidiTrack//ArrangerAutomation/Events/MidiClip")
+    assert [(c.find("CurrentStart").get("Value"), c.find("CurrentEnd").get("Value")) for c in clips] == [("0", "16")]

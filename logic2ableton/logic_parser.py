@@ -8,6 +8,7 @@ from pathlib import Path
 import bisect
 from dataclasses import replace
 
+from logic2ableton.audio import read_audio_info
 from logic2ableton.logic_project_data import (
     PPQ,
     SEQUENCE_ORIGIN_TICKS,
@@ -912,6 +913,145 @@ def _unroll_regions(regions: list[LogicMidiRegion]) -> list[LogicMidiNote]:
     return notes
 
 
+def _without_stacked_notes(notes: list[LogicMidiNote]) -> list[LogicMidiNote]:
+    """Drop duplicate notes and end a note where the next one of its pitch starts."""
+    by_pitch: dict[int, list[LogicMidiNote]] = {}
+    for note in sorted(notes, key=lambda note: (note.start_beats, -note.duration_beats)):
+        same_pitch = by_pitch.setdefault(note.pitch, [])
+        if same_pitch:
+            previous = same_pitch[-1]
+            if note.start_beats - previous.start_beats < 1e-9:
+                previous.velocity = max(previous.velocity, note.velocity)
+                continue
+            previous.duration_beats = min(previous.duration_beats, note.start_beats - previous.start_beats)
+        same_pitch.append(replace(note))
+    return sorted((note for group in by_pitch.values() for note in group), key=lambda note: (note.start_beats, note.pitch))
+
+
+def _merge_overlapping_midi(regions: list[LogicMidiRegion]) -> tuple[list[LogicMidiRegion], list[str]]:
+    """Join MIDI regions that overlap on one track into a single region.
+
+    Logic plays overlapping MIDI regions together. A Live track plays one clip
+    at a time, so each overlapping group becomes one clip with every note the
+    group plays (loops unrolled). Returns the regions and the merged groups' names.
+    """
+    half_tick = 0.5 / PPQ
+    groups: list[list[LogicMidiRegion]] = []
+    group_end = 0.0
+    for region in sorted(regions, key=lambda region: region.start_beats):
+        if groups and region.start_beats < group_end - half_tick:
+            groups[-1].append(region)
+            group_end = max(group_end, region.end_beats)
+        else:
+            groups.append([region])
+            group_end = region.end_beats
+
+    out: list[LogicMidiRegion] = []
+    merged_names: list[str] = []
+    for group in groups:
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        start = group[0].start_beats
+        end = max(region.end_beats for region in group)
+        notes = _without_stacked_notes([
+            replace(note, start_beats=note.start_beats - start) for note in _unroll_regions(group)
+        ])
+        out.append(LogicMidiRegion(name=group[0].name, start_beats=start, length_beats=end - start, notes=notes))
+        merged_names.append(" + ".join(region.name for region in group))
+    return out, merged_names
+
+
+# Adjacent regions can overlap by a fraction of a tick, because positions are
+# stored in ticks and lengths in samples. Overlaps this short are trimmed
+# without a report line.
+_OVERLAP_REPORT_BEATS = 0.01
+
+
+def _cut_overlapping_audio(refs: list[AudioFileRef], *, tempo: float, warnings: list[str]) -> list[AudioFileRef]:
+    """Cut audio regions that overlap on one track so no two clips overlap.
+
+    A Logic audio track plays one region at a time, and where two overlap the
+    one that starts later plays. A Live track holds one clip at a time, so the
+    earlier region is cut where the later one starts. If the earlier region
+    runs past the end of the later one, that remainder is kept as its own
+    clip: whether Logic plays it has not been checked against a real project,
+    and a clip that can be deleted is easier to deal with than missing audio.
+    Every cut is reported.
+    """
+    spans: list[tuple[float, float, float]] = []
+    by_track: dict[str, list[int]] = {}
+    for index, ref in enumerate(refs):
+        samples_per_beat = 60.0 / tempo * _get_audio_sample_rate(ref.file_path)
+        length = ref.content_duration_samples
+        if length is None:
+            try:
+                length = max(0, read_audio_info(ref.file_path).frame_count - ref.content_offset_samples)
+            except (OSError, ValueError):
+                length = 0
+        spans.append((ref.start_beats, ref.start_beats + length / samples_per_beat, samples_per_beat))
+        by_track.setdefault(ref.track_name, []).append(index)
+
+    pieces_by_index: dict[int, list[tuple[float, float]]] = {}
+    cut: list[str] = []
+    for indices in by_track.values():
+        ordered = sorted(indices, key=lambda index: (spans[index][0], index))
+        for position, index in enumerate(ordered):
+            start, end, _ = spans[index]
+            pieces = [(start, end)]
+            first_later: int | None = None
+            for later in ordered[position + 1:]:
+                later_start, later_end, _ = spans[later]
+                if later_end <= later_start or later_start >= end - 1e-9:
+                    continue
+                first_later = later if first_later is None else first_later
+                remaining: list[tuple[float, float]] = []
+                for piece_start, piece_end in pieces:
+                    if later_end <= piece_start or later_start >= piece_end:
+                        remaining.append((piece_start, piece_end))
+                        continue
+                    if later_start > piece_start:
+                        remaining.append((piece_start, later_start))
+                    if later_end < piece_end:
+                        remaining.append((later_end, piece_end))
+                pieces = remaining
+            if pieces == [(start, end)]:
+                continue
+            pieces_by_index[index] = pieces
+            if (end - start) - sum(piece_end - piece_start for piece_start, piece_end in pieces) >= _OVERLAP_REPORT_BEATS:
+                ref, later_ref = refs[index], refs[first_later]
+                cut.append(
+                    f"{ref.track_name}: {ref.clip_name or ref.filename} under {later_ref.clip_name or later_ref.filename}"
+                )
+
+    if not pieces_by_index:
+        return refs
+    out: list[AudioFileRef] = []
+    for index, ref in enumerate(refs):
+        if index not in pieces_by_index:
+            out.append(ref)
+            continue
+        start, _, samples_per_beat = spans[index]
+        for piece_start, piece_end in pieces_by_index[index]:
+            if piece_end - piece_start < _OVERLAP_REPORT_BEATS:
+                continue
+            out.append(replace(
+                ref,
+                start_position_samples=max(0, round(piece_start * samples_per_beat)),
+                content_offset_samples=ref.content_offset_samples + round((piece_start - start) * samples_per_beat),
+                content_duration_samples=int((piece_end - piece_start) * samples_per_beat + 1e-6),
+                start_beats=piece_start,
+            ))
+    if cut:
+        examples = ", ".join(cut[:5]) + (", ..." if len(cut) > 5 else "")
+        warnings.append(
+            f"{len(cut)} audio region(s) overlap a later region on the same track. A track plays one clip at a "
+            f"time, so the later region was kept whole and the earlier one cut around it; compare these with "
+            f"Logic: {examples}"
+        )
+    return out
+
+
 def _unique_track_names(arrangement: LogicArrangement, warnings: list[str]) -> dict[int, str]:
     """Display name per Logic track id, numbering tracks that share a name.
 
@@ -971,6 +1111,7 @@ def _arrangement_midi_tracks(
 
     tracks: list[LogicMidiTrack] = []
     muted: list[str] = []
+    merged: list[str] = []
     for track_id, placements in sorted(
         by_track.items(), key=lambda item: (min(p.lane for p in item[1]), min(p.tick for p in item[1]))
     ):
@@ -1014,7 +1155,15 @@ def _arrangement_midi_tracks(
                 loop_span_beats=placement.loop_span / PPQ if placement.looped else None,
             ))
         if regions:
+            regions, merged_names = _merge_overlapping_midi(regions)
+            merged.extend(f"{track_name}: {names}" for names in merged_names)
             tracks.append(LogicMidiTrack(name=track_name, notes=_unroll_regions(regions), regions=regions))
+    if merged:
+        examples = ", ".join(merged[:5]) + (", ..." if len(merged) > 5 else "")
+        warnings.append(
+            f"{len(merged)} group(s) of overlapping MIDI regions were each written as one clip holding all "
+            f"their notes, because a Live track plays one clip at a time: {examples}"
+        )
     if muted:
         examples = ", ".join(muted[:5]) + (", ..." if len(muted) > 5 else "")
         warnings.append(f"Skipped {len(muted)} muted MIDI region(s) as Logic would not play them: {examples}")
@@ -1107,6 +1256,7 @@ def _arrangement_audio_refs(
                 start_beats=pass_start,
             ))
             lanes.setdefault(track_name, placement.lane)
+    refs = _cut_overlapping_audio(refs, tempo=tempo, warnings=warnings)
     if looped:
         examples = ", ".join(looped[:5]) + (", ..." if len(looped) > 5 else "")
         warnings.append(

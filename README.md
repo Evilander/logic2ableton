@@ -101,6 +101,8 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Regions that start before bar 1 are moved to bar 1 (audio is trimmed by the same amount) because a Live arrangement cannot start earlier
 - Looped audio regions are written as repeated clips, spaced at the project tempo. If the tempo changes under a looped audio region, check the repeats; the report lists every region it unrolled
 - Logic tracks that share a name are kept apart by numbering the later ones (`Guitar`, `Guitar (2)`), and the report says which were renamed
+- A Live track plays one clip at a time. Where audio regions overlap on one Logic track, the later region is kept whole and the earlier one is cut around it; overlapping MIDI regions become one clip holding all their notes. The report lists each case. No real project with overlapping regions has been checked yet, so compare those spots with Logic
+- Region fades, crossfades and region gain are not transferred, so edit points are plain cuts in Live. Take folders are untested; flatten them in Logic first
 - Logic's tempo track is not decoded (only the project tempo is); supply tempo changes with `--timeline`
 - `--smpte-start` only matters for the timestamp fallback; it must then match the project's own synchronization setting (default `01:00:00:00`), and the report lists any files placed at bar 1 because their timestamp precedes it
 - Automation is not recreated
