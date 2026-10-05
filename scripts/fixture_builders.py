@@ -318,51 +318,88 @@ def _logic_rtf(text: str) -> bytes:
 
 
 _LOGIC_STRIP_POOL = 36  # the AuCn object that owns the channel strips in real projects
+# Strip types in the order Logic numbers channels: (label, stereo) -> type code.
+_LOGIC_STRIP_TYPES = {
+    ("Audio", None): 0x40, ("Input", False): 0x41, ("Aux", None): 0x42, ("Inst", None): 0x43,
+    ("Output", False): 0x44, ("Bus", None): 0x45, ("Master", None): 0x46, ("Sub", None): 0x46,
+    ("Input", True): 0x49, ("Output", True): 0x4C,
+}
+
+
+def _logic_strip_identity(label: str) -> tuple[int, int]:
+    """A strip's type code and its number within the type, as Logic stores them."""
+    text = label.lstrip("\u2022").strip()
+    kind, _, numbers = text.partition(" ")
+    pair = "-" in numbers
+    first = int(numbers.split("-")[0]) if numbers else 1
+    if kind in ("Input", "Output"):
+        return _LOGIC_STRIP_TYPES[(kind, pair)], (first - 1) // 2 if pair else first - 1
+    if kind == "Master":
+        return 0x46, 0
+    if kind == "Sub":
+        return 0x46, first  # VCA strips follow the master in its type
+    return _LOGIC_STRIP_TYPES[(kind, None)], first - 1
 
 
 def _logic_channel_strip(
-    index: int,
+    position: int,
     label: str,
     *,
     stereo: bool = False,
     fader: float = 90.0,
     pan: int = 64,
     muted: bool = False,
+    soloed: bool = False,
+    solo_silenced: bool = False,
     output: int = 0xFFFF,
     input_code: int = 0,
+    stereo_input: bool | None = None,
     version: int = 1,
 ) -> bytes:
-    """One AuCO object: label at +96, stereo bit at +114, fader, pan, mute, output and input."""
+    """One AuCO object: type and number at +40, label at +96, stereo bit at +114, fader, stereo
+    input at +122, solo button at +124, pan, mute and silenced-by-a-solo at +126, output and
+    input. Its second id is its place in the file."""
     payload = bytearray(132)
+    struct.pack_into("<HH", payload, 8, *_logic_strip_identity(label))
     encoded = (label if label.startswith("\u2022") else " " + label).encode("mac_roman")
     payload[64:64 + len(encoded)] = encoded
     payload[80:84] = bytes([0xAB, 0xF7, 0xD7 if stereo else 0xD3, 0xCF])
     payload[89] = int(fader)
+    payload[90] = 1 if (stereo if stereo_input is None else stereo_input) else 0
+    payload[92] = 1 if soloed else 0
     payload[93] = pan
-    payload[94] = 1 if muted else 0
+    payload[94] = (1 if muted else 0) | (2 if solo_silenced else 0)
     struct.pack_into("<HH", payload, 96, output, input_code)
     struct.pack_into("<I", payload, 120, int(round(fader * 0x1000000)))
-    return _logic_object("AuCO", bytes(payload), kind=1, id1=_LOGIC_STRIP_POOL, id2=index, version=version)
+    return _logic_object("AuCO", bytes(payload), kind=1, id1=_LOGIC_STRIP_POOL, id2=position, version=version)
 
 
-def _logic_mixer(mixer: dict, *, version: int = 1) -> tuple[bytes, dict[int, int]]:
-    """The channel strip pool of a project, and the pool index of each track's strip.
+def _logic_mixer(mixer: dict, *, version: int = 1) -> tuple[bytes, dict[int, int], dict[int, int]]:
+    """The channel strip pool of a project, and the channel number of each track's strip.
 
     ``mixer``: {"stereo_outputs", "mono_outputs", "stereo_inputs", "mono_inputs",
     "buses": how many of each the pool holds (an audio interface with other
     channel counts numbers the same bus differently), "spare_aux": also write
     Logic's unused aux strips, one preset to each bus, "device_outputs": how
     many outputs get the bullet Logic puts in front of the ones the audio
-    device has, "decoys": {track id: strip index} for objects that are not
+    device has, "decoys": {track id: channel number} for objects that are not
     channel strips but hold that number where a strip object holds its
-    strip, "strips": [...]}.
+    strip, "strips": [...], "late": [...] strips created after the project
+    was, which Logic 10 writes at the end of the pool, "missing": labels of
+    strips Logic counts but whose objects are left out of the file,
+    "owner_list": False to leave out the owner's list of type sizes}.
     A strip: {"label": "Audio 1", "track": the id of the track object that
     plays through it, or a list of ids (omit for a strip that is not on the
     mixer), "stereo", "fader" (0-127, 90 is 0 dB), "pan" (0-127), "muted",
-    and where it plays to: "output" (stereo output pair, 0 is Output 1-2;
-    the default), "bus" (bus number), "mono_output" (output number),
-    "no_output" or "output_code" (the raw number); an aux adds "from_bus",
-    the bus it listens on}.
+    "soloed", "solo_silenced" (by a solo elsewhere), "stereo_input" when it
+    differs from "stereo" (a mono strip fed in stereo), and where it plays to:
+    "output" (stereo output pair, 0 is Output 1-2; the default), "bus" (bus
+    number), "mono_output" (output number), "no_output" or "output_code"
+    (the raw number); an aux adds "from_bus", the bus it listens on}.
+
+    The strips are written in the order given, then the inputs, outputs and
+    buses, then the spare aux strips, then the late ones: not the order Logic
+    numbers channels in, which goes by type.
     """
     stereo_outputs = mixer.get("stereo_outputs", 2)
     mono_outputs = mixer.get("mono_outputs", 2 * stereo_outputs)
@@ -384,50 +421,76 @@ def _logic_mixer(mixer: dict, *, version: int = 1) -> tuple[bytes, dict[int, int
     def input_code(spec: dict) -> int:
         if "from_bus" not in spec:
             return spec.get("input", 0)
-        return (stereo_inputs if spec.get("stereo") else mono_inputs) + spec["from_bus"] - 1
+        fed_in_stereo = spec.get("stereo_input", spec.get("stereo"))
+        return (stereo_inputs if fed_in_stereo else mono_inputs) + spec["from_bus"] - 1
 
-    blob = b""
-    index = 0
-    track_strips: dict[int, int] = {}
-    for spec in mixer.get("strips", []):
-        blob += _logic_channel_strip(
-            index,
-            spec["label"],
-            stereo=bool(spec.get("stereo")),
-            fader=spec.get("fader", 90.0),
-            pan=spec.get("pan", 64),
-            muted=bool(spec.get("muted")),
-            output=output_code(spec),
-            input_code=input_code(spec),
-            version=version,
-        )
-        owners = spec.get("track")
-        for track_id in owners if isinstance(owners, list) else [owners]:
-            if track_id is not None:
-                track_strips[track_id] = index
-        index += 1
     marked = mixer.get("device_outputs", 0)
 
     def output_label(text: str, number: int) -> str:
         return ("\u2022" if number < marked else "") + text
 
-    furniture = [(f"Input {n + 1}", False) for n in range(mono_inputs)]
-    furniture += [(f"Input {2 * n + 1}-{2 * n + 2}", True) for n in range(stereo_inputs)]
-    furniture += [(output_label(f"Output {n + 1}", n), False) for n in range(mono_outputs)]
-    furniture += [(output_label(f"Output {2 * n + 1}-{2 * n + 2}", 2 * n), True) for n in range(stereo_outputs)]
-    furniture += [(f"Bus {n + 1}", True) for n in range(buses)]
-    for label, stereo in furniture:
-        blob += _logic_channel_strip(index, label, stereo=stereo, output=0xFFFF, version=version)
-        index += 1
+    declared = list(mixer.get("strips", []))
+    late = list(mixer.get("late", []))
+    taken = {_logic_strip_identity(spec["label"]) for spec in declared + late}
+    furniture = [{"label": f"Input {n + 1}"} for n in range(mono_inputs)]
+    furniture += [{"label": f"Input {2 * n + 1}-{2 * n + 2}", "stereo": True} for n in range(stereo_inputs)]
+    furniture += [{"label": output_label(f"Output {n + 1}", n)} for n in range(mono_outputs)]
+    furniture += [{"label": output_label(f"Output {2 * n + 1}-{2 * n + 2}", 2 * n), "stereo": True} for n in range(stereo_outputs)]
+    furniture += [{"label": f"Bus {n + 1}", "stereo": True} for n in range(buses)]
+    furniture = [dict(spec, no_output=True) for spec in furniture if _logic_strip_identity(spec["label"]) not in taken]
+    spare = []
     if mixer.get("spare_aux"):
-        for bus in range(1, buses + 1):
-            blob += _logic_channel_strip(
-                index, f"Aux {bus + 100}", stereo=True, output=0, input_code=stereo_inputs + bus - 1, version=version,
-            )
-            index += 1
+        used = [_logic_strip_identity(spec["label"])[1] for spec in declared + late if spec["label"].startswith("Aux ")]
+        first_free = max(used, default=-1) + 2
+        spare = [
+            {"label": f"Aux {first_free + bus - 1}", "stereo": True, "from_bus": bus} for bus in range(1, buses + 1)
+        ]
+
+    written = declared + furniture + spare + late
+    sizes: dict[int, int] = {}
+    for spec in written:
+        kind, number = _logic_strip_identity(spec["label"])
+        sizes[kind] = max(sizes.get(kind, 0), number + 1)
+    first_number, total = {}, 0
+    for kind in sorted(sizes):
+        first_number[kind] = total
+        total += sizes[kind]
+
+    blob = b""
+    if mixer.get("owner_list", True):
+        # The owner: how many strips in all at +62, then of each type from 0x40 at +64.
+        owner = bytearray(64)
+        struct.pack_into("<H", owner, 30, total)
+        for kind, size in sizes.items():
+            struct.pack_into("<H", owner, 32 + 2 * (kind - 0x40), size)
+        blob += _logic_object("AuCn", bytes(owner), kind=1, id1=_LOGIC_STRIP_POOL, id2=0, version=version)
+    missing = set(mixer.get("missing", ()))
+    track_strips: dict[int, int] = {}
+    for position, spec in enumerate(written):
+        kind, number = _logic_strip_identity(spec["label"])
+        owners = spec.get("track")
+        for track_id in owners if isinstance(owners, list) else [owners]:
+            if track_id is not None:
+                track_strips[track_id] = first_number[kind] + number
+        if spec["label"] in missing:
+            continue
+        blob += _logic_channel_strip(
+            position,
+            spec["label"],
+            stereo=bool(spec.get("stereo")),
+            fader=spec.get("fader", 90.0),
+            pan=spec.get("pan", 64),
+            muted=bool(spec.get("muted")),
+            soloed=spec.get("soloed", False),
+            solo_silenced=spec.get("solo_silenced", False),
+            output=output_code(spec),
+            input_code=input_code(spec),
+            stereo_input=spec.get("stereo_input"),
+            version=version,
+        )
     # Every AuCn also owns one small AuCO that is not a strip.
     blob += _logic_object("AuCO", b"\x00" * 14, kind=1, id1=32, id2=0, version=version)
-    blob += _logic_object("AuCO", b"\x00" * 14, kind=1, id1=_LOGIC_STRIP_POOL, id2=index, version=version)
+    blob += _logic_object("AuCO", b"\x00" * 14, kind=1, id1=_LOGIC_STRIP_POOL, id2=len(written), version=version)
     return blob, track_strips, dict(mixer.get("decoys", {}))
 
 
@@ -506,8 +569,8 @@ def build_logic_arrangement_project_data(
         tail = b"\x00" * 16
         if track_id in track_strips or track_id in decoys:
             # A channel strip object: type 0x11 at +117, and after the
-            # even-aligned name the index of its strip, plus one. Other
-            # objects (a MIDI click is type 9) keep unrelated data there.
+            # even-aligned name the channel number of its strip, plus one.
+            # Other objects (a MIDI click is type 9) keep unrelated data there.
             head[117 - 32] = 0x11 if track_id in track_strips else 0x09
             strip_index = track_strips.get(track_id, decoys.get(track_id))
             tail = (b"\x00" if len(encoded) & 1 else b"") + struct.pack("<H", strip_index + 1) + tail

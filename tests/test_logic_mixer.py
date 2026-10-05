@@ -154,12 +154,37 @@ def test_a_mono_aux_counts_its_bus_after_the_mono_inputs():
     assert [aux.name for aux in mixer.bus_listeners(2)] == ["Drums"]
 
 
+def test_a_mono_aux_fed_in_stereo_counts_its_bus_after_the_stereo_inputs():
+    """A summing stack's aux can be a mono strip with a stereo input; it is the input's format,
+    not the strip's, that says which list the input number indexes."""
+    strips = _strips(**{"Aux 1": {"stereo": False, "stereo_input": True}})
+    mixer = decode_project_data(_data(strips)).mixer
+
+    drums = mixer.strip_for_track(9)
+    assert not drums.stereo and drums.stereo_input
+    assert drums.input == 4 + 1  # four stereo inputs, then the buses
+    assert mixer.source_bus(drums) == 2
+    assert [aux.name for aux in mixer.bus_listeners(2)] == ["Drums"]
+
+
+def test_a_stereo_aux_fed_in_mono_counts_its_bus_after_the_mono_inputs():
+    """The other way round: a stereo strip listening on a bus in mono."""
+    strips = _strips(**{"Aux 1": {"stereo": True, "stereo_input": False}})
+    mixer = decode_project_data(_data(strips)).mixer
+
+    drums = mixer.strip_for_track(9)
+    assert drums.stereo and not drums.stereo_input
+    assert drums.input == 8 + 1  # eight mono inputs, then the buses
+    assert mixer.source_bus(drums) == 2
+    assert [aux.name for aux in mixer.bus_listeners(2)] == ["Drums"]
+
+
 def test_unused_aux_strips_in_the_pool_are_not_on_the_mixer():
     """Logic keeps an aux strip for every bus whether or not the project uses it."""
     mixer = decode_project_data(_data(BAND_STRIPS)).mixer
 
-    spare = [strip for strip in mixer.strips.values() if strip.label == "Aux 107"]
-    assert spare and mixer.source_bus(spare[0]) == 7
+    spare = [strip for strip in mixer.strips.values() if strip.is_aux and strip.track_id is None]
+    assert sorted(mixer.source_bus(strip) for strip in spare) == list(range(1, 9))
     assert mixer.bus_listeners(7) == []
 
 
@@ -173,6 +198,57 @@ def test_objects_that_are_not_channel_strips_get_no_strip():
     assert mixer.strip_for_track(21) is None
     kick = mixer.strip_for_track(1)
     assert (kick.index, kick.name, kick.track_id) == (0, "Kick", 1)
+
+
+@pytest.mark.parametrize("owner_list", [True, False])
+def test_a_strip_is_found_by_its_type_and_number_not_its_place_in_the_file(owner_list):
+    """Logic 10 appends strips created later to the end of the pool: a new aux, the outputs of a new
+    interface. A track object still names its strip by Logic's channel number, which counts
+    through the strip types in order, so every number after that type's block moves up."""
+    early = [strip for strip in BAND_STRIPS if strip["label"] not in ("Aux 2", "Aux 3")]
+    late = [strip for strip in BAND_STRIPS if strip["label"] in ("Aux 2", "Aux 3")]
+    late += [
+        {"label": "Output 1-2", "track": 12, "stereo": True, "no_output": True},
+        {"label": "Master", "track": 13, "stereo": True, "no_output": True},
+        {"label": "Output 15", "track": 14, "no_output": True},
+    ]
+    tracks = {**BAND_TRACKS, 12: "Stereo Out", 13: "Master", 14: "Output 15"}
+    pool = {"late": late, "spare_aux": False, "owner_list": owner_list}
+    mixer = decode_project_data(_data(early, tracks=tracks, pool=pool)).mixer
+
+    for track_id, label in ((1, "Audio 1"), (4, "Inst 1"), (9, "Aux 1"), (10, "Aux 2"), (11, "Aux 3"),
+                            (12, "Output 1-2"), (13, "Master"), (14, "Output 15")):
+        assert mixer.strip_for_track(track_id).label == label
+    # Audio 1-4, eight mono inputs, three aux, one instrument, 16 mono outputs, 8 buses, the master.
+    assert mixer.strip_for_track(10).index == 4 + 8 + 1
+    assert mixer.strip_for_track(4).index == 4 + 8 + 3
+    assert mixer.strip_for_track(13).index == 4 + 8 + 3 + 1 + 16 + 8
+    assert [aux.name for aux in mixer.bus_listeners(5)] == ["Overheads"]
+    assert mixer.destination(mixer.strip_for_track(3)) == ("bus", 5)
+
+
+@pytest.mark.parametrize("owner_list", [True, False])
+def test_a_gap_in_a_types_numbers_still_takes_its_place(owner_list):
+    """Channel numbers reserve a type's whole range: with only Aux 1 and Aux 9 present, the
+    instruments still start nine numbers after the first aux."""
+    strips = [strip for strip in BAND_STRIPS if strip["label"] not in ("Aux 2", "Aux 3")]
+    strips.append({"label": "Aux 9", "track": 10, "stereo": True, "from_bus": 5, "bus": 2})
+    mixer = decode_project_data(_data(strips, pool={"spare_aux": False, "owner_list": owner_list})).mixer
+
+    assert mixer.strip_for_track(10).label == "Aux 9"
+    assert mixer.strip_for_track(4).label == "Inst 1"
+    assert mixer.strip_for_track(4).index - mixer.strip_for_track(9).index == 9
+
+
+def test_the_owners_list_keeps_the_numbers_when_a_types_last_strip_is_not_in_the_file():
+    """Were the highest aux left out of the file, counting the strips that are there would move
+    every later channel down by one; the size the pool's owner lists for the type does not."""
+    mixer = decode_project_data(_data(BAND_STRIPS, pool={"spare_aux": False, "missing": ["Aux 3"]})).mixer
+
+    assert mixer.strip_for_track(11) is None
+    assert mixer.strip_for_track(4).label == "Inst 1"
+    assert mixer.strip_for_track(10).label == "Aux 2"
+    assert mixer.destination(mixer.strip_for_track(1)) == ("bus", 2)
 
 
 def test_two_track_objects_on_one_strip_both_get_it():
@@ -298,6 +374,33 @@ def test_two_aux_channels_with_one_name_become_two_groups(tmp_path):
 
     assert project.track_group == {"Kick": "Drums", "Snare": "Drums", "Overhead": "Drums (2)"}
     assert project.track_groups["Drums (2)"].parent == "Drums"
+
+
+def test_saved_solo_is_reported_and_not_turned_into_mutes(tmp_path):
+    """A solo on the bass silences the rest in Logic; that is a listening state, not a mix."""
+    strips = _strips(**{
+        "Audio 4": {"soloed": True},
+        "Audio 1": {"solo_silenced": True},
+        "Audio 2": {"solo_silenced": True},  # muted as well: not news
+        "Audio 3": {"solo_silenced": True},
+    })
+    project = parse_logic_project(_logicx(tmp_path, strips=strips))
+
+    assert not project.mixer_state["Kick"].is_muted and not project.mixer_state["Overhead"].is_muted
+    assert project.mixer_state["Snare"].is_muted
+    assert any(
+        "Solo was on for Bass when the Logic project was saved and silenced 2 track(s) that are not muted" in warning
+        and warning.endswith("Kick, Overhead")
+        for warning in project.compatibility_warnings
+    )
+    mixer = decode_project_data(_data(strips)).mixer
+    assert mixer.strip_for_track(5).soloed and not mixer.strip_for_track(5).solo_silenced
+    assert mixer.strip_for_track(1).solo_silenced and not mixer.strip_for_track(1).soloed
+
+
+def test_no_solo_no_solo_warning(tmp_path):
+    project = parse_logic_project(_logicx(tmp_path))
+    assert not any("solo" in warning.lower() for warning in project.compatibility_warnings)
 
 
 def test_the_mixer_is_the_current_one_not_one_from_the_undo_history(tmp_path):

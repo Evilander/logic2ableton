@@ -40,24 +40,42 @@ and later) and a u32 payload size. The objects read here:
 * ``Envi`` (environment object): u16-prefixed name at +194. Region placements
   reference tracks by this object's id. Byte +117 is the object type, 0x11
   for a channel strip; such an object names its strip in the u16 after the
-  even-aligned name: the strip's index in the pool below, plus one.
+  even-aligned name: the strip's channel number (below), plus one.
 * ``AuCO`` (channel strip): the mixer. One ``AuCn`` object owns the whole
-  pool, every strip Logic could show, used or not, and the strip's second
-  id is its index in the pool. Logic's own label at +96 ("Audio 3",
-  "Inst 1", "Aux 2", "Bus 5", "Input 1-2", "Output 3-4"; the outputs the
-  audio device has carry a bullet in front), bit 2 of +114 set
-  for a stereo strip, fader 0-127 at +121 (the same value with a 24-bit
-  fraction as a u32 at +152), pan 0-127 at +125 (64 is centre), mute at
-  +126, output at +128 and input at +130 (u16).
+  pool, every strip Logic could show, used or not. A strip says what it is
+  with a type at +40 (u16: 0x40 audio, 0x41 mono input, 0x42 aux, 0x43
+  instrument, 0x44 mono output, 0x45 bus, 0x46 master and VCA, 0x49 stereo
+  input, 0x4B stereo instrument output and ReWire, 0x4C stereo output) and
+  its number within that type at +42 (u16, from 0). Its channel number,
+  which is what a track object stores, counts through the types in that
+  order: the sum of the sizes of the lower types, plus its own number. A
+  type's size is its highest strip number plus one, whether or not every
+  strip below that exists; the owning ``AuCn`` lists the sizes as well (a
+  u16 total at +62, then a u16 for each type from 0x40 at +64). The channel
+  number is not the strip's place in the file: saves from Logic 10 append
+  strips created later (a new aux, the inputs and outputs of a new audio
+  interface) to the end of the pool. Logic's label at +96 ("Audio 3",
+  "Aux 2", "Bus 5", "Output 3-4"; the outputs the audio device has carry a
+  bullet in front), bit 2 of +114 set for a stereo strip, fader 0-127 at
+  +121 (the same value with a 24-bit fraction as a u32 at +152), bit 0 of
+  +122 set when the strip's input is stereo (a mono strip can have a stereo
+  input, a stereo strip a mono one), pan 0-127 at +125 (64 is centre),
+  output at +128 and input at +130 (u16). The byte at +126 holds mute in
+  bit 0. A solo shows in two places: bit 0 of +124 on the strip whose solo
+  button is on, and bit 1 of +126 on every strip that solo silences.
     - The fader law is dB = 40 x log10(value / 90): 90 is 0 dB, 127 is
-      +5.98 dB (Logic shows +6.0), and a level typed into Logic as -10 dB
-      is stored as 50.6107.
+      +5.98 dB (the top of the fader, +6.0 in Logic), and a level typed
+      into Logic as -10 dB is stored as 50.6107. Below 0 dB Logic shows a
+      level that sits between two of its 0.1 dB steps as the lower one: a
+      fader stored as 64 is -5.92 dB and reads -6.0 there.
     - The output is an index into the list [stereo outputs, buses, mono
-      outputs], whose section sizes are the numbers of "Output a-b" and
-      "Bus n" strips in the pool, so the same bus has a different number on
-      a different audio interface. 0xFFFF is no output.
-    - An aux strip's input is an index into [stereo inputs, buses] when the
-      strip is stereo and [mono inputs, buses] when it is mono.
+      outputs], whose section sizes are the sizes of those strip types, so
+      the same bus has a different number on a different audio interface.
+      0xFFFF is no output.
+    - An aux strip's input is an index into [stereo inputs, buses] when its
+      input is stereo and [mono inputs, buses] when it is mono. A number
+      past the buses is not a bus: the aux of a multi-output instrument
+      takes its input from the instrument.
 * ``TxSq`` (text): an RTF blob holding a marker's name; its object id equals
   the marker id.
 * ``AuFl`` (audio file): u16-prefixed UTF-16LE file name at +44.
@@ -78,8 +96,9 @@ bar number version-1 saves keep in the song header (u32 at file offset 364,
 in marker ticks). Everything above was reverse-engineered from Logic 10.6.2
 and Logic 11 saves and checked against Logic's own MIDI exports, arrangement
 screenshots and audio file lengths; the mixer against the mute buttons, dB
-readouts, pan values, bus names and track stacks in the picture of its main
-window that Logic saves with each project.
+readouts, pan values, bus names and track stacks in the picture of its
+window that Logic saves with each project, which for some projects is the
+whole Mixer.
 """
 
 from __future__ import annotations
@@ -126,12 +145,18 @@ _STRIP_STEREO = 0x04            # AuCO +114
 _NO_ROUTING = 0xFFFF
 _UNITY_FADER = 90.0             # the fader value Logic shows as 0 dB
 _PAN_CENTRE = 64
-_STEREO_OUTPUT_LABEL = re.compile(r"Output \d+-\d+$")
-_STEREO_INPUT_LABEL = re.compile(r"Input \d+-\d+$")
-_MONO_INPUT_LABEL = re.compile(r"Input \d+$")
-_MONO_OUTPUT_LABEL = re.compile(r"Output \d+$")
 _LABEL_MARK = re.compile(r"^[^0-9A-Za-z]+")  # the bullet in front of a device's own outputs
-_BUS_LABEL = re.compile(r"Bus \d+$")
+# Strip types (AuCO +40), in the order Logic numbers channels.
+_STRIP_MONO_INPUT = 0x41
+_STRIP_AUX = 0x42
+_STRIP_MONO_OUTPUT = 0x44
+_STRIP_BUS = 0x45
+_STRIP_STEREO_INPUT = 0x49
+_STRIP_STEREO_OUTPUT = 0x4C
+_STRIP_FIRST_TYPE = 0x40        # the AuCn that owns the pool lists a size for 16 types from here
+_STRIP_MUTED = 0x01             # AuCO +126
+_STRIP_SOLO_SILENCED = 0x02     # AuCO +126
+_STRIP_SOLOED = 0x01            # AuCO +124
 _RTF_START = bytes([0x7B, 0x5C]) + b"rtf1"
 
 
@@ -230,7 +255,9 @@ class LogicAudioRegion:
 
 @dataclass
 class LogicChannelStrip:
-    index: int              # position in the project's channel strip pool
+    index: int              # Logic's channel number, the one a track object stores
+    kind: int               # strip type: 0x40 audio, 0x42 aux, 0x43 instrument, 0x45 bus, ...
+    number: int             # number within the type, from 0
     label: str              # Logic's own label: "Audio 3", "Inst 1", "Aux 2", "Output 1-2"
     stereo: bool
     muted: bool
@@ -240,10 +267,13 @@ class LogicChannelStrip:
     input: int
     track_id: int | None = None     # the track object that plays through this strip
     name: str | None = None         # that object's name, i.e. the name on the mixer
+    soloed: bool = False            # its solo button was on when the project was saved
+    solo_silenced: bool = False     # silenced by a solo on other strips
+    stereo_input: bool = False      # which input list the input number indexes
 
     @property
     def is_aux(self) -> bool:
-        return self.label.startswith("Aux ")
+        return self.kind == _STRIP_AUX
 
     @property
     def volume_db(self) -> float:
@@ -260,8 +290,8 @@ class LogicChannelStrip:
 
 @dataclass
 class LogicMixer:
-    strips: dict[int, LogicChannelStrip] = field(default_factory=dict)  # by pool index
-    track_strips: dict[int, int] = field(default_factory=dict)          # track id -> pool index
+    strips: dict[int, LogicChannelStrip] = field(default_factory=dict)  # by channel number
+    track_strips: dict[int, int] = field(default_factory=dict)          # track id -> channel number
     stereo_outputs: int = 0
     mono_outputs: int = 0
     stereo_inputs: int = 0
@@ -289,7 +319,7 @@ class LogicMixer:
 
     def source_bus(self, strip: LogicChannelStrip) -> int | None:
         """The bus an aux strip takes its input from, if it is a bus."""
-        first_bus = self.stereo_inputs if strip.stereo else self.mono_inputs
+        first_bus = self.stereo_inputs if strip.stereo_input else self.mono_inputs
         if not self.buses or not first_bus <= strip.input < first_bus + self.buses:
             return None
         return strip.input - first_bus + 1
@@ -466,6 +496,17 @@ def _track_names(data: bytes, objects: list[ObjectHeader]) -> dict[int, str]:
     return names
 
 
+def _listed_strip_sizes(data: bytes, objects: list[ObjectHeader], pool: int) -> dict[int, int]:
+    """The size of each strip type as the pool's owner lists it; empty if the list is not there."""
+    for obj in objects:
+        if obj.tag != "AuCn" or obj.id1 != pool or obj.size < 64 or obj.offset + 96 > len(data):
+            continue
+        sizes = {_STRIP_FIRST_TYPE + place: _u16(data, obj.offset + 64 + 2 * place) for place in range(16)}
+        if sum(sizes.values()) == _u16(data, obj.offset + 62):
+            return {kind: size for kind, size in sizes.items() if size}
+    return {}
+
+
 def _mixer(data: bytes, objects: list[ObjectHeader]) -> LogicMixer:
     """Read the channel strip pool and which track object plays through which strip."""
     mixer = LogicMixer()
@@ -480,27 +521,51 @@ def _mixer(data: bytes, objects: list[ObjectHeader]) -> LogicMixer:
     for obj in candidates:
         owners[obj.id1] = owners.get(obj.id1, 0) + 1
     pool = max(owners, key=lambda owner: (owners[owner], -owner))
+    found: dict[tuple[int, int], LogicChannelStrip] = {}
     for obj in candidates:
-        if obj.id1 != pool or obj.id2 in mixer.strips:
-            continue
         base = obj.offset
+        key = (_u16(data, base + 40), _u16(data, base + 42))
+        if obj.id1 != pool or key in found:
+            continue
         label = _LABEL_MARK.sub("", data[base + 96:base + 112].split(b"\x00")[0].decode("mac_roman")).strip()
-        mixer.strips[obj.id2] = LogicChannelStrip(
-            index=obj.id2,
+        state = data[base + 126]
+        found[key] = LogicChannelStrip(
+            index=-1,
+            kind=key[0],
+            number=key[1],
             label=label,
             stereo=bool(data[base + 114] & _STRIP_STEREO),
-            muted=bool(data[base + 126] & 1),
+            muted=bool(state & _STRIP_MUTED),
             fader=_u32(data, base + 152) / 0x1000000,
             pan=data[base + 125],
             output=_u16(data, base + 128),
             input=_u16(data, base + 130),
+            soloed=bool(data[base + 124] & _STRIP_SOLOED),
+            solo_silenced=bool(state & _STRIP_SOLO_SILENCED),
+            stereo_input=bool(data[base + 122] & 1),
         )
-    labels = [strip.label for strip in mixer.strips.values()]
-    mixer.stereo_outputs = sum(1 for label in labels if _STEREO_OUTPUT_LABEL.match(label))
-    mixer.mono_outputs = sum(1 for label in labels if _MONO_OUTPUT_LABEL.match(label))
-    mixer.stereo_inputs = sum(1 for label in labels if _STEREO_INPUT_LABEL.match(label))
-    mixer.mono_inputs = sum(1 for label in labels if _MONO_INPUT_LABEL.match(label))
-    mixer.buses = sum(1 for label in labels if _BUS_LABEL.match(label))
+    # Channel numbers run through the types in order, each type taking as
+    # many numbers as its highest strip number says, present or not. The
+    # owner's list says the same in every project seen; it keeps the numbers
+    # right should the last strip of a type be missing from the file.
+    sizes: dict[int, int] = {}
+    for kind, number in found:
+        sizes[kind] = max(sizes.get(kind, 0), number + 1)
+    for kind, size in _listed_strip_sizes(data, objects, pool).items():
+        sizes[kind] = max(sizes.get(kind, 0), size)
+    first_number: dict[int, int] = {}
+    total = 0
+    for kind in sorted(sizes):
+        first_number[kind] = total
+        total += sizes[kind]
+    for (kind, number), strip in found.items():
+        strip.index = first_number[kind] + number
+        mixer.strips[strip.index] = strip
+    mixer.stereo_outputs = sizes.get(_STRIP_STEREO_OUTPUT, 0)
+    mixer.mono_outputs = sizes.get(_STRIP_MONO_OUTPUT, 0)
+    mixer.stereo_inputs = sizes.get(_STRIP_STEREO_INPUT, 0)
+    mixer.mono_inputs = sizes.get(_STRIP_MONO_INPUT, 0)
+    mixer.buses = sizes.get(_STRIP_BUS, 0)
 
     for obj in objects:
         if obj.tag != "Envi" or obj.offset + 196 > len(data) or data[obj.offset + 117] != _STRIP_OBJECT_TYPE:

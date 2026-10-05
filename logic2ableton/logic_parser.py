@@ -1362,6 +1362,27 @@ def _arrangement_mixer(
         elif problem:
             stopped.setdefault(("track", problem), []).append(track_name)
 
+    silenced = [
+        name for track_id, name in track_names_by_id.items()
+        if (strip := mixer.strip_for_track(track_id)) is not None and strip.solo_silenced and not strip.muted
+    ]
+    if silenced:
+        shown = dict(group_names)
+        for track_id, name in track_names_by_id.items():
+            if (strip := mixer.strip_for_track(track_id)) is not None:
+                shown.setdefault(strip.index, name)
+        soloed = [
+            shown.get(strip.index) or strip.name or strip.label
+            for strip in sorted(mixer.strips.values(), key=lambda strip: strip.index)
+            if strip.soloed and strip.track_id is not None
+        ]
+        where = f" for {', '.join(soloed[:5])}{', ...' if len(soloed) > 5 else ''}" if soloed else ""
+        examples = ", ".join(silenced[:5]) + (", ..." if len(silenced) > 5 else "")
+        warnings.append(
+            f"Solo was on{where} when the Logic project was saved and silenced {len(silenced)} track(s) that are "
+            f"not muted. Solo is not carried over, so they play here: {examples}"
+        )
+
     reasons = {
         "unheard": "with no aux channel listening on it",
         "shared": "that more than one aux channel listens on, which a Live group cannot mirror",
