@@ -808,15 +808,18 @@ def _build_compatibility_warnings(
     smpte_start_seconds: float = 3600.0,
     smpte_start_inferred: bool = False,
     track_count: int | None = None,
+    on_disk_names: set[str] | None = None,
 ) -> list[str]:
     """Summarize bundle conditions that are likely to produce incomplete conversions.
 
     ``track_count`` overrides the audio-filename-derived track count when the
-    arrangement itself named the tracks.
+    arrangement itself named the tracks. ``on_disk_names`` are the audio files
+    found in the project's audio folder; without it the converted clips stand
+    in, which is only right when every file found becomes a clip.
     """
     warnings: list[str] = []
 
-    discovered_names = {ref.filename for ref in audio_files}
+    discovered_names = {ref.filename for ref in audio_files} if on_disk_names is None else on_disk_names
     metadata_names = meta.get("audio_files", [])
     missing_bundle_files = [name for name in metadata_names if name not in discovered_names]
     if missing_bundle_files:
@@ -848,7 +851,7 @@ def _build_compatibility_warnings(
             f"{recovered_track_count} track(s) were recoverable from bundled audio filenames"
         )
 
-    if not audio_files:
+    if not discovered_names:
         warnings.append(
             "No bundled audio files were discovered under Media/Audio Files (package-saved) or "
             "a sibling Audio Files folder next to the .logicx (folder-saved); this project may "
@@ -887,6 +890,28 @@ def _build_compatibility_warnings(
         )
 
     return warnings
+
+
+TEMPO_TRACK_WARNING = "Logic's tempo track changes tempo"
+
+
+def _tempo_track_warning(arrangement: LogicArrangement, bar_beats: float, project_tempo: float) -> str | None:
+    """Say so when the project has tempo changes, which are read but not converted yet."""
+    events = arrangement.tempo_events
+    changes = [(before, after) for before, after in zip(events, events[1:]) if abs(after.bpm - before.bpm) >= 0.0001]
+    if not changes:
+        return None
+    before, after = changes[0]
+    beats = (after.tick - SEQUENCE_ORIGIN_TICKS) / PPQ
+    bar_index = math.floor(beats / bar_beats + 1e-9)
+    beat = beats - bar_index * bar_beats + 1
+    where = f"bar {bar_index + 1}" if abs(beat - 1) < 1e-6 else f"bar {bar_index + 1} beat {beat:.3g}"
+    return (
+        f"{TEMPO_TRACK_WARNING} {len(changes)} time(s) in this project, first at {where} "
+        f"({before.bpm:g} to {after.bpm:g} BPM). Tempo changes are not converted yet: the Live set stays at "
+        f"{project_tempo:g} BPM throughout, so audio and bar positions will not line up with Logic from there on. "
+        "Until they are, list the changes in a --timeline file."
+    )
 
 
 def _unroll_regions(regions: list[LogicMidiRegion]) -> list[LogicMidiNote]:
@@ -1178,25 +1203,37 @@ def _arrangement_audio_refs(
     bar_beats: float,
     track_names_by_id: dict[int, str],
     warnings: list[str],
+    listed_as_used: bool = False,
 ) -> tuple[list[AudioFileRef], list[str]]:
-    """Audio clips as Logic placed them: one ref per region, one per repetition when looped."""
+    """Audio clips as Logic placed them: one ref per region, one per repetition when looped.
+
+    ``listed_as_used`` says that ``discovered`` holds exactly the files Logic's
+    own metadata lists as used by this alternative. Each of them must then
+    have a region; one that has none means part of the arrangement was not
+    read, and that is reported instead of passing as a clean result.
+    """
     by_name = {ref.filename.casefold(): ref for ref in discovered}
     refs: list[AudioFileRef] = []
     lanes: dict[str, int] = {}
     missing: list[str] = []
     muted: list[str] = []
     looped: list[str] = []
+    placed: set[str] = set()
+    undescribed = 0
+    empty: list[str] = []
     for placement in sorted(arrangement.regions, key=lambda p: (p.tick, p.lane)):
         if placement.kind != "audio":
             continue
         filename = arrangement.audio_files.get(placement.audio_file_id)
         if not filename:
+            undescribed += 1
             continue
         source = by_name.get(filename.casefold())
         track_name = track_names_by_id.get(placement.track_id) or arrangement.track_name(placement.track_id)
         if source is None:
             missing.append(filename)
             continue
+        placed.add(filename.casefold())
         region = arrangement.audio_regions.get((placement.audio_file_id, placement.audio_region_index))
         region_name = region.name if region and region.name else None
         label = region_name or filename
@@ -1220,15 +1257,20 @@ def _arrangement_audio_refs(
             if span_beats > length_beats * (1 + 1e-9):
                 passes = []
                 repetition = 0
-                while repetition * length_beats < span_beats - 1e-9:
+                # Spans are in ticks and lengths in samples: a remainder under
+                # half a tick is rounding between the two, not another pass.
+                while repetition * length_beats < span_beats - 0.5 / PPQ:
                     remaining_beats = span_beats - repetition * length_beats
                     length = (
                         content_length if remaining_beats >= length_beats
                         else round(remaining_beats * samples_per_beat)
                     )
+                    if length <= 0:
+                        break
                     passes.append((start_beats + repetition * length_beats, content_offset, length))
                     repetition += 1
-                looped.append(f"{track_name}: {label} x{len(passes)}")
+                if len(passes) > 1:
+                    looped.append(f"{track_name}: {label} x{len(passes)}")
 
         for pass_start, pass_offset, pass_length in passes:
             if pass_start < 0:
@@ -1245,6 +1287,7 @@ def _arrangement_audio_refs(
                         continue
                 pass_start = 0.0
             if pass_length is not None and pass_length <= 0:
+                empty.append(f"{track_name}: {label}")
                 continue
             refs.append(replace(
                 source,
@@ -1273,6 +1316,22 @@ def _arrangement_audio_refs(
     if muted:
         examples = ", ".join(muted[:5]) + (", ..." if len(muted) > 5 else "")
         warnings.append(f"Skipped {len(muted)} muted audio region(s) as Logic would not play them: {examples}")
+    if empty:
+        examples = ", ".join(empty[:5]) + (", ..." if len(empty) > 5 else "")
+        warnings.append(f"{len(empty)} audio region(s) have no length in the project data and were left out: {examples}")
+    if undescribed:
+        warnings.append(
+            f"{undescribed} audio region(s) point at an audio file the project data does not describe "
+            "and were left out. Please report this project."
+        )
+    unplaced = [ref.filename for ref in discovered if ref.filename.casefold() not in placed] if listed_as_used else []
+    if unplaced:
+        examples = ", ".join(unplaced[:5]) + (", ..." if len(unplaced) > 5 else "")
+        warnings.append(
+            f"{len(unplaced)} audio file(s) are used in the Logic project, but the converter found no region "
+            f"for them, so they are MISSING from the result: {examples}. The files are fine; part of this "
+            "project could not be read. Please report it."
+        )
     track_names = sorted(lanes, key=lambda name: lanes[name])
     return refs, track_names
 
@@ -1309,13 +1368,14 @@ def parse_logic_project(
     meta = parse_metadata(logicx_path, alternative=alternative)
     audio_dir, audio_layout = resolve_audio_dir(logicx_path)
     audio_files = discover_audio_files(logicx_path)
-    discovered_count = len(audio_files)
+    on_disk_names = {ref.filename for ref in audio_files}
     active_names = set(meta["audio_files"])
     unused_names = set(meta["unused_audio_files"])
     audio_files = [
         ref for ref in audio_files
         if (ref.filename in active_names if meta["has_audio_membership"] else ref.filename not in unused_names)
     ]
+    excluded_count = len(on_disk_names) - len({ref.filename for ref in audio_files})
 
     # One shared timestamp-resolution pass, filtered to this alternative's
     # contained media references, reused below for SMPTE-start inference,
@@ -1358,6 +1418,7 @@ def parse_logic_project(
             bar_beats=bar_beats,
             track_names_by_id=track_names_by_id,
             warnings=midi_warnings,
+            listed_as_used=meta["has_audio_membership"],
         )
         regions = {ref.filename: ref.start_position_samples for ref in audio_files}
         timeline = _arrangement_timeline(arrangement)
@@ -1401,12 +1462,15 @@ def parse_logic_project(
         smpte_start_seconds=effective_smpte_start,
         smpte_start_inferred=smpte_start_inferred,
         track_count=track_count,
+        on_disk_names=on_disk_names,
     )
-    excluded_count = discovered_count - len({ref.filename for ref in audio_files})
     if excluded_count:
         compatibility_warnings.append(
             f"Excluded {excluded_count} unused or unreferenced audio file(s) from the selected Logic alternative."
         )
+    tempo_warning = _tempo_track_warning(arrangement, bar_beats, meta["tempo"])
+    if tempo_warning:
+        compatibility_warnings.insert(0, tempo_warning)
     compatibility_warnings.extend(midi_warnings)
 
     return LogicProject(

@@ -6,21 +6,33 @@ a u32 class id, two u32 object ids, a 4- or 8-byte sentinel, the bytes
 ``02 00 00 00``, a u16 format version (1 for Logic 10.x saves, 2 for Logic 11
 and later) and a u32 payload size. The objects read here:
 
-* ``EvSq`` (event sequence): fixed-size records starting 36 bytes into the
-  object. Each record begins with a u32 status and a u32 tick; the low
-  status byte selects the record type and size, status bit 0x4000 means a
-  32-byte extension record trails the event, and a status of 0xF1
-  terminates the list.
-    - 0x90 note (32 bytes): velocity at +11, pitch at +12, int16 nudge at
-      +20, event class 0x89 at +23, duration in ticks at +28.
-    - 0x12 marker (48 bytes): marker id at +16, event class 0x88 at +23,
-      distance to the next marker at +28.
-    - 0x20 / 0x24 MIDI / audio region placement (80 bytes): flags at +12
-      (bit 0 mute, bit 12 loop), track id at +16, lane index at +20, loop
-      span in ticks at +28 (0x3FFFFFFF when the region does not loop), MSeq
-      id at +32 for MIDI regions, audio region index at +40 and audio file
-      id at +44 for audio regions. Per-track automation containers are
-      stored as MIDI placements of an MSeq named ``*Automation``.
+* ``EvSq`` (event sequence): events starting 36 bytes into the object, each
+  a chain of 16-byte units. The first unit begins with a u32 status and a
+  u32 tick, and the low status byte is the event type. Every further unit
+  of the same event has the high bit set in its eighth byte (a class byte
+  such as 0x88, 0x89, 0x8A, 0xAA, 0xBC), which a first unit never has
+  because that byte is the top of the tick. An event's size is therefore
+  read off the data, not a table, and whatever Logic attaches to an event
+  (the extra units of some notes, the fades of an audio region) travels
+  with it. A status of 0xF1 terminates the list.
+    - 0x90 note (2 units, more with attached data): velocity at +11, pitch
+      at +12, int16 nudge at +20, class 0x89 at +23, duration in ticks at
+      +28.
+    - 0x12 marker (3 units): marker id at +16, class 0x88 at +23, distance
+      to the next marker at +28.
+    - 0x20 / 0x24 MIDI / audio region placement (5 units, more when the
+      region has fades): flags at +12 (bit 0 mute, bit 12 loop), track id
+      at +16, lane index at +20, class 0x89 at +23, loop span in ticks at
+      +28 (0x3FFFFFFF when the region does not loop), MSeq id at +32 for
+      MIDI regions, class 0x88 (MIDI) or 0xBC (audio) at +39, audio region
+      index at +40 and audio file id at +44 for audio regions.
+      Per-track automation containers are stored as MIDI placements of an
+      MSeq named ``*Automation``.
+    - 0x60 tempo (2 units): class 0x88 at +23, beats per minute x 10000 at
+      +16, and at +24 the time the event falls on in 1/2000 s (one hour is
+      added, the default SMPTE start). A tempo holds until the next event:
+      integrating the list that way reproduces every stored time to the
+      millisecond. The list is read into ``tempo_events``.
 * ``MSeq`` (a MIDI region's content): u16-prefixed UTF-8 name at +52; from
   the even-aligned end of that name, the content start offset at +4 and the
   content length at +60, both in ticks. The EvSq with the notes follows the
@@ -67,17 +79,24 @@ _TAGS = (
 )
 _TAG_RE = re.compile(b"|".join(re.escape(tag) for tag in _TAGS))
 _SENTINELS = (b"\xff\xff\xff\xff", b"\xff\xff\xff\x7f")
-_RECORD_SIZES = {0x90: 32, 0x12: 48, 0x20: 80, 0x24: 80, 0x11: 64, 0x30: 80, 0x60: 32, 0xC0: 16, 0x50: 16}
+_UNIT = 16                  # events are chains of 16-byte units
+_NOTE_SIZE = 32
+_MARKER_SIZE = 48
+_PLACEMENT_SIZE = 80
 _NOTE_STATUS = 0x90
 _MARKER_STATUS = 0x12
+_TEMPO_STATUS = 0x60
+_TEMPO_SIZE = 32
+_TEMPO_CLASS = 0x88
 _MIDI_REGION_STATUS = 0x20
 _AUDIO_REGION_STATUS = 0x24
 _NOTE_CLASS = 0x89
 _MARKER_CLASS = 0x88
+_PLACEMENT_CLASS = 0x89
+_MIDI_REGION_CLASS = 0x88
+_AUDIO_REGION_CLASS = 0xBC
 _FLAG_MUTE = 0x1
 _FLAG_LOOP = 0x1000
-_EXTENSION_FLAG = 0x4000    # status bit: a 32-byte extension record follows the event
-_EXTENSION_SIZE = 32
 _PROJECT_START_OFFSET = 364
 _RTF_START = bytes([0x7B, 0x5C]) + b"rtf1"
 
@@ -138,6 +157,12 @@ class LogicMarker:
 
 
 @dataclass
+class LogicTempoEvent:
+    tick: int       # marker frame: 38400 is bar 1
+    bpm: float      # in effect until the next event
+
+
+@dataclass
 class LogicPlacement:
     """One region on the arrangement."""
     kind: str           # "midi" or "audio"
@@ -181,6 +206,7 @@ class LogicArrangement:
     audio_regions: dict[tuple[int, int], LogicAudioRegion] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     history_steps: int = 0  # undo-history snapshots found after the current state and ignored
+    tempo_events: list[LogicTempoEvent] = field(default_factory=list)
 
     @property
     def regions(self) -> list[LogicPlacement]:
@@ -235,27 +261,32 @@ def scan_objects(data: bytes) -> list[ObjectHeader]:
 
 
 def iter_records(data: bytes, seq: ObjectHeader):
-    """Yield (status, tick, record_offset) for the records of an EvSq."""
+    """Yield (status, tick, record_offset, size) for the events of an EvSq.
+
+    The size comes from the data: the first unit of an event is followed by
+    its continuation units, recognisable by the high bit of their eighth
+    byte. Unknown event types and data attached to known ones are stepped
+    over at their real size, so they never hide the events after them.
+    """
     pos = seq.offset + 36
     end = min(seq.offset + 32 + seq.size, len(data))
-    while pos + 8 <= end:
+    while pos + _UNIT <= end:
         status = _u32(data, pos)
-        if status == _TERMINATOR:
+        tick = _u32(data, pos + 4)
+        if status == _TERMINATOR or (status == 0 and tick == _NO_LOOP):
             return
-        low = status & 0xFF
-        size = _RECORD_SIZES.get(low)
-        if size is None or pos + size > end:
-            return  # unknown record type: stop rather than desync
-        yield low, _u32(data, pos + 4), pos
+        size = _UNIT
+        while pos + size + _UNIT <= end and data[pos + size + 7] & 0x80:
+            size += _UNIT
+        if not data[pos + 7] & 0x80:  # a stray continuation unit is not an event
+            yield status & 0xFF, tick, pos, size
         pos += size
-        if status & _EXTENSION_FLAG:
-            pos += _EXTENSION_SIZE  # an extra data record trails this event
 
 
 def _notes(data: bytes, seq: ObjectHeader) -> list[LogicNote]:
     notes = []
-    for status, tick, pos in iter_records(data, seq):
-        if status != _NOTE_STATUS or data[pos + 23] != _NOTE_CLASS:
+    for status, tick, pos, size in iter_records(data, seq):
+        if status != _NOTE_STATUS or size < _NOTE_SIZE or data[pos + 23] != _NOTE_CLASS:
             continue
         velocity, pitch = data[pos + 11], data[pos + 12]
         duration = _u32(data, pos + 28)
@@ -360,8 +391,8 @@ def _markers(data: bytes, objects: list[ObjectHeader]) -> list[LogicMarker]:
     for obj in objects:
         if obj.tag != "EvSq":
             continue
-        for status, tick, pos in iter_records(data, obj):
-            if status != _MARKER_STATUS or data[pos + 23] != _MARKER_CLASS:
+        for status, tick, pos, size in iter_records(data, obj):
+            if status != _MARKER_STATUS or size < _MARKER_SIZE or data[pos + 23] != _MARKER_CLASS:
                 continue
             marker_id = _u32(data, pos + 16)
             markers.append(LogicMarker(tick=tick, id=marker_id, name=names.get(marker_id, f"Marker {marker_id}")))
@@ -369,16 +400,36 @@ def _markers(data: bytes, objects: list[ObjectHeader]) -> list[LogicMarker]:
     return markers
 
 
+def _tempo_events(data: bytes, objects: list[ObjectHeader]) -> list[LogicTempoEvent]:
+    """Logic's tempo track: the first event sequence that holds tempo events."""
+    for obj in objects:
+        if obj.tag != "EvSq":
+            continue
+        events = []
+        for status, tick, pos, size in iter_records(data, obj):
+            if status != _TEMPO_STATUS or size < _TEMPO_SIZE or data[pos + 23] != _TEMPO_CLASS:
+                continue
+            bpm = _u32(data, pos + 16) / 10_000
+            if 1.0 <= bpm <= 1000.0:
+                events.append(LogicTempoEvent(tick=tick, bpm=bpm))
+        if events:
+            return sorted(events, key=lambda event: event.tick)
+    return []
+
+
 def _placements(data: bytes, objects: list[ObjectHeader]) -> list[LogicPlacement]:
     placements = []
     for obj in objects:
         if obj.tag != "EvSq":
             continue
-        for status, tick, pos in iter_records(data, obj):
-            if status not in (_MIDI_REGION_STATUS, _AUDIO_REGION_STATUS):
+        for status, tick, pos, size in iter_records(data, obj):
+            if status not in (_MIDI_REGION_STATUS, _AUDIO_REGION_STATUS) or size < _PLACEMENT_SIZE:
+                continue
+            is_midi = status == _MIDI_REGION_STATUS
+            region_class = _MIDI_REGION_CLASS if is_midi else _AUDIO_REGION_CLASS
+            if data[pos + 23] != _PLACEMENT_CLASS or data[pos + 39] != region_class:
                 continue
             loop_span = _u32(data, pos + 28)
-            is_midi = status == _MIDI_REGION_STATUS
             placements.append(LogicPlacement(
                 kind="midi" if is_midi else "audio",
                 tick=tick,
@@ -456,6 +507,7 @@ def decode_project_data(data: bytes, *, beats_per_bar: float = 4.0) -> LogicArra
     arrangement.track_names = _track_names(data, objects)
     arrangement.markers = _markers(data, objects)
     arrangement.placements = _placements(data, objects)
+    arrangement.tempo_events = _tempo_events(data, objects)
     arrangement.audio_files = _audio_files(data, objects)
     arrangement.audio_regions = _audio_regions(data, objects)
     arrangement.project_start_bar = _project_start_bar(

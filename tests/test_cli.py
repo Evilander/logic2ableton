@@ -629,6 +629,33 @@ def test_cli_timeline_keeps_decoded_markers_unless_it_lists_its_own(tmp_path, mo
     assert ("Bridge" in captured.out) is json_markers
 
 
+@pytest.mark.parametrize("with_timeline", [False, True])
+def test_cli_timeline_with_tempo_replaces_the_unconverted_tempo_note(tmp_path, monkeypatch, capsys, with_timeline):
+    from logic2ableton.logic_parser import TEMPO_TRACK_WARNING
+
+    project_path = tmp_path / "project.logicx"
+    project_path.mkdir()
+    (project_path / "Alternatives").mkdir()
+
+    def _two_tempo_project(*_args, **_kwargs):
+        project = _minimal_project(name="Two tempos")
+        project.compatibility_warnings = [f"{TEMPO_TRACK_WARNING} 1 time(s) in this project, first at bar 17."]
+        return project
+
+    monkeypatch.setattr("logic2ableton.cli.parse_logic_project", _two_tempo_project)
+    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+
+    argv = [str(project_path), "--output", str(tmp_path / "output"), "--report-only"]
+    if with_timeline:
+        timeline_path = tmp_path / "timeline.json"
+        timeline_path.write_text(json.dumps({"tempo": [{"bar": 17, "bpm": 83}]}))
+        argv += ["--timeline", str(timeline_path)]
+    exit_code = main(argv)
+
+    assert exit_code == 0
+    assert (TEMPO_TRACK_WARNING in capsys.readouterr().out) is not with_timeline
+
+
 @pytest.mark.parametrize("write_timeline", [None, "missing", "invalid", "tiny_bpm", "huge_bpm"])
 def test_cli_timeline_missing_or_invalid_file_exits_1(tmp_path, monkeypatch, write_timeline):
     project_path = tmp_path / "project.logicx"

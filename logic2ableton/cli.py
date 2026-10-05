@@ -17,7 +17,12 @@ from logic2ableton.paths import output_path, safe_name, unique_output_path
 from logic2ableton import __version__
 from logic2ableton.ableton_generator import generate_als, unmatched_keep_unwarped_warnings
 from logic2ableton.ableton_parser import parse_ableton_project
-from logic2ableton.logic_parser import load_mixer_overrides, parse_logic_project, parse_smpte_start
+from logic2ableton.logic_parser import (
+    TEMPO_TRACK_WARNING,
+    load_mixer_overrides,
+    parse_logic_project,
+    parse_smpte_start,
+)
 from logic2ableton.logic_transfer import build_logic_transfer_report, generate_logic_transfer
 from logic2ableton.plugin_matcher import match_plugins
 from logic2ableton.protools_import import (
@@ -550,6 +555,13 @@ def _run_forward(args: argparse.Namespace) -> int:
             # replaces them.
             if decoded_markers and not project.timeline.markers:
                 project.timeline.markers = decoded_markers
+            if project.timeline.tempo_events:
+                # The file supplies the tempo map, so the note about Logic's
+                # own tempo changes not being converted no longer applies.
+                project.compatibility_warnings = [
+                    warning for warning in project.compatibility_warnings
+                    if not warning.startswith(TEMPO_TRACK_WARNING)
+                ]
         except (OSError, ValueError) as exc:
             return _emit_failure(
                 mode=FORWARD_MODE,

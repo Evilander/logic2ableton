@@ -15,6 +15,8 @@ from logic2ableton.logic_project_data import (
     scan_objects,
 )
 from scripts.fixture_builders import (
+    _logic_object,
+    _logic_placement_record,
     build_logic_arrangement_project_data,
     build_synthetic_logicx,
     logic_note_record,
@@ -119,22 +121,92 @@ def test_version_two_header_decodes_with_bar_one_start():
     assert arrangement.region_beats(click.tick, 4.0) == 8.0
 
 
-def test_record_walk_stops_at_unknown_status_instead_of_desyncing():
+def test_record_walk_steps_over_unknown_events_at_their_real_size():
+    # An event type the decoder does not know, three units long: its two
+    # continuation units carry a class byte with the high bit set.
+    unknown = b"\x77\x00\x00\x00" + b"\x00" * 12 + (b"\x00" * 7 + b"\xaa" + b"\x00" * 8) * 2
     blob = _two_track_blob(sequences=[{
         "id": 44,
         "name": "Click",
         "length": BAR,
-        "notes": [
-            (0, 60, 100, 120),
-            b"\x77\x00\x00\x00" + b"\x00" * 28,  # unknown record type
-            (960, 62, 90, 120),
-        ],
+        "notes": [(0, 60, 100, 120), unknown, (960, 62, 90, 120)],
     }])
     arrangement = decode_project_data(blob)
-    notes = arrangement.sequences[44].notes
-    assert [n.pitch for n in notes] == [60]
+    assert [n.pitch for n in arrangement.sequences[44].notes] == [60, 62]
     seq = next(o for o in scan_objects(blob) if o.tag == "EvSq" and o.id1 == 44)
-    assert [status for status, _, _ in iter_records(blob, seq)] == [0x90]
+    assert [(status, size) for status, _, _, size in iter_records(blob, seq)] == [(0x90, 32), (0x77, 48), (0x90, 32)]
+
+
+def test_region_with_attached_fade_data_does_not_hide_the_regions_after_it():
+    """A region that has fades carries ten extra units. Reading it with a fixed
+    record size stopped the walk there and dropped every later region."""
+    blob = build_logic_arrangement_project_data(
+        tracks={1: "Original", 2: "Time Code", 3: "Pilot"},
+        sequences=[],
+        midi_regions=[],
+        audio_files={10: "Original.aif", 20: "LTC.wav", 30: "Pilot.aif"},
+        audio_regions=[
+            {"file": 10, "index": 0, "name": "Original", "offset": 0, "length": 44_100},
+            {"file": 20, "index": 0, "name": "LTC", "offset": 0, "length": 44_100},
+            {"file": 30, "index": 0, "name": "Pilot", "offset": 0, "length": 44_100},
+        ],
+        audio_placements=[
+            {"bar": 3, "track": 1, "file": 10, "lane": 1, "muted": True, "fades": True},
+            {"bar": 3, "track": 2, "file": 20, "lane": 2},
+            {"bar": 3, "track": 3, "file": 30, "lane": 3},
+        ],
+    )
+    arrangement = decode_project_data(blob)
+    audio = [p for p in arrangement.regions if p.kind == "audio"]
+    assert [(arrangement.audio_files[p.audio_file_id], p.muted) for p in audio] == [
+        ("Original.aif", True), ("LTC.wav", False), ("Pilot.aif", False),
+    ]
+    seq = next(o for o in scan_objects(blob) if o.tag == "EvSq" and o.id1 == 4)
+    assert [size for _, _, _, size in iter_records(blob, seq)] == [240, 80, 80]
+
+
+def _event_sequence(records: bytes, terminator: bytes) -> tuple[bytes, object]:
+    """An EvSq object holding ``records`` and the given 12-byte terminator."""
+    payload = b"\x00\x00\x00\x00" + records + terminator
+    blob = _logic_object("EvSq", payload, kind=1, id1=7, id2=1)
+    return blob, next(o for o in scan_objects(blob) if o.tag == "EvSq")
+
+
+def test_record_walk_ends_at_either_terminator_and_skips_stray_units():
+    note = logic_note_record(0, 60, 100, 120)
+    stray = b"\x00" * 7 + b"\x88" + b"\x00" * 8          # a continuation unit with no event before it
+    after = logic_note_record(960, 62, 90, 120)
+
+    usual = b"\xf1\x00\x00\x00\xff\xff\xff\x3f\x00\x00\x00\x00"
+    blob, seq = _event_sequence(stray + note, usual)
+    assert [(status, size) for status, _, _, size in iter_records(blob, seq)] == [(0x90, 32)]
+
+    # Some sequences end with a zero status instead of 0xF1; nothing after it is an event.
+    zero_status = b"\x00\x00\x00\x00\xff\xff\xff\x3f\x00\x00\x00\x00"
+    blob, seq = _event_sequence(note + zero_status + b"\x00" * 4 + after, usual)
+    assert [(status, tick) for status, tick, _, _ in iter_records(blob, seq)] == [(0x90, 38400)]
+
+
+def test_region_event_without_its_class_bytes_is_not_a_region():
+    good = _logic_placement_record(audio=True, tick=34560, track=1, lane=1, flags=0, loop_span=None, audio_file=10)
+    wrong_class = bytearray(_logic_placement_record(
+        audio=True, tick=38400, track=2, lane=2, flags=0, loop_span=None, audio_file=20,
+    ))
+    wrong_class[39] = 0x88  # an audio region carries 0xBC here
+    blob, seq = _event_sequence(good + bytes(wrong_class), b"\xf1\x00\x00\x00\xff\xff\xff\x3f\x00\x00\x00\x00")
+    assert [size for _, _, _, size in iter_records(blob, seq)] == [80, 80]
+    arrangement = decode_project_data(b"\x00" * 24 + _logic_object("Song", b"\x00" * 376, kind=3) + blob)
+    assert [(p.kind, p.track_id) for p in arrangement.placements] == [("audio", 1)]
+
+
+def test_tempo_track_is_read_as_steps_from_bar_one():
+    blob = _two_track_blob(tempo=81.5, tempo_changes=[(17, 83.0), (25, 81.5)])
+    arrangement = decode_project_data(blob)
+    assert [(event.tick, event.bpm) for event in arrangement.tempo_events] == [
+        (38400, 81.5), (38400 + 16 * BAR, 83.0), (38400 + 24 * BAR, 81.5),
+    ]
+    # a project without changes still has its one tempo event
+    assert [event.bpm for event in decode_project_data(_two_track_blob()).tempo_events] == [150.0]
 
 
 def test_empty_or_foreign_data_yields_nothing():
@@ -223,24 +295,61 @@ def test_region_before_bar_one_is_moved_and_trimmed(tmp_path):
     assert clip.content_duration_samples == 88200 - trimmed
 
 
-# A real Logic project can be checked against expectations kept outside the
+def test_project_with_tempo_changes_says_they_are_not_converted(tmp_path):
+    changing = parse_logic_project(_synthetic_project(
+        tmp_path / "changing", _two_track_blob(tempo=81.5, tempo_changes=[(17, 83.0), (25, 81.5)]),
+    ))
+    assert changing.compatibility_warnings[0].startswith(
+        "Logic's tempo track changes tempo 2 time(s) in this project, first at bar 17 (81.5 to 83 BPM)."
+    )
+    # The set keeps the project tempo (120 in this bundle's metadata), whatever the first event says.
+    assert "the Live set stays at 120 BPM throughout" in changing.compatibility_warnings[0]
+    steady = parse_logic_project(_synthetic_project(tmp_path / "steady", _two_track_blob()))
+    assert not any("tempo track" in warning for warning in steady.compatibility_warnings)
+
+    off_bar = parse_logic_project(_synthetic_project(
+        tmp_path / "off-bar", _two_track_blob(tempo=120.0, tempo_changes=[(3.625, 90.0)]),
+    ))
+    assert "first at bar 3 beat 3.5 (120 to 90 BPM)" in off_bar.compatibility_warnings[0]
+
+
+# Real Logic projects can be checked against expectations kept outside the
 # repository: L2A_LOGIC_ARRANGEMENT_CASES points at a JSON list of
-# {"logicx": path, "project_start_bar": int, "markers": [[beat, name], ...],
-#  "midi_tracks": {name: [regions, unrolled_notes]}, "audio_clips": [[track, clip, beat], ...]}.
+# {"logicx": path, "alternative": int, "project_start_bar": int, "markers": [[beat, name], ...],
+#  "midi_tracks": {name: [regions, unrolled_notes]}, "audio_clips": [[track, clip, beat], ...],
+#  "audio_regions": int, "tempo_events": int}. Only "logicx" is required.
 _CASES = os.environ.get("L2A_LOGIC_ARRANGEMENT_CASES")
 
 
 @pytest.mark.skipif(not _CASES or not Path(_CASES).exists(), reason="no real-project expectations configured")
 def test_real_projects_match_recorded_expectations():
     for case in json.loads(Path(_CASES).read_text(encoding="utf-8")):
-        project = parse_logic_project(Path(case["logicx"]))
-        assert project.arrangement_decoded, case["logicx"]
-        assert project.project_start_bar == case["project_start_bar"]
-        assert [[m.beat, m.name] for m in project.timeline.markers] == case["markers"]
-        assert {t.name: [len(t.regions), t.note_count] for t in project.midi_tracks} == {
-            name: list(values) for name, values in case["midi_tracks"].items()
-        }
-        clips = sorted(
-            [[c.track_name, c.clip_name, c.start_beats] for c in project.audio_files], key=lambda c: (c[2], c[0], c[1])
-        )
-        assert clips == sorted(case["audio_clips"], key=lambda c: (c[2], c[0], c[1]))
+        label = f"{case['logicx']} alternative {case.get('alternative')}"
+        project = parse_logic_project(Path(case["logicx"]), alternative=case.get("alternative"))
+        assert project.arrangement_decoded, label
+        # Logic's own list of used audio files is the yardstick: a file on it
+        # without a region means part of the arrangement was not read.
+        assert not any("MISSING from the result" in w for w in project.compatibility_warnings), label
+        if "project_start_bar" in case:
+            assert project.project_start_bar == case["project_start_bar"], label
+        if "markers" in case:
+            assert [[m.beat, m.name] for m in project.timeline.markers] == case["markers"], label
+        if "midi_tracks" in case:
+            assert {t.name: [len(t.regions), t.note_count] for t in project.midi_tracks} == {
+                name: list(values) for name, values in case["midi_tracks"].items()
+            }, label
+        if "audio_clips" in case:
+            clips = sorted(
+                [[c.track_name, c.clip_name, c.start_beats] for c in project.audio_files],
+                key=lambda c: (c[2], c[0], c[1]),
+            )
+            assert clips == sorted(case["audio_clips"], key=lambda c: (c[2], c[0], c[1])), label
+        if "audio_regions" in case or "tempo_events" in case:
+            data = (
+                Path(case["logicx"]) / "Alternatives" / f"{project.alternative:03d}" / "ProjectData"
+            ).read_bytes()
+            arrangement = decode_project_data(data)
+            if "audio_regions" in case:
+                assert sum(1 for p in arrangement.regions if p.kind == "audio") == case["audio_regions"], label
+            if "tempo_events" in case:
+                assert len(arrangement.tempo_events) == case["tempo_events"], label

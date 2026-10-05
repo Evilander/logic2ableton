@@ -112,8 +112,14 @@ def build_synthetic_logicx(
     *,
     project_data: bytes,
     sampler_files: list[str] | None = None,
+    used_audio_files: list[str] | None = None,
 ) -> Path:
-    """Create a minimal Logic bundle containing supplied ProjectData."""
+    """Create a minimal Logic bundle containing supplied ProjectData.
+
+    ``used_audio_files`` writes Logic's own list of the audio files this
+    alternative uses (MetaData ``AudioFiles``); without it the bundle carries
+    no such list, like saves from older Logic versions.
+    """
     logicx_path = output_dir / "Synth.logicx"
     resources = logicx_path / "Resources"
     alternative = logicx_path / "Alternatives" / "000"
@@ -127,6 +133,9 @@ def build_synthetic_logicx(
         "NumberOfTracks": 0,
         "SamplerInstrumentsFiles": sampler_files or [],
     }
+    if used_audio_files is not None:
+        metadata["AudioFiles"] = [f"Audio Files/{name}" for name in used_audio_files]
+        metadata["UnusedAudioFiles"] = []
     with open(alternative / "MetaData.plist", "wb") as handle:
         plistlib.dump(metadata, handle)
     (alternative / "ProjectData").write_bytes(project_data)
@@ -214,8 +223,8 @@ def logic_note_record(
     nudge: int = 0,
     extension: bool = False,
 ) -> bytes:
-    """A 32-byte note event (status 0x90); ``extension`` appends the trailing
-    data record Logic writes for some notes (status bit 0x4000)."""
+    """A 32-byte note event (status 0x90); ``extension`` appends the two extra
+    units Logic attaches to some notes (status bit 0x4000, classes 0xA3 and 0xA7)."""
     status = 0x90 | (0x4000 if extension else 0)
     record = (
         struct.pack("<II", status, _LOGIC_SEQUENCE_ORIGIN + rel_tick)
@@ -227,8 +236,22 @@ def logic_note_record(
     )
     assert len(record) == 32
     if extension:
-        record += b"\xe4\xd9\x01\x00" + b"\x00" * 28
+        record += b"\xe4\xd9\x01\x00\x00\x00\x00\xa3" + b"\x00" * 8
+        record += b"\x00" * 7 + b"\xa7" + b"\x00" * 8
     return record
+
+
+def _logic_tempo_record(tick: int, bpm: float, seconds: float) -> bytes:
+    """A tempo event (status 0x60): the tempo x 10000 and the time it falls on,
+    in 1/2000 s counted from one hour."""
+    return (
+        struct.pack("<II", 0x60, tick)
+        + b"\x00\x00\x00\x00\x7f\x00\x00\x01"
+        + struct.pack("<I", int(round(bpm * 10_000)))
+        + b"\x00\x00\x40\x88"
+        + struct.pack("<I", int(round((3600 + seconds) * 2000)))
+        + b"\x00\x00\x00\x00"
+    )
 
 
 def _logic_marker_record(tick: int, marker_id: int, length: int) -> bytes:
@@ -254,7 +277,11 @@ def _logic_placement_record(
     sequence: int = 0,
     audio_index: int = 0,
     audio_file: int = 0,
+    fades: bool = False,
 ) -> bytes:
+    """An 80-byte region placement: five 16-byte units, each continuation unit
+    marked by a class byte with the high bit set. ``fades`` appends the ten
+    units Logic attaches to an audio region that has fades."""
     span = 0x3FFFFFFF if loop_span is None else loop_span
     record = (
         struct.pack("<II", 0x24 if audio else 0x20, tick)
@@ -267,9 +294,16 @@ def _logic_placement_record(
         + (b"\xff\xff\xff\xff" if audio else struct.pack("<I", sequence))
         + (b"\x00\x00\x00\xbc" if audio else b"\x00\x00\x00\x88")
         + struct.pack("<II", audio_index if audio else 0, audio_file if audio else 0)
-        + b"\x00" * 32
+        + b"\x00\x06\x00\x00\x00\x00\x06\x8a" + b"\x00" * 8
+        + b"\x00" * 7 + (b"\x89" if audio else b"\x88") + b"\x00" * 8
     )
     assert len(record) == 80
+    if fades:
+        group = (
+            b"\x00\x00\x00\x00\x00\x00\x0b\xaa" + b"\x00" * 8
+            + (b"\x00" * 7 + b"\x88" + b"\x00" * 8) * 4
+        )
+        record += group * 2
     return record
 
 
@@ -296,8 +330,12 @@ def build_logic_arrangement_project_data(
     tempo: float = 120.0,
     version: int = 1,
     history: list[dict] | None = None,
+    tempo_changes: list[tuple[float, float]] | None = None,
 ) -> bytes:
     """ProjectData in the object layout logic_project_data decodes.
+
+    ``tempo_changes``: (bar, bpm) steps of the tempo track after bar 1, where
+    ``tempo`` starts.
 
     ``history``: undo-history steps appended after the current state, as Logic
     saves them: each dict takes the same keys as this function (tracks,
@@ -308,7 +346,7 @@ def build_logic_arrangement_project_data(
     prebuilt record bytes, "start": content start ticks, "length": content ticks}.
     ``midi_regions``: {"bar", "track", "sequence", "loop_bars", "muted", "lane"}.
     ``audio_regions``: {"file", "index", "name", "offset", "length"}.
-    ``audio_placements``: {"bar", "track", "file", "index", "muted", "lane", "loop_beats"}.
+    ``audio_placements``: {"bar", "track", "file", "index", "muted", "lane", "loop_beats", "fades"}.
     ``markers``: (bar, marker_id, name). Bars are 1-based arrangement bars.
     """
     start_bar = 1 if project_start_bar is None else project_start_bar
@@ -329,6 +367,17 @@ def build_logic_arrangement_project_data(
     blob = b"\x00" * 24 + _logic_object(
         "Song", bytes(song_payload), kind=3, class_id=0xFFFFFFFF, id1=0xFFFFFFFF, version=version,
     )
+
+    # The tempo track: one event at bar 1 and one per change, each stamped
+    # with the time it falls on.
+    tempo_records = _logic_tempo_record(_LOGIC_SEQUENCE_ORIGIN, tempo, 0.0)
+    current_bar, current_bpm, seconds = 1.0, tempo, 0.0
+    for bar, bpm in sorted(tempo_changes or []):
+        seconds += (bar - current_bar) * (_LOGIC_TICKS_PER_BAR / 960) * 60.0 / current_bpm
+        tick = _LOGIC_SEQUENCE_ORIGIN + int(round((bar - 1) * _LOGIC_TICKS_PER_BAR))
+        tempo_records += _logic_tempo_record(tick, bpm, seconds)
+        current_bar, current_bpm = bar, bpm
+    blob += _logic_event_sequence(tempo_records, id1=0, id2=9000, version=version)
 
     for track_id, name in tracks.items():
         encoded = name.encode("utf-8")
@@ -374,6 +423,7 @@ def build_logic_arrangement_project_data(
             loop_span=int(spec["loop_beats"] * 960) if spec.get("loop_beats") else None,
             audio_index=spec.get("index", 0),
             audio_file=spec["file"],
+            fades=bool(spec.get("fades")),
         )
     blob += _logic_object("MSeq", b"\x00" * 20 + b"\x00\x00" + b"\x00" * 80, kind=2, id1=4, version=version)
     blob += _logic_event_sequence(placements, id1=4, id2=9004, version=version)
@@ -409,8 +459,9 @@ def build_logic_arrangement_project_data(
             audio_placements=step.get("audio_placements"),
             markers=step.get("markers"),
             project_start_bar=project_start_bar,
-            tempo=tempo,
+            tempo=step.get("tempo", tempo),
             version=version,
+            tempo_changes=step.get("tempo_changes"),
         )
         blob += snapshot[24:]  # its Song object and the old object copies
     return blob

@@ -103,7 +103,7 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Logic tracks that share a name are kept apart by numbering the later ones (`Guitar`, `Guitar (2)`), and the report says which were renamed
 - A Live track plays one clip at a time. Where audio regions overlap on one Logic track, the later region is kept whole and the earlier one is cut around it; overlapping MIDI regions become one clip holding all their notes. The report lists each case. No real project with overlapping regions has been checked yet, so compare those spots with Logic
 - Region fades, crossfades and region gain are not transferred, so edit points are plain cuts in Live. Take folders are untested; flatten them in Logic first
-- Logic's tempo track is not decoded (only the project tempo is); supply tempo changes with `--timeline`
+- Tempo changes in Logic's tempo track are read but not converted yet. The Live set stays at the project tempo, and the report says how many changes there are and where the first one is; supply them with `--timeline`
 - `--smpte-start` only matters for the timestamp fallback; it must then match the project's own synchronization setting (default `01:00:00:00`), and the report lists any files placed at bar 1 because their timestamp precedes it
 - Automation is not recreated
 - Bus and send routing are not recreated
@@ -340,7 +340,7 @@ summary at the end.
 
 ### Timeline JSON
 
-`--timeline` supplies a tempo map, which the parser does not read from Logic's tempo track, and optionally markers. Markers decoded from the project are kept unless the file lists its own, which then replace them:
+`--timeline` supplies a tempo map (Logic's own tempo changes are not converted yet) and optionally markers. Markers decoded from the project are kept unless the file lists its own, which then replace them:
 
 ```json
 {

@@ -219,6 +219,146 @@ def test_undo_history_snapshots_are_not_read_as_the_current_arrangement(tmp_path
     assert [(m.beat, m.name) for m in project.timeline.markers] == [(16.0, "Verse")]
 
 
+def _show_project(tmp_path: Path, *, audio_placements, files=("Original.aif", "LTC.wav", "Pilot.aif")) -> Path:
+    """A live-show layout: a reference recording, a timecode track and a pilot tone,
+    with Logic's own list saying all three files are used."""
+    ids = {"Original.aif": 10, "LTC.wav": 20, "Pilot.aif": 30}
+    data = build_logic_arrangement_project_data(
+        tracks={1: "Original", 2: "Time Code", 3: "Pilot"},
+        sequences=[],
+        midi_regions=[],
+        audio_files={ids[name]: name for name in files},
+        audio_regions=[
+            {"file": ids[name], "index": 0, "name": Path(name).stem, "offset": 0, "length": 2 * RATE} for name in files
+        ],
+        audio_placements=audio_placements,
+    )
+    logicx = build_synthetic_logicx(tmp_path / "source", project_data=data, used_audio_files=list(files))
+    for name in files:
+        _three_level_wav(logicx / "Media" / "Audio Files" / name)
+    return logicx
+
+
+def test_region_with_fades_does_not_drop_the_tracks_listed_after_it(tmp_path):
+    """Reported from a real show session: the first audio region had fades, and the
+    timecode and pilot tracks after it vanished with a 'files not found' message."""
+    logicx = _show_project(tmp_path, audio_placements=[
+        {"bar": 3, "track": 1, "file": 10, "lane": 1, "muted": True, "fades": True},
+        {"bar": 3, "track": 2, "file": 20, "lane": 2},
+        {"bar": 3, "track": 3, "file": 30, "lane": 3},
+    ])
+    project = parse_logic_project(logicx)
+
+    assert [(c.track_name, c.filename, c.start_beats) for c in project.audio_files] == [
+        ("Time Code", "LTC.wav", 8.0), ("Pilot", "Pilot.aif", 8.0),
+    ]
+    assert project.track_names == ["Time Code", "Pilot"]
+    warnings = "\n".join(project.compatibility_warnings)
+    assert "Skipped 1 muted audio region(s)" in warnings
+    assert "MISSING" not in warnings and "not found" not in warnings and "No bundled audio" not in warnings
+
+    als = generate_als(project, tmp_path / "out", copy_audio=False, template_path=_BUNDLED_TEMPLATE)
+    root = ET.fromstring(gzip.decompress(als.read_bytes()))
+    assert len(root.findall(".//Tracks/AudioTrack")) == 2
+
+
+def test_used_file_without_a_region_is_reported_as_missing_not_as_absent_from_disk(tmp_path):
+    # Logic lists all three files as used and all three are on disk, but the
+    # arrangement the converter can read only places one of them.
+    logicx = _show_project(tmp_path, audio_placements=[{"bar": 3, "track": 2, "file": 20, "lane": 2}])
+    project = parse_logic_project(logicx)
+
+    assert [c.filename for c in project.audio_files] == ["LTC.wav"]
+    warnings = "\n".join(project.compatibility_warnings)
+    assert "2 audio file(s) are used in the Logic project" in warnings
+    assert "MISSING from the result: Original.aif, Pilot.aif" in warnings
+    # The files are on disk and Logic uses them: none of the older messages apply.
+    assert "not found inside" not in warnings
+    assert "No bundled audio files" not in warnings
+    assert "unused or unreferenced" not in warnings
+
+
+def test_file_missing_from_disk_is_still_reported_as_not_found(tmp_path):
+    logicx = _show_project(tmp_path, audio_placements=[
+        {"bar": 3, "track": 2, "file": 20, "lane": 2},
+        {"bar": 3, "track": 3, "file": 30, "lane": 3},
+        {"bar": 3, "track": 1, "file": 10, "lane": 1},
+    ])
+    (logicx / "Media" / "Audio Files" / "Pilot.aif").unlink()
+    project = parse_logic_project(logicx)
+
+    assert sorted(c.filename for c in project.audio_files) == ["LTC.wav", "Original.aif"]
+    warnings = "\n".join(project.compatibility_warnings)
+    assert "1 audio file(s) listed by Logic were not found inside Media/Audio Files" in warnings
+    assert "MISSING from the result" not in warnings
+
+
+def test_project_whose_audio_regions_are_all_muted_is_not_reported_as_missing_audio(tmp_path):
+    logicx = _show_project(tmp_path, audio_placements=[
+        {"bar": 3, "track": 1, "file": 10, "lane": 1, "muted": True},
+        {"bar": 3, "track": 2, "file": 20, "lane": 2, "muted": True},
+        {"bar": 3, "track": 3, "file": 30, "lane": 3, "muted": True},
+    ])
+    project = parse_logic_project(logicx)
+
+    assert project.audio_files == []
+    warnings = "\n".join(project.compatibility_warnings)
+    assert "Skipped 3 muted audio region(s)" in warnings
+    assert "MISSING" not in warnings and "No bundled audio" not in warnings and "not found" not in warnings
+
+
+def test_regions_the_project_data_cannot_back_are_reported(tmp_path):
+    ids = {"Original.aif": 10, "LTC.wav": 20}
+    data = build_logic_arrangement_project_data(
+        tracks={1: "Original", 2: "Time Code", 3: "Pilot"},
+        sequences=[],
+        midi_regions=[],
+        audio_files={10: "Original.aif", 20: "LTC.wav"},
+        audio_regions=[
+            {"file": 10, "index": 0, "name": "Original", "offset": 0, "length": 2 * RATE},
+            {"file": 20, "index": 0, "name": "LTC", "offset": 0, "length": 0},  # no length
+        ],
+        audio_placements=[
+            {"bar": 3, "track": 1, "file": 10, "lane": 1},
+            {"bar": 3, "track": 2, "file": 20, "lane": 2},
+            {"bar": 3, "track": 3, "file": 99, "lane": 3},  # no such audio file object
+        ],
+    )
+    logicx = build_synthetic_logicx(tmp_path / "source", project_data=data, used_audio_files=list(ids))
+    for name in ids:
+        _three_level_wav(logicx / "Media" / "Audio Files" / name)
+    project = parse_logic_project(logicx)
+
+    assert [c.filename for c in project.audio_files] == ["Original.aif"]
+    warnings = "\n".join(project.compatibility_warnings)
+    assert "1 audio region(s) have no length in the project data and were left out: Time Code: LTC" in warnings
+    assert "1 audio region(s) point at an audio file the project data does not describe" in warnings
+
+
+def test_loop_whose_last_pass_rounds_to_nothing_is_one_clip_without_a_warning(tmp_path):
+    # At 120 BPM an 11025 Hz file has 5512.5 samples per beat. A 5512-sample
+    # region looped across one beat leaves half a sample for a second pass.
+    data = build_logic_arrangement_project_data(
+        tracks={1: "Loop"},
+        sequences=[],
+        midi_regions=[],
+        audio_files={10: "Loop.wav"},
+        audio_regions=[{"file": 10, "index": 0, "name": "Loop", "offset": 0, "length": 5512}],
+        audio_placements=[{"bar": 1, "track": 1, "file": 10, "lane": 1, "loop_beats": 1}],
+    )
+    logicx = build_synthetic_logicx(tmp_path / "source", project_data=data, used_audio_files=["Loop.wav"])
+    wav = logicx / "Media" / "Audio Files" / "Loop.wav"
+    wav.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(wav), "wb") as handle:
+        handle.setparams((1, 2, 11_025, 0, "NONE", "not compressed"))
+        handle.writeframes(struct.pack("<h", 1000) * 11_025)
+    project = parse_logic_project(logicx)
+
+    assert [(c.start_beats, c.content_duration_samples) for c in project.audio_files] == [(0.0, 5512)]
+    warnings = "\n".join(project.compatibility_warnings)
+    assert "no length" not in warnings and "looped audio region" not in warnings
+
+
 def _overlap_project(tmp_path: Path, *, audio_regions, audio_placements, sequences=(), midi_regions=()) -> Path:
     """A 120 BPM project (two beats per second) over a 12-second Guitar.wav."""
     data = build_logic_arrangement_project_data(
