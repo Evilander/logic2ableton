@@ -1,10 +1,11 @@
-"""Tempo map and markers loaded from an external --timeline JSON file.
+"""Tempo map and markers: read from the Logic project, or from a --timeline JSON file.
 
-Logic Pro projects can carry tempo changes and markers that the .logicx
-parser does not extract yet. Until that lands, --timeline lets a user
-supply the same information by hand, positioned in bars/beats against the
-project's base time signature. A Timeline only carries the raw, validated
-events; TempoMap does the actual beat/second math against them.
+The .logicx parser reads tempo changes and markers from the project's own
+data. --timeline lets a user supply either by hand instead, positioned in
+bars/beats against the project's base time signature: tempo entries in the
+file replace the project's tempo changes, markers replace its markers. A
+Timeline only carries the raw, validated events; TempoMap does the actual
+beat/second math against them.
 """
 
 import json
@@ -44,6 +45,9 @@ class Timeline:
     tempo_events: list[TempoEvent]
     markers: list[TimelineMarker]
     source_path: str = ""
+    # Which parts were read from the Logic project (the rest came from the file).
+    tempo_from_project: bool = False
+    markers_from_project: bool = False
 
 
 def beats_per_bar(numerator: int, denominator: int) -> float:

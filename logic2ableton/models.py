@@ -122,6 +122,8 @@ class LogicProject:
     # True when regions, loops, markers and track names came from the
     # project's own arrangement data rather than from audio timestamps.
     arrangement_decoded: bool = False
+    # True when Logic's tempo track was read (its changes, if any, are in timeline.tempo_events).
+    tempo_track_decoded: bool = False
     project_start_bar: int | None = None
 
     @property

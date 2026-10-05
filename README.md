@@ -46,14 +46,14 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 
 - Audio tracks into Ableton Arrangement View
 - Region placement read from the Logic project itself: audio regions land where Logic had them, trimmed to the same slice of their file, on tracks named after the Logic tracks; older saves the decoder cannot read fall back to WAV BWF timestamps and Logic AIFF `MARK` chunks
-- Tempo and time signature
+- Tempo and time signature. Tempo changes are read from Logic's tempo track and become Live tempo automation; warped clips get a warp marker at each change, so the audio keeps its speed and its place (checked on a project with 85 tempo changes by opening the set in Live 12 and reading the tempo back)
 - Overlap resolution for takes and comp bounces
 - Audio membership follows the selected Logic alternative; unused and unreferenced takes are excluded
 - Distinct per-track colors, with arrangement clips matching their track color
 - MIDI regions decoded from Logic's binary project data land as **native Ableton MIDI tracks** inside the `.als` (and as Standard MIDI file exports): one clip per region at its arrangement position, and looped Logic regions become looping Live clips
 - Logic markers become Live locators; muted regions are left out, as Logic would not play them
 - `--smpte-start` sets the SMPTE time bar 1 plays at (or infers it with `auto`), for projects whose placement comes from audio timestamps
-- `--timeline` supplies a tempo map (and, optionally, markers that replace the decoded ones); it becomes Live tempo automation, locators, and warp markers that follow the map (verified by opening the generated set in Live 12.4.3 and reading back its values)
+- `--timeline` supplies your own tempo map and/or markers in place of the ones read from the project; they become Live tempo automation, locators, and warp markers that follow the map (verified by opening the generated set in Live 12.4.3 and reading back its values)
 - `--keep-unwarped` keeps matching tracks (sync tone, pilot tracks, timecode) as unwarped Live clips so they never stretch when the tempo changes
 - Folder-saved Logic projects (a `.logicx` package next to a sibling `Audio Files` folder) are read the same as package-saved ones
 - Multiple `.logicx` inputs in one run, converted and reported one after another
@@ -99,11 +99,12 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - MIDI notes transfer as native MIDI tracks (and `.mid` exports), but the software instruments, their settings, and MIDI effects are not recreated — reload instruments in Ableton
 - Region placement, loops, track names and markers come from the project's own arrangement data. That decoding was worked out on Logic 10.6 and Logic 11 saves; the report says "Region positions: read from the Logic arrangement" when it applies. Saves it cannot read fall back to audio timestamps, `MIDI 1`, `MIDI 2`, ... track names, and a warning
 - Regions that start before bar 1 are moved to bar 1 (audio is trimmed by the same amount) because a Live arrangement cannot start earlier
-- Looped audio regions are written as repeated clips, spaced at the project tempo. If the tempo changes under a looped audio region, check the repeats; the report lists every region it unrolled
+- Looped audio regions are written as repeated clips; the report lists every region it unrolled
 - Logic tracks that share a name are kept apart by numbering the later ones (`Guitar`, `Guitar (2)`), and the report says which were renamed
 - A Live track plays one clip at a time. Where audio regions overlap on one Logic track, the later region is kept whole and the earlier one is cut around it; overlapping MIDI regions become one clip holding all their notes. The report lists each case. No real project with overlapping regions has been checked yet, so compare those spots with Logic
 - Region fades, crossfades and region gain are not transferred, so edit points are plain cuts in Live. Take folders are untested; flatten them in Logic first
-- Tempo changes in Logic's tempo track are read but not converted yet. The Live set stays at the project tempo, and the report says how many changes there are and where the first one is; supply them with `--timeline`
+- Tempo changes are read as steps, which is how the projects seen so far store them. Logic also stores the time each change falls on; if the steps do not add up to those times (a tempo curve, for example) the report says so. Tempo changes before bar 1 are not carried over, and tempos outside Live's 20 to 999 BPM range are limited to it
+- When the arrangement cannot be read and placement falls back to audio timestamps, Logic's tempo changes are reported but not applied; supply them with `--timeline`
 - `--smpte-start` only matters for the timestamp fallback; it must then match the project's own synchronization setting (default `01:00:00:00`), and the report lists any files placed at bar 1 because their timestamp precedes it
 - Automation is not recreated
 - Bus and send routing are not recreated
@@ -336,11 +337,11 @@ summary at the end.
 | `--generate-mixer-template` | Write a starter `mixer_overrides.json` |
 | `--smpte-start` | SMPTE time bar 1 plays at (default `01:00:00:00`); pass `auto` to infer one whole SMPTE hour from the earliest recording (also on `logic2protools`) |
 | `--keep-unwarped` | Track-name glob, case-insensitive and repeatable; matching tracks are written as unwarped Live clips so they never stretch when the tempo changes |
-| `--timeline` | JSON file with a tempo map and markers applied on top of the Logic project (see [Timeline JSON](#timeline-json) below) |
+| `--timeline` | JSON file with a tempo map and/or markers used in place of the ones read from the Logic project (see [Timeline JSON](#timeline-json) below) |
 
 ### Timeline JSON
 
-`--timeline` supplies a tempo map (Logic's own tempo changes are not converted yet) and optionally markers. Markers decoded from the project are kept unless the file lists its own, which then replace them:
+Tempo changes and markers are read from the Logic project. `--timeline` is for supplying your own: tempo entries in the file replace the project's tempo changes, and markers in the file replace the project's markers. Whatever the file leaves out is still taken from the project:
 
 ```json
 {

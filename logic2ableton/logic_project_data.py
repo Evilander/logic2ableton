@@ -160,6 +160,7 @@ class LogicMarker:
 class LogicTempoEvent:
     tick: int       # marker frame: 38400 is bar 1
     bpm: float      # in effect until the next event
+    seconds: float = 0.0  # the time Logic stored for the event (one hour is bar 1 by default)
 
 
 @dataclass
@@ -411,7 +412,9 @@ def _tempo_events(data: bytes, objects: list[ObjectHeader]) -> list[LogicTempoEv
                 continue
             bpm = _u32(data, pos + 16) / 10_000
             if 1.0 <= bpm <= 1000.0:
-                events.append(LogicTempoEvent(tick=tick, bpm=bpm))
+                # signed: an event before bar 1 can fall before the SMPTE start
+                stamp = struct.unpack_from("<i", data, pos + 24)[0]
+                events.append(LogicTempoEvent(tick=tick, bpm=bpm, seconds=stamp / 2000))
         if events:
             return sorted(events, key=lambda event: event.tick)
     return []

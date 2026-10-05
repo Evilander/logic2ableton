@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from logic2ableton.logic_parser import parse_logic_project
+from logic2ableton.logic_parser import _get_audio_sample_rate, parse_logic_project
 from logic2ableton.logic_project_data import (
     PROJECT_START_TICKS,
     SEQUENCE_ORIGIN_TICKS,
@@ -14,6 +14,7 @@ from logic2ableton.logic_project_data import (
     iter_records,
     scan_objects,
 )
+from logic2ableton.timeline import TempoMap
 from scripts.fixture_builders import (
     _logic_object,
     _logic_placement_record,
@@ -295,24 +296,6 @@ def test_region_before_bar_one_is_moved_and_trimmed(tmp_path):
     assert clip.content_duration_samples == 88200 - trimmed
 
 
-def test_project_with_tempo_changes_says_they_are_not_converted(tmp_path):
-    changing = parse_logic_project(_synthetic_project(
-        tmp_path / "changing", _two_track_blob(tempo=81.5, tempo_changes=[(17, 83.0), (25, 81.5)]),
-    ))
-    assert changing.compatibility_warnings[0].startswith(
-        "Logic's tempo track changes tempo 2 time(s) in this project, first at bar 17 (81.5 to 83 BPM)."
-    )
-    # The set keeps the project tempo (120 in this bundle's metadata), whatever the first event says.
-    assert "the Live set stays at 120 BPM throughout" in changing.compatibility_warnings[0]
-    steady = parse_logic_project(_synthetic_project(tmp_path / "steady", _two_track_blob()))
-    assert not any("tempo track" in warning for warning in steady.compatibility_warnings)
-
-    off_bar = parse_logic_project(_synthetic_project(
-        tmp_path / "off-bar", _two_track_blob(tempo=120.0, tempo_changes=[(3.625, 90.0)]),
-    ))
-    assert "first at bar 3 beat 3.5 (120 to 90 BPM)" in off_bar.compatibility_warnings[0]
-
-
 # Real Logic projects can be checked against expectations kept outside the
 # repository: L2A_LOGIC_ARRANGEMENT_CASES points at a JSON list of
 # {"logicx": path, "alternative": int, "project_start_bar": int, "markers": [[beat, name], ...],
@@ -344,7 +327,12 @@ def test_real_projects_match_recorded_expectations():
                 key=lambda c: (c[2], c[0], c[1]),
             )
             assert clips == sorted(case["audio_clips"], key=lambda c: (c[2], c[0], c[1])), label
-        if "audio_regions" in case or "tempo_events" in case:
+        if "clips" in case:
+            assert len(project.audio_files) == case["clips"], label
+        if "tempo_changes" in case:
+            changes = project.timeline.tempo_events if project.timeline is not None else []
+            assert len(changes) == case["tempo_changes"], label
+        if {"audio_regions", "tempo_events", "stored_lengths_match"} & set(case):
             data = (
                 Path(case["logicx"]) / "Alternatives" / f"{project.alternative:03d}" / "ProjectData"
             ).read_bytes()
@@ -353,3 +341,24 @@ def test_real_projects_match_recorded_expectations():
                 assert sum(1 for p in arrangement.regions if p.kind == "audio") == case["audio_regions"], label
             if "tempo_events" in case:
                 assert len(arrangement.tempo_events) == case["tempo_events"], label
+            if "stored_lengths_match" in case:
+                # Logic stores a musical length with some audio regions. The clip the
+                # converter makes for each must cover that many ticks: the check that
+                # the tempo map is read right and lengths are measured through it.
+                tempo_map = TempoMap(project.tempo, project.timeline.tempo_events if project.timeline else [])
+                bar_beats = 4.0 * project.time_sig_numerator / project.time_sig_denominator
+                matched = 0
+                for placement in arrangement.regions:
+                    if placement.kind != "audio" or placement.loop_span is None:
+                        continue
+                    start = arrangement.region_beats(placement.tick, bar_beats)
+                    region = arrangement.audio_regions[(placement.audio_file_id, placement.audio_region_index)]
+                    clip = next(
+                        c for c in project.audio_files
+                        if abs(c.start_beats - start) < 1e-9 and c.clip_name == region.name
+                    )
+                    seconds = clip.content_duration_samples / _get_audio_sample_rate(clip.file_path)
+                    beats = tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(start) + seconds) - start
+                    assert abs(beats * 960 - placement.loop_span) < 1.0, (label, region.name)
+                    matched += 1
+                assert matched == case["stored_lengths_match"], label

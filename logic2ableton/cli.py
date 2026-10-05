@@ -18,10 +18,10 @@ from logic2ableton import __version__
 from logic2ableton.ableton_generator import generate_als, unmatched_keep_unwarped_warnings
 from logic2ableton.ableton_parser import parse_ableton_project
 from logic2ableton.logic_parser import (
-    TEMPO_TRACK_WARNING,
     load_mixer_overrides,
     parse_logic_project,
     parse_smpte_start,
+    read_time_base,
 )
 from logic2ableton.logic_transfer import build_logic_transfer_report, generate_logic_transfer
 from logic2ableton.plugin_matcher import match_plugins
@@ -371,7 +371,10 @@ def _build_forward_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeline",
         metavar="PATH",
-        help="JSON file with a tempo map and markers to apply on top of the Logic project (see below)",
+        help=(
+            "JSON file with a tempo map and/or markers to use in place of the tempo changes and "
+            "markers read from the Logic project (see below)"
+        ),
     )
     parser.add_argument("--json-progress", action="store_true", help="Output machine-readable JSON progress lines")
     parser.set_defaults(unique_reports=False)
@@ -529,7 +532,31 @@ def _run_forward(args: argparse.Namespace) -> int:
 
     smpte_start, smpte_explicit = _resolve_smpte_start(args)
     try:
-        project = parse_logic_project(logicx_path, alternative=args.alternative, smpte_start_seconds=smpte_start)
+        # A --timeline file is loaded before the project is decoded, because
+        # region lengths, loops and cuts are measured through its tempo map.
+        # Its tempo entries replace the project's own tempo changes and its
+        # markers replace the project's markers; what it leaves out is kept.
+        supplied_timeline = None
+        if args.timeline:
+            project_name, numerator, denominator, base_tempo = read_time_base(logicx_path, args.alternative)
+            try:
+                supplied_timeline = load_timeline(
+                    Path(args.timeline), numerator=numerator, denominator=denominator, base_tempo=base_tempo,
+                )
+            except (OSError, ValueError, RecursionError) as exc:
+                return _emit_failure(
+                    mode=FORWARD_MODE,
+                    output_dir=output_dir,
+                    input_path=logicx_path,
+                    stage="timeline",
+                    error=str(exc),
+                    jp=jp,
+                    unique=args.unique_reports,
+                    project_name=project_name,
+                )
+        project = parse_logic_project(
+            logicx_path, alternative=args.alternative, smpte_start_seconds=smpte_start, timeline=supplied_timeline,
+        )
     except Exception as exc:
         return _emit_failure(
             mode=FORWARD_MODE,
@@ -540,39 +567,6 @@ def _run_forward(args: argparse.Namespace) -> int:
             jp=jp,
             unique=args.unique_reports,
         )
-
-    if args.timeline:
-        try:
-            decoded_markers = project.timeline.markers if project.timeline is not None else []
-            project.timeline = load_timeline(
-                Path(args.timeline),
-                numerator=project.time_sig_numerator,
-                denominator=project.time_sig_denominator,
-                base_tempo=project.tempo,
-            )
-            # A --timeline file that only carries tempo changes keeps the
-            # markers decoded from the Logic project; one that lists markers
-            # replaces them.
-            if decoded_markers and not project.timeline.markers:
-                project.timeline.markers = decoded_markers
-            if project.timeline.tempo_events:
-                # The file supplies the tempo map, so the note about Logic's
-                # own tempo changes not being converted no longer applies.
-                project.compatibility_warnings = [
-                    warning for warning in project.compatibility_warnings
-                    if not warning.startswith(TEMPO_TRACK_WARNING)
-                ]
-        except (OSError, ValueError) as exc:
-            return _emit_failure(
-                mode=FORWARD_MODE,
-                output_dir=output_dir,
-                input_path=logicx_path,
-                stage="timeline",
-                error=str(exc),
-                jp=jp,
-                unique=args.unique_reports,
-                project_name=project.name,
-            )
 
     if args.mixer:
         try:

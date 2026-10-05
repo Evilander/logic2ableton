@@ -12,7 +12,12 @@ from logic2ableton import __version__
 from logic2ableton.models import LogicProject
 from logic2ableton.timeline import MAX_TEMPO_BPM, MIN_TEMPO_BPM
 
-from scripts.fixture_builders import build_logic_project_data, build_synthetic_logicx, write_smpte_stamped_wav
+from scripts.fixture_builders import (
+    build_logic_arrangement_project_data,
+    build_logic_project_data,
+    build_synthetic_logicx,
+    write_smpte_stamped_wav,
+)
 
 from conftest import TEST_PROJECT, TEST_PROJECT_NAME
 
@@ -563,110 +568,76 @@ def test_cli_keep_unwarped_reaches_generate_als(tmp_path, monkeypatch):
     assert captured["keep_unwarped"] == ["Guitar*", "Drums"]
 
 
-def test_cli_timeline_loaded_and_attached(tmp_path, monkeypatch, capsys):
-    project_path = tmp_path / "project.logicx"
-    project_path.mkdir()
-    (project_path / "Alternatives").mkdir()
-    output_dir = tmp_path / "output"
-
-    monkeypatch.setattr(
-        "logic2ableton.cli.parse_logic_project",
-        lambda *_args, **_kwargs: _minimal_project(name="Timeline Project"),
+def _decoded_logicx(tmp_path, **overrides):
+    """A synthetic project whose arrangement decodes: one click region, a "Count" marker at bar 3."""
+    spec = dict(
+        tracks={1: "Click"},
+        sequences=[{"id": 44, "name": "Click", "length": 3840, "notes": [(0, 60, 100, 240)]}],
+        midi_regions=[{"bar": 1, "track": 1, "sequence": 44, "lane": 1}],
+        markers=[(3, 12, "Count")],
+        tempo=120.0,
     )
-    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
+    spec.update(overrides)
+    return build_synthetic_logicx(tmp_path / "project", project_data=build_logic_arrangement_project_data(**spec))
 
-    timeline_path = tmp_path / "timeline.json"
-    timeline_path.write_text(json.dumps({
+
+def _report_only(tmp_path, capsys, logicx, timeline_spec=None):
+    argv = [str(logicx), "--output", str(tmp_path / "output"), "--report-only"]
+    if timeline_spec is not None:
+        timeline_path = tmp_path / "timeline.json"
+        timeline_path.write_text(json.dumps(timeline_spec))
+        argv += ["--timeline", str(timeline_path)]
+    exit_code = main(argv)
+    return exit_code, capsys.readouterr().out
+
+
+def test_cli_timeline_loaded_and_attached(tmp_path, capsys):
+    exit_code, out = _report_only(tmp_path, capsys, _decoded_logicx(tmp_path), {
         "tempo": [{"bar": 3, "bpm": 90}],
         "markers": [{"bar": 5, "name": "Bridge"}],
-    }))
-
-    exit_code = main([
-        str(project_path), "--output", str(output_dir), "--report-only",
-        "--timeline", str(timeline_path),
-    ])
-    captured = capsys.readouterr()
+    })
 
     assert exit_code == 0
-    assert "TIMELINE:" in captured.out
-    assert "90 BPM" in captured.out
-    assert "Bridge" in captured.out
+    assert "TIMELINE:" in out
+    assert "90 BPM" in out
+    assert "Bridge" in out
+    assert "Live tempo automation and locators from --timeline are written into the .als" in out
 
 
 @pytest.mark.parametrize("json_markers", [False, True])
-def test_cli_timeline_keeps_decoded_markers_unless_it_lists_its_own(tmp_path, monkeypatch, capsys, json_markers):
-    from logic2ableton.timeline import Timeline, TimelineMarker
-
-    project_path = tmp_path / "project.logicx"
-    project_path.mkdir()
-    (project_path / "Alternatives").mkdir()
-
-    def _decoded_project(*_args, **_kwargs):
-        project = _minimal_project(name="Decoded")
-        project.timeline = Timeline(
-            tempo_events=[], markers=[TimelineMarker(beat=8.0, name="Count")], source_path="Logic project",
-        )
-        return project
-
-    monkeypatch.setattr("logic2ableton.cli.parse_logic_project", _decoded_project)
-    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
-
+def test_cli_timeline_keeps_decoded_markers_unless_it_lists_its_own(tmp_path, capsys, json_markers):
     spec = {"tempo": [{"bar": 3, "bpm": 90}]}
     if json_markers:
         spec["markers"] = [{"bar": 5, "name": "Bridge"}]
-    timeline_path = tmp_path / "timeline.json"
-    timeline_path.write_text(json.dumps(spec))
-
-    exit_code = main([
-        str(project_path), "--output", str(tmp_path / "output"), "--report-only",
-        "--timeline", str(timeline_path),
-    ])
-    captured = capsys.readouterr()
+    exit_code, out = _report_only(tmp_path, capsys, _decoded_logicx(tmp_path), spec)
 
     assert exit_code == 0
-    assert "90 BPM" in captured.out
-    assert ("Count" in captured.out) is not json_markers
-    assert ("Bridge" in captured.out) is json_markers
+    assert "90 BPM" in out
+    assert ("Count" in out) is not json_markers
+    assert ("Markers (read from the Logic project):" in out) is not json_markers
+    assert ("Bridge" in out) is json_markers
 
 
-@pytest.mark.parametrize("with_timeline", [False, True])
-def test_cli_timeline_with_tempo_replaces_the_unconverted_tempo_note(tmp_path, monkeypatch, capsys, with_timeline):
-    from logic2ableton.logic_parser import TEMPO_TRACK_WARNING
-
-    project_path = tmp_path / "project.logicx"
-    project_path.mkdir()
-    (project_path / "Alternatives").mkdir()
-
-    def _two_tempo_project(*_args, **_kwargs):
-        project = _minimal_project(name="Two tempos")
-        project.compatibility_warnings = [f"{TEMPO_TRACK_WARNING} 1 time(s) in this project, first at bar 17."]
-        return project
-
-    monkeypatch.setattr("logic2ableton.cli.parse_logic_project", _two_tempo_project)
-    monkeypatch.setattr("logic2ableton.cli.match_plugins", lambda *_args, **_kwargs: [])
-
-    argv = [str(project_path), "--output", str(tmp_path / "output"), "--report-only"]
-    if with_timeline:
-        timeline_path = tmp_path / "timeline.json"
-        timeline_path.write_text(json.dumps({"tempo": [{"bar": 17, "bpm": 83}]}))
-        argv += ["--timeline", str(timeline_path)]
-    exit_code = main(argv)
+@pytest.mark.parametrize("timeline_spec", [None, {"markers": [{"bar": 5, "name": "Bridge"}]}, {"tempo": [{"bar": 9, "bpm": 90}]}])
+def test_cli_tempo_changes_come_from_the_project_unless_the_timeline_lists_tempo(tmp_path, capsys, timeline_spec):
+    logicx = _decoded_logicx(tmp_path, tempo=81.5, tempo_changes=[(17, 83.0), (25, 81.5)])
+    exit_code, out = _report_only(tmp_path, capsys, logicx, timeline_spec)
 
     assert exit_code == 0
-    assert (TEMPO_TRACK_WARNING in capsys.readouterr().out) is not with_timeline
+    from_file = bool(timeline_spec and "tempo" in timeline_spec)
+    assert ("Tempo changes (read from the Logic project):" in out) is not from_file
+    assert ("Bar 17 beat 1: 83 BPM" in out) is not from_file
+    assert ("Bar 25 beat 1: 81.5 BPM" in out) is not from_file
+    assert ("Bar 9 beat 1: 90 BPM" in out) is from_file
+    assert "Tempo: 81.5 BPM at bar 1" in out
+    # nothing left to say about tempo not being transferred
+    assert "Logic tempo" not in out and "tempo track changes" not in out
 
 
 @pytest.mark.parametrize("write_timeline", [None, "missing", "invalid", "tiny_bpm", "huge_bpm"])
-def test_cli_timeline_missing_or_invalid_file_exits_1(tmp_path, monkeypatch, write_timeline):
-    project_path = tmp_path / "project.logicx"
-    project_path.mkdir()
-    (project_path / "Alternatives").mkdir()
+def test_cli_timeline_missing_or_invalid_file_exits_1(tmp_path, write_timeline):
+    project_path = _decoded_logicx(tmp_path)
     output_dir = tmp_path / "output"
-
-    monkeypatch.setattr(
-        "logic2ableton.cli.parse_logic_project",
-        lambda *_args, **_kwargs: _minimal_project(name="Broken Timeline"),
-    )
 
     if write_timeline == "invalid":
         timeline_path = tmp_path / "timeline.json"
@@ -688,11 +659,25 @@ def test_cli_timeline_missing_or_invalid_file_exits_1(tmp_path, monkeypatch, wri
     ])
 
     assert exit_code == 1
-    report_path = output_dir / "Broken Timeline_conversion_report.txt"
+    report_path = output_dir / "Synth_conversion_report.txt"
     assert report_path.exists()
     assert "Stage: timeline" in report_path.read_text(encoding="utf-8")
     # Timeline validation failed before generation ever ran: no .als output.
     assert not list(output_dir.rglob("*.als"))
+
+
+def test_cli_good_timeline_with_an_unreadable_project_fails_at_parsing(tmp_path):
+    project_path = tmp_path / "broken.logicx"
+    (project_path / "Alternatives").mkdir(parents=True)
+    timeline_path = tmp_path / "timeline.json"
+    timeline_path.write_text(json.dumps({"tempo": [{"bar": 3, "bpm": 90}]}))
+    output_dir = tmp_path / "output"
+
+    exit_code = main([str(project_path), "--output", str(output_dir), "--timeline", str(timeline_path)])
+
+    assert exit_code == 1
+    reports = list(output_dir.glob("*_conversion_report.txt"))
+    assert len(reports) == 1 and "Stage: parsing" in reports[0].read_text(encoding="utf-8")
 
 
 def test_cli_batch_two_inputs_produce_two_reports_and_json_lines(tmp_path, capsys):

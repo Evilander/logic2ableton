@@ -70,9 +70,17 @@ def generate_report(
     lines.append("  Logic Pro to Ableton Conversion Report")
     lines.append("=" * 60)
     lines.append(f"Project: {project.name}")
+    # A timeline entry at bar 1 replaces the project tempo there; later ones are changes.
+    tempo_events = project.timeline.tempo_events if project.timeline is not None else []
+    tempo_at_bar_one = project.tempo
+    for event in tempo_events:
+        if event.beat <= 0:
+            tempo_at_bar_one = event.bpm
+    tempo_changes = sum(1 for event in tempo_events if event.beat > 0)
     lines.append(
-        f"Tempo: {project.tempo} BPM | Time Sig: "
-        f"{project.time_sig_numerator}/{project.time_sig_denominator} | "
+        f"Tempo: {tempo_at_bar_one} BPM"
+        + (f" at bar 1, {tempo_changes} change(s) listed under TIMELINE" if tempo_changes else "")
+        + f" | Time Sig: {project.time_sig_numerator}/{project.time_sig_denominator} | "
         f"Sample Rate: {project.sample_rate}"
     )
     if project.arrangement_decoded:
@@ -186,22 +194,37 @@ def generate_report(
         lines.append("")
 
     if project.timeline is not None:
-        from_project = project.timeline.source_path == "Logic project"
+        timeline = project.timeline
+        from_project = timeline.source_path == "Logic project"
+        tempo_from_project = timeline.tempo_from_project
+        markers_from_project = timeline.markers_from_project or from_project
         lines.append("TIMELINE:")
-        if project.timeline.tempo_events:
-            lines.append("  Tempo changes:")
-            for event in project.timeline.tempo_events:
+        if timeline.tempo_events:
+            lines.append("  Tempo changes" + (" (read from the Logic project):" if tempo_from_project else ":"))
+            for event in timeline.tempo_events:
                 bar, beat = _bar_beat(event.beat, project.time_sig_numerator, project.time_sig_denominator)
                 lines.append(f"    Bar {bar} beat {beat:g}: {event.bpm:g} BPM")
-        if project.timeline.markers:
-            lines.append("  Markers" + (" (read from the Logic project):" if from_project else ":"))
-            for marker in project.timeline.markers:
+        if timeline.markers:
+            lines.append("  Markers" + (" (read from the Logic project):" if markers_from_project else ":"))
+            for marker in timeline.markers:
                 bar, beat = _bar_beat(marker.beat, project.time_sig_numerator, project.time_sig_denominator)
                 lines.append(f"    Bar {bar} beat {beat:g}: {marker.name}")
-        if from_project:
+        if not timeline.tempo_events and not timeline.markers:
+            lines.append("  The timeline file lists no tempo changes or markers.")
+        elif from_project and not timeline.tempo_events:
             lines.append("  Markers become Live locators in the .als (skipped when --report-only is used).")
-        else:
+        elif not from_project and not tempo_from_project and not timeline.markers_from_project:
             lines.append("  Live tempo automation and locators from --timeline are written into the .als (skipped when --report-only is used).")
+        else:
+            parts = []
+            if timeline.tempo_events:
+                parts.append(
+                    "Tempo changes become Live tempo automation, and warp markers at each change keep "
+                    "warped audio clips at their own speed"
+                )
+            if timeline.markers:
+                parts.append("markers become locators" if parts else "Markers become Live locators")
+            lines.append("  " + "; ".join(parts) + " in the .als (skipped when --report-only is used).")
         lines.append("")
 
     lines.append("COMPATIBILITY WARNINGS:")
@@ -217,10 +240,12 @@ def generate_report(
     lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
     lines.append("  - Automation data (requires deeper binary parsing)")
     lines.append("  - Bus/send routing (recreate manually in Ableton)")
-    if project.timeline is None:
-        lines.append("  - Logic tempo track and markers (not decoded yet; supply --timeline to reproduce them)")
-    elif not project.timeline.tempo_events:
-        lines.append("  - Logic tempo changes (only the project tempo is read; supply --timeline to reproduce a tempo map)")
+    if not getattr(project, "tempo_track_decoded", False):
+        # Only projects whose arrangement could not be read get here.
+        if project.timeline is None:
+            lines.append("  - Logic tempo changes and markers (not applied for this project; supply --timeline to reproduce them)")
+        elif not project.timeline.tempo_events:
+            lines.append("  - Logic tempo changes (not applied for this project; supply --timeline to reproduce a tempo map)")
     lines.append("")
     lines.append("=" * 60)
     return "\n".join(lines)

@@ -529,6 +529,14 @@ def generate_protools_transfer_from_logic(
 
     copied_audio_files, manifest_tracks = _export_logic_audio(project, audio_root, copy_audio=copy_audio)
 
+    timeline = getattr(project, "timeline", None)
+    if timeline is not None and timeline.tempo_events:
+        project.compatibility_warnings.append(
+            f"This project changes tempo {len(timeline.tempo_events)} time(s). Audio is stamped with the time it "
+            "plays at and lands in place regardless, but the package states only the first tempo: recreate the "
+            "tempo changes in Pro Tools, or MIDI will drift after the first one."
+        )
+
     rendered_midi_files, transferred_midi_notes, manifest_midi_tracks = _export_midi_tracks(
         project.midi_tracks,
         package_path / "MIDI",

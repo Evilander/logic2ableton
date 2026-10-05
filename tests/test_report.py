@@ -126,7 +126,7 @@ def test_report_timeline_section_lists_tempo_and_markers():
     assert "Bar 3 beat 1: 140 BPM" in report
     assert "Bar 9 beat 1: Chorus" in report
     assert "Live tempo automation and locators from --timeline are written into the .als" in report
-    assert "Logic tempo track and markers (not decoded yet" not in report
+    assert "Logic tempo changes and markers (not applied" not in report
 
 
 def test_report_timeline_note_does_not_claim_completion_in_report_only():
@@ -170,10 +170,47 @@ def test_report_timeline_bar_beat_round_trips_non_4_4_meter(tmp_path):
     assert "Bar 4 beat 1: Bridge" in report
 
 
+def test_report_header_takes_the_bar_one_tempo_from_a_timeline_entry_there():
+    from logic2ableton.timeline import Timeline, TempoEvent
+
+    project = _demo_project(timeline=Timeline(
+        tempo_events=[TempoEvent(beat=0.0, bpm=90.0), TempoEvent(beat=8.0, bpm=100.0)], markers=[],
+    ))
+    report = generate_report(project, [])
+    assert "Tempo: 90.0 BPM at bar 1, 1 change(s) listed under TIMELINE" in report
+
+
+def test_report_for_tempo_changes_read_from_the_project():
+    from logic2ableton.timeline import Timeline, TempoEvent
+
+    project = _demo_project(
+        tempo_track_decoded=True,
+        timeline=Timeline(
+            tempo_events=[TempoEvent(beat=64.0, bpm=83.0)], markers=[], source_path="Logic project",
+            tempo_from_project=True,
+        ),
+    )
+    report = generate_report(project, [])
+    assert "Tempo changes (read from the Logic project):" in report
+    assert "Bar 17 beat 1: 83 BPM" in report
+    # the audio keeps its speed: nothing here should read as if clips get stretched
+    assert "warp markers at each change keep warped audio clips at their own speed" in report
+    assert "from --timeline" not in report
+    assert "Logic tempo" not in report  # nothing about tempo left under NOT TRANSFERRED
+
+
+def test_report_says_so_when_a_timeline_file_lists_nothing():
+    from logic2ableton.timeline import Timeline
+
+    report = generate_report(_demo_project(timeline=Timeline(tempo_events=[], markers=[], source_path="t.json")), [])
+    assert "The timeline file lists no tempo changes or markers." in report
+    assert "are written into the .als" not in report
+
+
 def test_report_not_transferred_footer_notes_missing_timeline():
     report = generate_report(_demo_project(), [])
     assert "NOT TRANSFERRED" in report
-    assert "Logic tempo track and markers (not decoded yet; supply --timeline to reproduce them)" in report
+    assert "Logic tempo changes and markers (not applied for this project; supply --timeline to reproduce them)" in report
 
 
 def test_report_keep_unwarped_lists_matched_tracks():

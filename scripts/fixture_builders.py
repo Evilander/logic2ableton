@@ -335,7 +335,8 @@ def build_logic_arrangement_project_data(
     """ProjectData in the object layout logic_project_data decodes.
 
     ``tempo_changes``: (bar, bpm) steps of the tempo track after bar 1, where
-    ``tempo`` starts.
+    ``tempo`` starts. A third element overrides the time stamp Logic would
+    store for that event (seconds from bar 1).
 
     ``history``: undo-history steps appended after the current state, as Logic
     saves them: each dict takes the same keys as this function (tracks,
@@ -372,10 +373,10 @@ def build_logic_arrangement_project_data(
     # with the time it falls on.
     tempo_records = _logic_tempo_record(_LOGIC_SEQUENCE_ORIGIN, tempo, 0.0)
     current_bar, current_bpm, seconds = 1.0, tempo, 0.0
-    for bar, bpm in sorted(tempo_changes or []):
+    for bar, bpm, *stamp in sorted(tempo_changes or []):
         seconds += (bar - current_bar) * (_LOGIC_TICKS_PER_BAR / 960) * 60.0 / current_bpm
         tick = _LOGIC_SEQUENCE_ORIGIN + int(round((bar - 1) * _LOGIC_TICKS_PER_BAR))
-        tempo_records += _logic_tempo_record(tick, bpm, seconds)
+        tempo_records += _logic_tempo_record(tick, bpm, stamp[0] if stamp else seconds)
         current_bar, current_bpm = bar, bpm
     blob += _logic_event_sequence(tempo_records, id1=0, id2=9000, version=version)
 
