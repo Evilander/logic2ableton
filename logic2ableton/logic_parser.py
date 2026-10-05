@@ -909,17 +909,22 @@ def _bar_label(beats: float, bar_beats: float) -> str:
 
 def _decoded_tempo(
     arrangement: LogicArrangement, fallback_tempo: float, bar_beats: float, warnings: list[str],
-) -> tuple[float, list[TempoEvent]]:
-    """The tempo at bar 1 and the changes after it, read from Logic's tempo track.
+) -> tuple[float, list[TempoEvent], list[tuple[float, float]]]:
+    """The tempo at bar 1, the changes after it and the tempos before it, from Logic's tempo track.
 
     A tempo holds until the next event. Logic stores the time each event falls
     on, which lets the reading check itself: if stepping through the list does
     not land on those times, the project has a kind of tempo change this does
     not understand, and that is reported instead of converted on trust.
+
+    The third value is the lead-in: (beat, bpm) for events before bar 1, at
+    negative beats, and only when the tempo there differs from the tempo at
+    bar 1. The Live set starts at bar 1, so the lead-in never reaches it; it
+    is what audio starting before bar 1 is trimmed by.
     """
     events = arrangement.tempo_events
     if not events:
-        return fallback_tempo, []
+        return fallback_tempo, [], []
 
     if len({event.seconds for event in events}) > 1:
         for previous, event in zip(events, events[1:]):
@@ -935,11 +940,12 @@ def _decoded_tempo(
 
     at_or_before_bar_one = [event for event in events if event.tick <= SEQUENCE_ORIGIN_TICKS]
     base = at_or_before_bar_one[-1].bpm if at_or_before_bar_one else events[0].bpm
-    if len({round(event.bpm, 4) for event in at_or_before_bar_one}) > 1:
-        warnings.append(
-            "The tempo changes before bar 1 in Logic. The Live set starts at bar 1, so audio that begins "
-            f"earlier is trimmed as if the tempo there were {base:g} BPM; check the start of those clips."
-        )
+    lead_in = [
+        ((event.tick - SEQUENCE_ORIGIN_TICKS) / PPQ, event.bpm)
+        for event in events if event.tick < SEQUENCE_ORIGIN_TICKS
+    ]
+    if not any(abs(bpm - base) >= 0.00005 for _, bpm in lead_in):
+        lead_in = []
 
     changes: list[TempoEvent] = []
     current = base
@@ -962,7 +968,8 @@ def _decoded_tempo(
             if bpm != (limited[-1].bpm if limited else base):
                 limited.append(TempoEvent(beat=event.beat, bpm=bpm))
         changes = limited
-    return base, changes
+    lead_in = [(beat, min(MAX_TEMPO_BPM, max(MIN_TEMPO_BPM, bpm))) for beat, bpm in lead_in]
+    return base, changes, lead_in
 
 
 def _unapplied_tempo_warning(arrangement: LogicArrangement, bar_beats: float, project_tempo: float) -> str | None:
@@ -986,31 +993,64 @@ class _BeatClock:
     Without tempo changes this is the plain samples-per-beat arithmetic, kept
     exactly as it was so that single-tempo projects convert bit for bit as
     before. With changes, every length is measured from where it sits.
+
+    ``lead_in`` holds the tempos before bar 1 as (beat, bpm) at negative
+    beats, for projects that start earlier at another tempo. The tempo map
+    itself begins at bar 1, so time before it is worked out here.
     """
 
-    def __init__(self, tempo_map: TempoMap, sample_rate: int):
+    def __init__(self, tempo_map: TempoMap, sample_rate: int, lead_in: list[tuple[float, float]] | None = None):
         self._map = tempo_map
         self._rate = sample_rate
-        self._flat = not tempo_map.events
+        self._lead_in = lead_in or []
+        self._flat = not tempo_map.events and not self._lead_in
         self.samples_per_beat = 60.0 / tempo_map.base_tempo * sample_rate
+
+    def _seconds_at(self, beats: float) -> float:
+        """Seconds from bar 1 to a position; negative before bar 1."""
+        if beats >= 0 or not self._lead_in:
+            return self._map.beats_to_seconds(beats)
+        seconds = 0.0
+        upper = 0.0
+        for start, bpm in reversed(self._lead_in):
+            lower = max(start, beats)
+            if lower < upper:
+                seconds -= (upper - lower) * 60.0 / bpm
+                upper = lower
+            if beats >= start:
+                return seconds
+        # earlier than the first tempo event: its tempo extends backward
+        return seconds - (upper - beats) * 60.0 / self._lead_in[0][1]
+
+    def _beats_at(self, seconds: float) -> float:
+        if seconds >= 0 or not self._lead_in:
+            return self._map.seconds_to_beats(seconds)
+        remaining = -seconds
+        upper = 0.0
+        for start, bpm in reversed(self._lead_in):
+            span_seconds = (upper - start) * 60.0 / bpm
+            if remaining <= span_seconds:
+                return upper - remaining * bpm / 60.0
+            remaining -= span_seconds
+            upper = start
+        return upper - remaining * self._lead_in[0][1] / 60.0
 
     def position_samples(self, beats: float) -> float:
         """The time of an arrangement position, in samples from bar 1."""
         if self._flat:
             return beats * self.samples_per_beat
-        return self._map.beats_to_seconds(beats) * self._rate
+        return self._seconds_at(beats) * self._rate
 
     def samples_between(self, start_beats: float, end_beats: float) -> float:
         if self._flat:
             return (end_beats - start_beats) * self.samples_per_beat
-        return (self._map.beats_to_seconds(end_beats) - self._map.beats_to_seconds(start_beats)) * self._rate
+        return (self._seconds_at(end_beats) - self._seconds_at(start_beats)) * self._rate
 
     def length_beats(self, start_beats: float, samples: float) -> float:
         """How many beats ``samples`` of audio cover when they start at ``start_beats``."""
         if self._flat:
             return samples / self.samples_per_beat
-        start_seconds = self._map.beats_to_seconds(start_beats)
-        return self._map.seconds_to_beats(start_seconds + samples / self._rate) - start_beats
+        return self._beats_at(self._seconds_at(start_beats) + samples / self._rate) - start_beats
 
 
 def _unroll_regions(regions: list[LogicMidiRegion]) -> list[LogicMidiNote]:
@@ -1305,12 +1345,14 @@ def _arrangement_audio_refs(
     track_names_by_id: dict[int, str],
     warnings: list[str],
     listed_as_used: bool = False,
+    lead_in: list[tuple[float, float]] | None = None,
 ) -> tuple[list[AudioFileRef], list[str]]:
     """Audio clips as Logic placed them: one ref per region, one per repetition when looped.
 
     Regions sit at musical positions and play their audio at its own speed,
     so how many beats a region covers depends on the tempo where it sits:
-    lengths, loop passes and cuts are all measured through ``tempo_map``.
+    lengths, loop passes and cuts are all measured through ``tempo_map``, and
+    through ``lead_in`` for the part of the song before bar 1.
 
     ``listed_as_used`` says that ``discovered`` holds exactly the files Logic's
     own metadata lists as used by this alternative. Each of them must then
@@ -1345,7 +1387,7 @@ def _arrangement_audio_refs(
         if placement.muted:
             muted.append(f"{track_name}: {label}")
             continue
-        clock = _BeatClock(tempo_map, _get_audio_sample_rate(source.file_path))
+        clock = _BeatClock(tempo_map, _get_audio_sample_rate(source.file_path), lead_in)
         samples_per_beat = clock.samples_per_beat
         start_beats = arrangement.region_beats(placement.tick, bar_beats)
         content_offset = region.content_offset if region else 0
@@ -1361,7 +1403,7 @@ def _arrangement_audio_refs(
             span_beats = placement.loop_span / PPQ
             length_beats = clock.length_beats(start_beats, content_length)
             half_tick = 0.5 / PPQ
-            if span_beats > length_beats * (1 + 1e-9) and not tempo_map.events:
+            if span_beats > length_beats * (1 + 1e-9) and not tempo_map.events and not lead_in:
                 passes = []
                 repetition = 0
                 while repetition * length_beats < span_beats - half_tick:
@@ -1566,7 +1608,7 @@ def parse_logic_project(
         # loops and which track owns it, so audio timestamps and the SMPTE
         # start are not needed for placement.
         tempo_warnings: list[str] = []
-        project_tempo, tempo_changes = _decoded_tempo(arrangement, meta["tempo"], bar_beats, tempo_warnings)
+        project_tempo, tempo_changes, lead_in = _decoded_tempo(arrangement, meta["tempo"], bar_beats, tempo_warnings)
         if not supplied_tempo:
             midi_warnings.extend(tempo_warnings)
         tempo_map = TempoMap(project_tempo, supplied_tempo or tempo_changes)
@@ -1582,6 +1624,7 @@ def parse_logic_project(
             track_names_by_id=track_names_by_id,
             warnings=midi_warnings,
             listed_as_used=meta["has_audio_membership"],
+            lead_in=lead_in,
         )
         regions = {ref.filename: ref.start_position_samples for ref in audio_files}
         track_count = len(set(track_names) | {track.name for track in midi_tracks})

@@ -241,7 +241,7 @@ def _events(*triples) -> LogicArrangement:
 
 def _decode(arrangement, fallback=100.0):
     warnings: list[str] = []
-    base, changes = _decoded_tempo(arrangement, fallback, 4.0, warnings)
+    base, changes, _lead_in = _decoded_tempo(arrangement, fallback, 4.0, warnings)
     return base, [(event.beat, event.bpm) for event in changes], warnings
 
 
@@ -271,11 +271,34 @@ def test_tempo_self_check_runs_when_the_song_starts_at_time_zero():
     assert _decode(_events((0, 120.0, -2.0), (1, 120.0, 0.0), (2, 60.0, 2.0)))[2] == []
 
 
-def test_tempo_change_before_bar_one_is_reported_and_the_trim_uses_the_bar_one_tempo(tmp_path):
-    # A count-in bar at 60 BPM before bar 1, then 120. Four seconds of audio
-    # placed on that bar end exactly at bar 1 in Logic. The Live set starts at
-    # bar 1 and the trim is worked out at the bar-1 tempo, so two seconds of
-    # it are kept: a known limit, and the report says to check it.
+def test_lead_in_is_only_kept_when_the_tempo_before_bar_one_differs():
+    same = _events((-1, 120.0, 3592.0), (1, 120.0, 3600.0), (3, 90.0, 3604.0))
+    assert _decoded_tempo(same, 100.0, 4.0, [])[2] == []
+    # a count-in bar at 60 BPM, one bar before bar 1 (four beats, four seconds)
+    count_in = _events((0, 60.0, 3596.0), (1, 120.0, 3600.0))
+    assert _decoded_tempo(count_in, 100.0, 4.0, []) == (120.0, [], [(-4.0, 60.0)])
+
+
+def test_audio_before_bar_one_is_trimmed_by_the_tempo_of_the_count_in(tmp_path):
+    # A count-in bar at 60 BPM before bar 1, then 120. Six seconds of audio
+    # placed on that bar: the bar takes four seconds, so two seconds are left
+    # at bar 1. Trimmed at the bar-1 tempo it would have lost only two.
+    logicx = _project(
+        tmp_path,
+        tempo_changes=[(0, 60.0, -4.0)],
+        audio_regions=[_region(6)],
+        audio_placements=[{"bar": 0, "track": 1, "file": 10, "lane": 1}],
+        project_start_bar=0,
+    )
+    project = parse_logic_project(logicx)
+
+    assert project.tempo == 120.0 and project.timeline is None
+    assert _clips(project) == [(0.0, "Stem", 4 * RATE, 2 * RATE)]
+    assert not any("tempo" in warning.lower() for warning in project.compatibility_warnings)
+
+
+def test_audio_that_ends_at_bar_one_under_a_slower_count_in_is_left_out(tmp_path):
+    # Four seconds on a four-second count-in bar end exactly at bar 1: nothing plays in the Live set.
     logicx = _project(
         tmp_path,
         tempo_changes=[(0, 60.0, -4.0)],
@@ -284,10 +307,24 @@ def test_tempo_change_before_bar_one_is_reported_and_the_trim_uses_the_bar_one_t
         project_start_bar=0,
     )
     project = parse_logic_project(logicx)
+    assert project.audio_files == []
+    assert any("ends before bar 1 and was skipped" in warning for warning in project.compatibility_warnings)
 
-    assert project.tempo == 120.0 and project.timeline is None
-    assert any("The tempo changes before bar 1 in Logic" in w for w in project.compatibility_warnings)
-    assert _clips(project) == [(0.0, "Stem", 2 * RATE, 2 * RATE)]
+
+def test_loop_that_starts_in_the_count_in_follows_its_tempo(tmp_path):
+    # Two seconds of audio looped from the count-in bar (60 BPM, four seconds)
+    # across twelve beats: two passes fill the count-in, then two-second passes
+    # cover four beats each at 120.
+    logicx = _project(
+        tmp_path,
+        tempo_changes=[(0, 60.0, -4.0)],
+        audio_regions=[_region(2)],
+        audio_placements=[{"bar": 0, "track": 1, "file": 10, "lane": 1, "loop_beats": 12}],
+        project_start_bar=0,
+    )
+    project = parse_logic_project(logicx)
+    # the two passes inside the count-in end at or before bar 1 and are left out
+    assert _clips(project) == [(0.0, "Stem", 0, 2 * RATE), (4.0, "Stem", 0, 2 * RATE)]
 
 
 def test_region_starting_before_bar_one_is_trimmed_through_the_tempo_map(tmp_path):
