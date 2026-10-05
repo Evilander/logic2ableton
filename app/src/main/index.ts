@@ -160,6 +160,12 @@ function normalizeKeepUnwarped(value: unknown): string[] | undefined {
   return patterns.length > 0 ? patterns : undefined
 }
 
+function normalizeKeepOutputs(value: unknown): boolean | undefined {
+  if (value === undefined || value === null || value === false) return undefined
+  if (value === true) return true
+  throw new Error("Keep-outputs must be true or false")
+}
+
 function normalizeTimelinePath(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined
   if (typeof value !== "string") {
@@ -446,6 +452,7 @@ ipcMain.handle("start-conversion", async (event, request: ConversionRequest) => 
     tempo: normalizeTempo(request.tempo),
     smpteStart: isLogicSource(direction) ? normalizeSmpteStart(request.smpteStart) : undefined,
     keepUnwarped: direction === "logic2ableton" ? normalizeKeepUnwarped(request.keepUnwarped) : undefined,
+    keepOutputs: direction === "logic2ableton" ? normalizeKeepOutputs(request.keepOutputs) : undefined,
     timelinePath: direction === "logic2ableton" ? normalizeTimelinePath(request.timelinePath) : undefined,
   })
 })
@@ -461,6 +468,7 @@ ipcMain.handle("start-preview", async (event, request: ConversionRequest) => {
     tempo: normalizeTempo(request.tempo),
     smpteStart: isLogicSource(direction) ? normalizeSmpteStart(request.smpteStart) : undefined,
     keepUnwarped: direction === "logic2ableton" ? normalizeKeepUnwarped(request.keepUnwarped) : undefined,
+    keepOutputs: direction === "logic2ableton" ? normalizeKeepOutputs(request.keepOutputs) : undefined,
     timelinePath: direction === "logic2ableton" ? normalizeTimelinePath(request.timelinePath) : undefined,
   })
 })

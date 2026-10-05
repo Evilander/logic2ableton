@@ -23,12 +23,14 @@ interface ProjectPreviewProps {
   tempo: number
   smpteStart: string
   keepUnwarped: string
+  keepOutputs: boolean
   timelinePath: string | null
   settingsError: PreviewSettingsError | null
   onDirectionChange: (direction: ConversionDirection) => void
   onTempoChange: (tempo: number) => void
   onSmpteStartChange: (smpteStart: string) => void
   onKeepUnwarpedChange: (keepUnwarped: string) => void
+  onKeepOutputsChange: (keepOutputs: boolean) => void
   onSelectTimelineJson: () => void
   onClearTimelinePath: () => void
   onSelectOutputDir: () => void
@@ -50,12 +52,14 @@ export default function ProjectPreview({
   tempo,
   smpteStart,
   keepUnwarped,
+  keepOutputs,
   timelinePath,
   settingsError,
   onDirectionChange,
   onTempoChange,
   onSmpteStartChange,
   onKeepUnwarpedChange,
+  onKeepOutputsChange,
   onSelectTimelineJson,
   onClearTimelinePath,
   onSelectOutputDir,
@@ -75,6 +79,7 @@ export default function ProjectPreview({
   const tempoError = fieldError("tempo")
   const smpteError = fieldError("smpteStart")
   const keepUnwarpedError = fieldError("keepUnwarped")
+  const keepOutputsError = fieldError("keepOutputs")
   const timelineError = fieldError("timelinePath")
   const generalSettingsError = settingsError && settingsError.field === null ? settingsError.message : null
 
@@ -284,6 +289,30 @@ export default function ProjectPreview({
                 ) : (
                   <p className="mt-1.5 text-[11px] leading-relaxed text-text-tertiary">
                     Matching tracks won't stretch when the Live tempo changes.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label htmlFor="keep-outputs" className="mb-2 block text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
+                  Keep Logic's outputs
+                </label>
+                <div className="flex items-center rounded-xl border border-border bg-bg px-3 py-2.5 focus-within:border-rose/60">
+                  <input
+                    id="keep-outputs"
+                    type="checkbox"
+                    checked={keepOutputs}
+                    onChange={(event) => onKeepOutputsChange(event.target.checked)}
+                    className="size-4 rounded border-border bg-bg text-rose focus:ring-rose focus:ring-offset-0"
+                  />
+                </div>
+                {keepOutputsError ? (
+                  <p role="alert" className="mt-1.5 text-[11px] text-error">
+                    {keepOutputsError}
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-text-tertiary">
+                    Route tracks that play to another output of the audio interface in Logic (3-4, 5-6, a mono output) to the same output in Live. On a device without that output they stay silent.
                   </p>
                 )}
               </div>

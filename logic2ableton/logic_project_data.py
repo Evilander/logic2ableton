@@ -37,8 +37,27 @@ and later) and a u32 payload size. The objects read here:
   the even-aligned end of that name, the content start offset at +4 and the
   content length at +60, both in ticks. The EvSq with the notes follows the
   next ``Trak`` object.
-* ``Envi`` (environment object, i.e. a channel strip): u16-prefixed name at
-  +194. Region placements reference tracks by this object's id.
+* ``Envi`` (environment object): u16-prefixed name at +194. Region placements
+  reference tracks by this object's id. Byte +117 is the object type, 0x11
+  for a channel strip; such an object names its strip in the u16 after the
+  even-aligned name: the strip's index in the pool below, plus one.
+* ``AuCO`` (channel strip): the mixer. One ``AuCn`` object owns the whole
+  pool, every strip Logic could show, used or not, and the strip's second
+  id is its index in the pool. Logic's own label at +96 ("Audio 3",
+  "Inst 1", "Aux 2", "Bus 5", "Input 1-2", "Output 3-4"; the outputs the
+  audio device has carry a bullet in front), bit 2 of +114 set
+  for a stereo strip, fader 0-127 at +121 (the same value with a 24-bit
+  fraction as a u32 at +152), pan 0-127 at +125 (64 is centre), mute at
+  +126, output at +128 and input at +130 (u16).
+    - The fader law is dB = 40 x log10(value / 90): 90 is 0 dB, 127 is
+      +5.98 dB (Logic shows +6.0), and a level typed into Logic as -10 dB
+      is stored as 50.6107.
+    - The output is an index into the list [stereo outputs, buses, mono
+      outputs], whose section sizes are the numbers of "Output a-b" and
+      "Bus n" strips in the pool, so the same bus has a different number on
+      a different audio interface. 0xFFFF is no output.
+    - An aux strip's input is an index into [stereo inputs, buses] when the
+      strip is stereo and [mono inputs, buses] when it is mono.
 * ``TxSq`` (text): an RTF blob holding a marker's name; its object id equals
   the marker id.
 * ``AuFl`` (audio file): u16-prefixed UTF-16LE file name at +44.
@@ -58,11 +77,14 @@ region-relative with the content origin at 38400; marker ticks count from
 bar number version-1 saves keep in the song header (u32 at file offset 364,
 in marker ticks). Everything above was reverse-engineered from Logic 10.6.2
 and Logic 11 saves and checked against Logic's own MIDI exports, arrangement
-screenshots and audio file lengths.
+screenshots and audio file lengths; the mixer against the mute buttons, dB
+readouts, pan values, bus names and track stacks in the picture of its main
+window that Logic saves with each project.
 """
 
 from __future__ import annotations
 
+import math
 import re
 import struct
 from dataclasses import dataclass, field
@@ -98,6 +120,18 @@ _AUDIO_REGION_CLASS = 0xBC
 _FLAG_MUTE = 0x1
 _FLAG_LOOP = 0x1000
 _PROJECT_START_OFFSET = 364
+_STRIP_OBJECT_TYPE = 0x11       # Envi +117: the object is a channel strip
+_STRIP_MIN_SIZE = 124           # payload bytes a channel strip needs for the fields read here
+_STRIP_STEREO = 0x04            # AuCO +114
+_NO_ROUTING = 0xFFFF
+_UNITY_FADER = 90.0             # the fader value Logic shows as 0 dB
+_PAN_CENTRE = 64
+_STEREO_OUTPUT_LABEL = re.compile(r"Output \d+-\d+$")
+_STEREO_INPUT_LABEL = re.compile(r"Input \d+-\d+$")
+_MONO_INPUT_LABEL = re.compile(r"Input \d+$")
+_MONO_OUTPUT_LABEL = re.compile(r"Output \d+$")
+_LABEL_MARK = re.compile(r"^[^0-9A-Za-z]+")  # the bullet in front of a device's own outputs
+_BUS_LABEL = re.compile(r"Bus \d+$")
 _RTF_START = bytes([0x7B, 0x5C]) + b"rtf1"
 
 
@@ -195,6 +229,84 @@ class LogicAudioRegion:
 
 
 @dataclass
+class LogicChannelStrip:
+    index: int              # position in the project's channel strip pool
+    label: str              # Logic's own label: "Audio 3", "Inst 1", "Aux 2", "Output 1-2"
+    stereo: bool
+    muted: bool
+    fader: float            # 0-127; 90 is 0 dB
+    pan: int                # 0-127; 64 is centre
+    output: int             # index into [stereo outputs, buses, mono outputs]
+    input: int
+    track_id: int | None = None     # the track object that plays through this strip
+    name: str | None = None         # that object's name, i.e. the name on the mixer
+
+    @property
+    def is_aux(self) -> bool:
+        return self.label.startswith("Aux ")
+
+    @property
+    def volume_db(self) -> float:
+        if self.fader <= 0:
+            return -math.inf
+        return 40.0 * math.log10(self.fader / _UNITY_FADER)
+
+    @property
+    def pan_position(self) -> float:
+        """-1.0 (hard left) to 1.0 (hard right)."""
+        offset = self.pan - _PAN_CENTRE
+        return max(-1.0, min(1.0, offset / (_PAN_CENTRE if offset < 0 else _PAN_CENTRE - 1)))
+
+
+@dataclass
+class LogicMixer:
+    strips: dict[int, LogicChannelStrip] = field(default_factory=dict)  # by pool index
+    track_strips: dict[int, int] = field(default_factory=dict)          # track id -> pool index
+    stereo_outputs: int = 0
+    mono_outputs: int = 0
+    stereo_inputs: int = 0
+    mono_inputs: int = 0
+    buses: int = 0
+
+    def strip_for_track(self, track_id: int) -> LogicChannelStrip | None:
+        return self.strips.get(self.track_strips.get(track_id, -1))
+
+    def destination(self, strip: LogicChannelStrip) -> tuple[str, int] | None:
+        """Where a strip plays to: ("output", pair), ("bus", number) or ("mono output", number).
+
+        ``pair`` counts stereo outputs from 0 (0 is Output 1-2); bus and mono
+        output numbers are the ones Logic shows.
+        """
+        code = strip.output
+        if code == _NO_ROUTING or not self.stereo_outputs:
+            return None
+        if code < self.stereo_outputs:
+            return "output", code
+        if code < self.stereo_outputs + self.buses:
+            return "bus", code - self.stereo_outputs + 1
+        number = code - self.stereo_outputs - self.buses + 1
+        return ("mono output", number) if number <= self.mono_outputs else None
+
+    def source_bus(self, strip: LogicChannelStrip) -> int | None:
+        """The bus an aux strip takes its input from, if it is a bus."""
+        first_bus = self.stereo_inputs if strip.stereo else self.mono_inputs
+        if not self.buses or not first_bus <= strip.input < first_bus + self.buses:
+            return None
+        return strip.input - first_bus + 1
+
+    def bus_listeners(self, bus: int) -> list[LogicChannelStrip]:
+        """The aux channels on the mixer that take their input from a bus.
+
+        The pool also holds every aux Logic could create, each preset to a
+        bus of its own; only a strip with a track object is on the mixer.
+        """
+        return [
+            strip for strip in self.strips.values()
+            if strip.is_aux and strip.track_id is not None and self.source_bus(strip) == bus
+        ]
+
+
+@dataclass
 class LogicArrangement:
     format_version: int = 0
     project_start_bar: int | None = None
@@ -208,6 +320,7 @@ class LogicArrangement:
     warnings: list[str] = field(default_factory=list)
     history_steps: int = 0  # undo-history snapshots found after the current state and ignored
     tempo_events: list[LogicTempoEvent] = field(default_factory=list)
+    mixer: LogicMixer = field(default_factory=LogicMixer)
 
     @property
     def regions(self) -> list[LogicPlacement]:
@@ -351,6 +464,62 @@ def _track_names(data: bytes, objects: list[ObjectHeader]) -> dict[int, str]:
         if name:
             names[obj.id1] = name
     return names
+
+
+def _mixer(data: bytes, objects: list[ObjectHeader]) -> LogicMixer:
+    """Read the channel strip pool and which track object plays through which strip."""
+    mixer = LogicMixer()
+    candidates = [
+        obj for obj in objects
+        if obj.tag == "AuCO" and obj.size >= _STRIP_MIN_SIZE and obj.offset + 32 + obj.size <= len(data)
+    ]
+    if not candidates:
+        return mixer
+    # Every AuCn owns a small AuCO object; one of them also owns the strips.
+    owners: dict[int, int] = {}
+    for obj in candidates:
+        owners[obj.id1] = owners.get(obj.id1, 0) + 1
+    pool = max(owners, key=lambda owner: (owners[owner], -owner))
+    for obj in candidates:
+        if obj.id1 != pool or obj.id2 in mixer.strips:
+            continue
+        base = obj.offset
+        label = _LABEL_MARK.sub("", data[base + 96:base + 112].split(b"\x00")[0].decode("mac_roman")).strip()
+        mixer.strips[obj.id2] = LogicChannelStrip(
+            index=obj.id2,
+            label=label,
+            stereo=bool(data[base + 114] & _STRIP_STEREO),
+            muted=bool(data[base + 126] & 1),
+            fader=_u32(data, base + 152) / 0x1000000,
+            pan=data[base + 125],
+            output=_u16(data, base + 128),
+            input=_u16(data, base + 130),
+        )
+    labels = [strip.label for strip in mixer.strips.values()]
+    mixer.stereo_outputs = sum(1 for label in labels if _STEREO_OUTPUT_LABEL.match(label))
+    mixer.mono_outputs = sum(1 for label in labels if _MONO_OUTPUT_LABEL.match(label))
+    mixer.stereo_inputs = sum(1 for label in labels if _STEREO_INPUT_LABEL.match(label))
+    mixer.mono_inputs = sum(1 for label in labels if _MONO_INPUT_LABEL.match(label))
+    mixer.buses = sum(1 for label in labels if _BUS_LABEL.match(label))
+
+    for obj in objects:
+        if obj.tag != "Envi" or obj.offset + 196 > len(data) or data[obj.offset + 117] != _STRIP_OBJECT_TYPE:
+            continue
+        name = _prefixed_text(data, obj.offset + 194, limit=63)
+        if not name:
+            continue
+        name_len = _u16(data, obj.offset + 194)
+        field_offset = obj.offset + 196 + name_len + (name_len & 1)
+        if field_offset + 2 > min(obj.offset + 32 + obj.size, len(data)):
+            continue
+        strip = mixer.strips.get(_u16(data, field_offset) - 1)
+        if strip is None or obj.id1 in mixer.track_strips:
+            continue
+        mixer.track_strips[obj.id1] = strip.index
+        if strip.track_id is None:
+            strip.track_id = obj.id1
+            strip.name = name
+    return mixer
 
 
 def _rtf_plain_text(blob: bytes) -> str:
@@ -513,6 +682,7 @@ def decode_project_data(data: bytes, *, beats_per_bar: float = 4.0) -> LogicArra
     arrangement.tempo_events = _tempo_events(data, objects)
     arrangement.audio_files = _audio_files(data, objects)
     arrangement.audio_regions = _audio_regions(data, objects)
+    arrangement.mixer = _mixer(data, objects)
     arrangement.project_start_bar = _project_start_bar(
         data, arrangement.format_version, int(round(beats_per_bar * PPQ)) or PPQ * 4,
     )

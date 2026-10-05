@@ -300,7 +300,9 @@ def test_region_before_bar_one_is_moved_and_trimmed(tmp_path):
 # repository: L2A_LOGIC_ARRANGEMENT_CASES points at a JSON list of
 # {"logicx": path, "alternative": int, "project_start_bar": int, "markers": [[beat, name], ...],
 #  "midi_tracks": {name: [regions, unrolled_notes]}, "audio_clips": [[track, clip, beat], ...],
-#  "audio_regions": int, "tempo_events": int}. Only "logicx" is required.
+#  "audio_regions": int, "tempo_events": int, "mixer": {track: [dB, pan, muted, group or None]},
+#  "groups": {name: [dB, pan, muted, parent or None]}, "outputs": {track or group: "3-4"}}.
+# Only "logicx" is required.
 _CASES = os.environ.get("L2A_LOGIC_ARRANGEMENT_CASES")
 
 
@@ -332,6 +334,20 @@ def test_real_projects_match_recorded_expectations():
         if "tempo_changes" in case:
             changes = project.timeline.tempo_events if project.timeline is not None else []
             assert len(changes) == case["tempo_changes"], label
+        if "mixer" in case:
+            assert {
+                name: [round(state.volume_db, 1), round(state.pan, 3), state.is_muted, project.track_group.get(name)]
+                for name, state in (project.mixer_state or {}).items()
+            } == case["mixer"], label
+        if "groups" in case:
+            assert {
+                name: [round(group.mixer.volume_db, 1), round(group.mixer.pan, 3), group.mixer.is_muted, group.parent]
+                for name, group in project.track_groups.items()
+            } == case["groups"], label
+        if "outputs" in case:
+            outputs = {name: output.label for name, output in project.track_outputs.items()}
+            outputs.update({name: group.output.label for name, group in project.track_groups.items() if group.output})
+            assert outputs == case["outputs"], label
         if {"audio_regions", "tempo_events", "stored_lengths_match"} & set(case):
             data = (
                 Path(case["logicx"]) / "Alternatives" / f"{project.alternative:03d}" / "ProjectData"

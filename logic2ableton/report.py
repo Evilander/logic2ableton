@@ -3,7 +3,7 @@
 import fnmatch
 
 from logic2ableton.logic_parser import format_smpte
-from logic2ableton.models import LogicProject
+from logic2ableton.models import HardwareOutput, LogicProject, TrackMixerState
 from logic2ableton.plugin_matcher import PluginMatch
 from logic2ableton.timeline import beats_per_bar
 
@@ -45,12 +45,74 @@ def _bar_beat(beat: float, numerator: int, denominator: int) -> tuple[int, float
     return bar, beat_in_bar
 
 
+def _mixer_parts(state: TrackMixerState) -> list[str]:
+    # -70 dB is the bottom of Live's fader, which Live shows as -inf.
+    parts = ["-inf dB" if state.volume_db <= -70.0 else f"{state.volume_db:+.1f} dB"]
+    if state.pan != 0:
+        direction = "L" if state.pan < 0 else "R"
+        parts.append(f"pan {abs(state.pan):.0%}{direction}")
+    if state.is_muted:
+        parts.append("MUTED")
+    if state.is_soloed:
+        parts.append("SOLO")
+    return parts
+
+
+def _output_part(output: HardwareOutput, keep_outputs: bool) -> str:
+    if keep_outputs:
+        return f"Ext. Out {output.label.replace('-', '/')}"
+    return f"output {output.label} in Logic"
+
+
+def _mixer_lines(project: LogicProject, keep_outputs: bool) -> list[str]:
+    """The mixer as it was written: every track, then the groups made from Logic's buses."""
+    states = project.mixer_state or {}
+    overridden = set(project.mixer_overrides)
+    lines = [f"MIXER (read from the Logic project, {len(states)} tracks):"]
+    for name, state in states.items():
+        parts = _mixer_parts(state)
+        if name in project.track_group:
+            parts.append(f'in group "{project.track_group[name]}"')
+        elif name in project.track_outputs:
+            parts.append(_output_part(project.track_outputs[name], keep_outputs))
+        if name in overridden:
+            parts.append("from --mixer")
+        lines.append(f"  {name} - {', '.join(parts)}")
+    if project.track_groups:
+        lines.append(
+            f"  Groups ({len(project.track_groups)}): a Logic bus and the aux channel listening on it "
+            "become a Live group track with that channel's fader, pan and mute."
+        )
+        for name, group in project.track_groups.items():
+            parts = _mixer_parts(group.mixer)
+            if group.parent:
+                parts.append(f'in group "{group.parent}"')
+            elif group.output is not None:
+                parts.append(_output_part(group.output, keep_outputs))
+            lines.append(f"    {name} - {', '.join(parts)}")
+    rerouted = [name for name in project.track_outputs if name not in project.track_group]
+    rerouted += [name for name, group in project.track_groups.items() if group.output is not None and not group.parent]
+    if rerouted and keep_outputs:
+        lines.append(
+            f"  {len(rerouted)} of the tracks and groups above are routed to the interface outputs they use in "
+            "Logic (--keep-outputs); on an audio device without such an output they stay silent until the "
+            "routing is changed."
+        )
+    elif rerouted:
+        lines.append(
+            f"  {len(rerouted)} of the tracks and groups above play to another interface output in Logic and to "
+            "Live's main output here; pass --keep-outputs to route them to the same outputs."
+        )
+    return lines
+
+
 def generate_report(
     project: LogicProject,
     plugin_matches: list[PluginMatch],
     *,
     keep_unwarped: list[str] | None = None,
     smpte_start_explicit: bool = False,
+    keep_outputs: bool = False,
 ) -> str:
     """Generate a text report summarizing the Logic-to-Ableton conversion.
 
@@ -61,6 +123,8 @@ def generate_report(
             tracks generate_als wrote as unwarped clips.
         smpte_start_explicit: whether the user passed --smpte-start, so an
             explicit value equal to the default is still labelled as theirs.
+        keep_outputs: whether --keep-outputs routed tracks to the interface
+            outputs they use in Logic.
 
     Returns:
         Multi-line string report.
@@ -135,18 +199,12 @@ def generate_report(
         lines.append(f"  {i}. {track_name}{detail}")
     lines.append("")
 
-    if project.mixer_state:
+    if project.mixer_state and project.mixer_from_project:
+        lines.extend(_mixer_lines(project, keep_outputs))
+    elif project.mixer_state:
         lines.append(f"MIXER STATE APPLIED ({len(project.mixer_state)} tracks):")
         for name, state in project.mixer_state.items():
-            parts = [f"{state.volume_db:+.1f} dB"]
-            if state.pan != 0:
-                direction = "L" if state.pan < 0 else "R"
-                parts.append(f"pan {abs(state.pan):.0%}{direction}")
-            if state.is_muted:
-                parts.append("MUTED")
-            if state.is_soloed:
-                parts.append("SOLO")
-            lines.append(f"  {name} - {', '.join(parts)}")
+            lines.append(f"  {name} - {', '.join(_mixer_parts(state))}")
     else:
         lines.append("MIXER STATE: defaults (0 dB, center pan)")
         lines.append("  Tip: use --mixer mixer_overrides.json to set per-track levels")
@@ -239,7 +297,10 @@ def generate_report(
     lines.append("  - Software instruments and MIDI effects (notes become native MIDI tracks, but reload the instruments in Ableton)")
     lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
     lines.append("  - Automation data (requires deeper binary parsing)")
-    lines.append("  - Bus/send routing (recreate manually in Ableton)")
+    if project.mixer_from_project:
+        lines.append("  - Sends, and aux channels fed only by sends such as reverb and delay returns (recreate manually in Ableton)")
+    else:
+        lines.append("  - Bus/send routing (recreate manually in Ableton)")
     if not getattr(project, "tempo_track_decoded", False):
         # Only projects whose arrangement could not be read get here.
         if project.timeline is None:

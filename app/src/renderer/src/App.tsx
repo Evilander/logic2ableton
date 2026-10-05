@@ -51,13 +51,15 @@ function extrasForDirection(
   direction: ConversionDirection,
   smpteStart: string,
   keepUnwarped: string,
+  keepOutputs: boolean,
   timelinePath: string | null,
-): Pick<ConversionRequest, "smpteStart" | "keepUnwarped" | "timelinePath"> {
+): Pick<ConversionRequest, "smpteStart" | "keepUnwarped" | "keepOutputs" | "timelinePath"> {
   const trimmedSmpteStart = smpteStart.trim()
   const patterns = keepUnwarped.split(",").map((pattern) => pattern.trim()).filter(Boolean)
   return {
     smpteStart: sourceForDirection(direction) === "logic" && trimmedSmpteStart ? trimmedSmpteStart : undefined,
     keepUnwarped: direction === "logic2ableton" && patterns.length > 0 ? patterns : undefined,
+    keepOutputs: direction === "logic2ableton" && keepOutputs ? true : undefined,
     timelinePath: direction === "logic2ableton" && timelinePath ? timelinePath : undefined,
   }
 }
@@ -127,6 +129,7 @@ export default function App() {
     tempo: number,
     smpteStart: string,
     keepUnwarped: string,
+    keepOutputs: boolean,
     timelinePath: string | null,
     field: PreviewSettingsField = null,
   ) => {
@@ -223,7 +226,7 @@ export default function App() {
         outputDir: "",
         reportOnly: true,
         tempo: isProToolsSource(direction) ? tempo : undefined,
-        ...extrasForDirection(direction, smpteStart, keepUnwarped, timelinePath),
+        ...extrasForDirection(direction, smpteStart, keepUnwarped, keepOutputs, timelinePath),
       })
     } catch (error) {
       if (settled || previewRequestRef.current !== requestId) return
@@ -263,10 +266,11 @@ export default function App() {
     state.setTempo(120)
     state.setSmpteStart("01:00:00:00")
     state.setKeepUnwarped("")
+    state.setKeepOutputs(false)
     state.setTimelinePath(null)
     state.setResult(null)
     state.setPreview(null)
-    void runPreview(path, direction, 120, "01:00:00:00", "", null)
+    void runPreview(path, direction, 120, "01:00:00:00", "", false, null)
   }
 
   const requestPreviewWith = (
@@ -275,6 +279,7 @@ export default function App() {
       tempo: number
       smpteStart: string
       keepUnwarped: string
+      keepOutputs: boolean
       timelinePath: string | null
     }>,
     field: PreviewSettingsField = null,
@@ -286,6 +291,7 @@ export default function App() {
       overrides.tempo ?? state.tempo,
       overrides.smpteStart ?? state.smpteStart,
       overrides.keepUnwarped ?? state.keepUnwarped,
+      overrides.keepOutputs ?? state.keepOutputs,
       "timelinePath" in overrides ? (overrides.timelinePath as string | null) : state.timelinePath,
       field,
     )
@@ -311,6 +317,11 @@ export default function App() {
   const handleKeepUnwarpedChange = (keepUnwarped: string) => {
     state.setKeepUnwarped(keepUnwarped)
     requestPreviewWith({ keepUnwarped }, "keepUnwarped")
+  }
+
+  const handleKeepOutputsChange = (keepOutputs: boolean) => {
+    state.setKeepOutputs(keepOutputs)
+    requestPreviewWith({ keepOutputs }, "keepOutputs")
   }
 
   const handleTimelinePathChange = (timelinePath: string | null) => {
@@ -339,6 +350,7 @@ export default function App() {
     const tempo = state.tempo
     const smpteStart = state.smpteStart
     const keepUnwarped = state.keepUnwarped
+    const keepOutputs = state.keepOutputs
     const timelinePath = state.timelinePath
 
     const requestId = ++previewRequestRef.current
@@ -498,7 +510,7 @@ export default function App() {
         outputDir,
         reportOnly: false,
         tempo: isProToolsSource(direction) ? tempo : undefined,
-        ...extrasForDirection(direction, smpteStart, keepUnwarped, timelinePath),
+        ...extrasForDirection(direction, smpteStart, keepUnwarped, keepOutputs, timelinePath),
       })
     } catch (error) {
       recordFailure(error instanceof Error ? error.message : String(error))
@@ -611,12 +623,14 @@ export default function App() {
                 tempo={state.tempo}
                 smpteStart={state.smpteStart}
                 keepUnwarped={state.keepUnwarped}
+                keepOutputs={state.keepOutputs}
                 timelinePath={state.timelinePath}
                 settingsError={settingsError}
                 onDirectionChange={handleDirectionChange}
                 onTempoChange={handleTempoChange}
                 onSmpteStartChange={handleSmpteStartChange}
                 onKeepUnwarpedChange={handleKeepUnwarpedChange}
+                onKeepOutputsChange={handleKeepOutputsChange}
                 onSelectTimelineJson={() => void handleSelectTimelineJson()}
                 onClearTimelinePath={() => handleTimelinePathChange(null)}
                 onSelectOutputDir={handleSelectOutputDir}

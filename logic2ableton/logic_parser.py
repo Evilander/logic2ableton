@@ -13,15 +13,18 @@ from logic2ableton.logic_project_data import (
     PPQ,
     SEQUENCE_ORIGIN_TICKS,
     LogicArrangement,
+    LogicChannelStrip,
     decode_project_data,
 )
 from logic2ableton.models import (
     AudioFileRef,
+    HardwareOutput,
     LogicMidiNote,
     LogicMidiRegion,
     LogicMidiTrack,
     LogicProject,
     PluginInstance,
+    TrackGroup,
     TrackMixerState,
     parse_audio_filename,
 )
@@ -690,8 +693,14 @@ _MIXER_MAX_VOLUME_DB = 6.0
 _MIXER_PAN_RANGE = (-1.0, 1.0)
 
 
-def load_mixer_overrides(json_path: Path) -> dict[str, TrackMixerState]:
+def load_mixer_overrides(
+    json_path: Path, *, base: dict[str, TrackMixerState] | None = None,
+) -> dict[str, TrackMixerState]:
     """Load and strictly validate per-track mixer overrides from an explicit JSON file.
+
+    ``base`` holds the values the tracks already have (read from the Logic
+    project): a field an entry leaves out keeps the track's value from there
+    instead of going back to 0 dB, centre, unmuted.
 
     An explicit --mixer file is a deliberate user override, so any problem
     with it - missing, malformed JSON, wrong shape, or an out-of-range/
@@ -725,7 +734,8 @@ def load_mixer_overrides(json_path: Path) -> dict[str, TrackMixerState]:
         if not isinstance(raw_state, dict):
             raise ValueError(f"Mixer overrides file {json_path}: overrides for {track_name!r} must be an object")
 
-        volume_db = raw_state.get("volume_db", 0.0)
+        start = (base or {}).get(track_name) or TrackMixerState()
+        volume_db = raw_state.get("volume_db", start.volume_db)
         if isinstance(volume_db, bool) or not isinstance(volume_db, (int, float)) or not math.isfinite(volume_db):
             raise ValueError(
                 f"Mixer overrides file {json_path}: {track_name!r} has an invalid 'volume_db' "
@@ -737,7 +747,7 @@ def load_mixer_overrides(json_path: Path) -> dict[str, TrackMixerState]:
                 f"[{_MIXER_MIN_VOLUME_DB:g}, {_MIXER_MAX_VOLUME_DB:g}]: {volume_db!r}"
             )
 
-        pan = raw_state.get("pan", 0.0)
+        pan = raw_state.get("pan", start.pan)
         if isinstance(pan, bool) or not isinstance(pan, (int, float)) or not math.isfinite(pan):
             raise ValueError(
                 f"Mixer overrides file {json_path}: {track_name!r} has an invalid 'pan' "
@@ -749,11 +759,11 @@ def load_mixer_overrides(json_path: Path) -> dict[str, TrackMixerState]:
                 f"[{_MIXER_PAN_RANGE[0]:g}, {_MIXER_PAN_RANGE[1]:g}]: {pan!r}"
             )
 
-        is_muted = raw_state.get("is_muted", False)
+        is_muted = raw_state.get("is_muted", start.is_muted)
         if not isinstance(is_muted, bool):
             raise ValueError(f"Mixer overrides file {json_path}: {track_name!r} has a non-boolean 'is_muted': {is_muted!r}")
 
-        is_soloed = raw_state.get("is_soloed", False)
+        is_soloed = raw_state.get("is_soloed", start.is_soloed)
         if not isinstance(is_soloed, bool):
             raise ValueError(f"Mixer overrides file {json_path}: {track_name!r} has a non-boolean 'is_soloed': {is_soloed!r}")
 
@@ -1262,6 +1272,113 @@ def _unique_track_names(arrangement: LogicArrangement, warnings: list[str]) -> d
     return names
 
 
+def _strip_mixer_state(strip: LogicChannelStrip) -> TrackMixerState:
+    return TrackMixerState(
+        volume_db=max(_MIXER_MIN_VOLUME_DB, min(_MIXER_MAX_VOLUME_DB, strip.volume_db)),
+        pan=strip.pan_position,
+        is_muted=strip.muted,
+    )
+
+
+def _hardware_output(destination: tuple[str, int] | None) -> HardwareOutput | None:
+    """The interface output a signal ends at, unless it is the main one (Output 1-2)."""
+    if destination is None:
+        return None
+    kind, number = destination
+    if kind == "output" and number > 0:
+        return HardwareOutput(first_channel=2 * number + 1)
+    if kind == "mono output":
+        return HardwareOutput(first_channel=number, stereo=False)
+    return None
+
+
+def _arrangement_mixer(
+    arrangement: LogicArrangement,
+    track_names_by_id: dict[int, str],
+    warnings: list[str],
+) -> tuple[dict[str, TrackMixerState], dict[str, TrackGroup], dict[str, str], dict[str, HardwareOutput]]:
+    """Fader, pan and mute of every output track, and the buses the tracks play through.
+
+    A Logic track whose output is a bus is heard through the aux channel that
+    listens on that bus, at that channel's level and only while it is unmuted.
+    Live's counterpart is a group track, so each such aux becomes a group with
+    the aux's fader, pan and mute, holding the tracks that play into it; an
+    aux that itself feeds a bus becomes a group inside a group. Without the
+    groups the track faders alone would give a different balance than Logic.
+
+    Returns the mixer state per track name, the groups by name, each grouped
+    track's group, and the interface output of each track that does not end
+    at the main output.
+    """
+    mixer = arrangement.mixer
+    states: dict[str, TrackMixerState] = {}
+    groups: dict[str, TrackGroup] = {}
+    membership: dict[str, str] = {}
+    outputs: dict[str, HardwareOutput] = {}
+    group_names: dict[int, str] = {}    # aux strip index -> group name
+    used_names: set[str] = set()
+    stopped: dict[tuple[str, str], list[str]] = {}  # (track or group, why the path stops) -> names
+
+    def route(strip: LogicChannelStrip, trail: frozenset[int]) -> tuple[str | None, HardwareOutput | None, str | None]:
+        """The group a strip plays into, else its interface output, else what stops the path."""
+        destination = mixer.destination(strip)
+        if destination is None or destination[0] != "bus":
+            return None, _hardware_output(destination), None
+        listeners = mixer.bus_listeners(destination[1])
+        if not listeners:
+            return None, None, "unheard"
+        if len(listeners) > 1:
+            return None, None, "shared"
+        if listeners[0].index in trail:
+            return None, None, "loop"
+        aux = listeners[0]
+        name = group_names.get(aux.index)
+        if name is None:
+            base = aux.name or aux.label
+            name = base
+            number = 2
+            while name.casefold() in used_names:
+                name = f"{base} ({number})"
+                number += 1
+            used_names.add(name.casefold())
+            group_names[aux.index] = name
+            group = TrackGroup(name=name, mixer=_strip_mixer_state(aux))
+            groups[name] = group
+            group.parent, group.output, problem = route(aux, trail | {aux.index})
+            if problem:
+                stopped.setdefault(("group", problem), []).append(name)
+        return name, None, None
+
+    for track_id, track_name in track_names_by_id.items():
+        strip = mixer.strip_for_track(track_id)
+        if strip is None:
+            continue
+        states[track_name] = _strip_mixer_state(strip)
+        group, output, problem = route(strip, frozenset({strip.index}))
+        if group is not None:
+            membership[track_name] = group
+        elif output is not None:
+            outputs[track_name] = output
+        elif problem:
+            stopped.setdefault(("track", problem), []).append(track_name)
+
+    reasons = {
+        "unheard": "with no aux channel listening on it",
+        "shared": "that more than one aux channel listens on, which a Live group cannot mirror",
+        "loop": "that leads back to the same channel",
+    }
+    outcomes = {
+        "track": "so they are not grouped and keep their own level",
+        "group": "so they play to the main output",
+    }
+    for (kind, problem), names in stopped.items():
+        examples = ", ".join(names[:5]) + (", ..." if len(names) > 5 else "")
+        warnings.append(
+            f"{len(names)} {kind}(s) play into a Logic bus {reasons[problem]}, {outcomes[kind]}: {examples}"
+        )
+    return states, groups, membership, outputs
+
+
 def _arrangement_midi_tracks(
     arrangement: LogicArrangement,
     *,
@@ -1603,6 +1720,10 @@ def parse_logic_project(
     project_tempo = meta["tempo"]
     tempo_changes: list[TempoEvent] = []
     track_count = None
+    mixer_state: dict[str, TrackMixerState] = {}
+    track_groups: dict[str, TrackGroup] = {}
+    track_group: dict[str, str] = {}
+    track_outputs: dict[str, HardwareOutput] = {}
     if arrangement_decoded:
         # The project's own arrangement says where every region sits, how it
         # loops and which track owns it, so audio timestamps and the SMPTE
@@ -1628,6 +1749,12 @@ def parse_logic_project(
         )
         regions = {ref.filename: ref.start_position_samples for ref in audio_files}
         track_count = len(set(track_names) | {track.name for track in midi_tracks})
+        output_names = set(track_names) | {track.name for track in midi_tracks if track.note_count > 0}
+        mixer_state, track_groups, track_group, track_outputs = _arrangement_mixer(
+            arrangement,
+            {track_id: name for track_id, name in track_names_by_id.items() if name in output_names},
+            midi_warnings,
+        )
     else:
         midi_tracks = extract_midi_notes(logicx_path, alternative, _data=project_data, warnings=midi_warnings)
         regions = extract_regions(
@@ -1703,4 +1830,9 @@ def parse_logic_project(
         arrangement_decoded=arrangement_decoded,
         tempo_track_decoded=arrangement_decoded and bool(arrangement.tempo_events),
         project_start_bar=arrangement.project_start_bar if arrangement_decoded else None,
+        mixer_state=mixer_state or None,
+        mixer_from_project=bool(mixer_state),
+        track_groups=track_groups,
+        track_group=track_group,
+        track_outputs=track_outputs,
     )

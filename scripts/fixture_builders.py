@@ -317,6 +317,120 @@ def _logic_rtf(text: str) -> bytes:
     ).encode("latin-1")
 
 
+_LOGIC_STRIP_POOL = 36  # the AuCn object that owns the channel strips in real projects
+
+
+def _logic_channel_strip(
+    index: int,
+    label: str,
+    *,
+    stereo: bool = False,
+    fader: float = 90.0,
+    pan: int = 64,
+    muted: bool = False,
+    output: int = 0xFFFF,
+    input_code: int = 0,
+    version: int = 1,
+) -> bytes:
+    """One AuCO object: label at +96, stereo bit at +114, fader, pan, mute, output and input."""
+    payload = bytearray(132)
+    encoded = (label if label.startswith("\u2022") else " " + label).encode("mac_roman")
+    payload[64:64 + len(encoded)] = encoded
+    payload[80:84] = bytes([0xAB, 0xF7, 0xD7 if stereo else 0xD3, 0xCF])
+    payload[89] = int(fader)
+    payload[93] = pan
+    payload[94] = 1 if muted else 0
+    struct.pack_into("<HH", payload, 96, output, input_code)
+    struct.pack_into("<I", payload, 120, int(round(fader * 0x1000000)))
+    return _logic_object("AuCO", bytes(payload), kind=1, id1=_LOGIC_STRIP_POOL, id2=index, version=version)
+
+
+def _logic_mixer(mixer: dict, *, version: int = 1) -> tuple[bytes, dict[int, int]]:
+    """The channel strip pool of a project, and the pool index of each track's strip.
+
+    ``mixer``: {"stereo_outputs", "mono_outputs", "stereo_inputs", "mono_inputs",
+    "buses": how many of each the pool holds (an audio interface with other
+    channel counts numbers the same bus differently), "spare_aux": also write
+    Logic's unused aux strips, one preset to each bus, "device_outputs": how
+    many outputs get the bullet Logic puts in front of the ones the audio
+    device has, "decoys": {track id: strip index} for objects that are not
+    channel strips but hold that number where a strip object holds its
+    strip, "strips": [...]}.
+    A strip: {"label": "Audio 1", "track": the id of the track object that
+    plays through it, or a list of ids (omit for a strip that is not on the
+    mixer), "stereo", "fader" (0-127, 90 is 0 dB), "pan" (0-127), "muted",
+    and where it plays to: "output" (stereo output pair, 0 is Output 1-2;
+    the default), "bus" (bus number), "mono_output" (output number),
+    "no_output" or "output_code" (the raw number); an aux adds "from_bus",
+    the bus it listens on}.
+    """
+    stereo_outputs = mixer.get("stereo_outputs", 2)
+    mono_outputs = mixer.get("mono_outputs", 2 * stereo_outputs)
+    stereo_inputs = mixer.get("stereo_inputs", 2)
+    mono_inputs = mixer.get("mono_inputs", 2 * stereo_inputs)
+    buses = mixer.get("buses", 8)
+
+    def output_code(spec: dict) -> int:
+        if "output_code" in spec:
+            return spec["output_code"]
+        if spec.get("no_output"):
+            return 0xFFFF
+        if "bus" in spec:
+            return stereo_outputs + spec["bus"] - 1
+        if "mono_output" in spec:
+            return stereo_outputs + buses + spec["mono_output"] - 1
+        return spec.get("output", 0)
+
+    def input_code(spec: dict) -> int:
+        if "from_bus" not in spec:
+            return spec.get("input", 0)
+        return (stereo_inputs if spec.get("stereo") else mono_inputs) + spec["from_bus"] - 1
+
+    blob = b""
+    index = 0
+    track_strips: dict[int, int] = {}
+    for spec in mixer.get("strips", []):
+        blob += _logic_channel_strip(
+            index,
+            spec["label"],
+            stereo=bool(spec.get("stereo")),
+            fader=spec.get("fader", 90.0),
+            pan=spec.get("pan", 64),
+            muted=bool(spec.get("muted")),
+            output=output_code(spec),
+            input_code=input_code(spec),
+            version=version,
+        )
+        owners = spec.get("track")
+        for track_id in owners if isinstance(owners, list) else [owners]:
+            if track_id is not None:
+                track_strips[track_id] = index
+        index += 1
+    marked = mixer.get("device_outputs", 0)
+
+    def output_label(text: str, number: int) -> str:
+        return ("\u2022" if number < marked else "") + text
+
+    furniture = [(f"Input {n + 1}", False) for n in range(mono_inputs)]
+    furniture += [(f"Input {2 * n + 1}-{2 * n + 2}", True) for n in range(stereo_inputs)]
+    furniture += [(output_label(f"Output {n + 1}", n), False) for n in range(mono_outputs)]
+    furniture += [(output_label(f"Output {2 * n + 1}-{2 * n + 2}", 2 * n), True) for n in range(stereo_outputs)]
+    furniture += [(f"Bus {n + 1}", True) for n in range(buses)]
+    for label, stereo in furniture:
+        blob += _logic_channel_strip(index, label, stereo=stereo, output=0xFFFF, version=version)
+        index += 1
+    if mixer.get("spare_aux"):
+        for bus in range(1, buses + 1):
+            blob += _logic_channel_strip(
+                index, f"Aux {bus + 100}", stereo=True, output=0, input_code=stereo_inputs + bus - 1, version=version,
+            )
+            index += 1
+    # Every AuCn also owns one small AuCO that is not a strip.
+    blob += _logic_object("AuCO", b"\x00" * 14, kind=1, id1=32, id2=0, version=version)
+    blob += _logic_object("AuCO", b"\x00" * 14, kind=1, id1=_LOGIC_STRIP_POOL, id2=index, version=version)
+    return blob, track_strips, dict(mixer.get("decoys", {}))
+
+
 def build_logic_arrangement_project_data(
     *,
     tracks: dict[int, str],
@@ -331,8 +445,13 @@ def build_logic_arrangement_project_data(
     version: int = 1,
     history: list[dict] | None = None,
     tempo_changes: list[tuple[float, float]] | None = None,
+    mixer: dict | None = None,
 ) -> bytes:
     """ProjectData in the object layout logic_project_data decodes.
+
+    ``mixer``: the channel strips, see ``_logic_mixer``. Without it the
+    tracks are written as objects that are not channel strips and the
+    project has no mixer to read.
 
     ``tempo_changes``: (bar, bpm) steps of the tempo track after bar 1, where
     ``tempo`` starts. A third element overrides the time stamp Logic would
@@ -380,10 +499,21 @@ def build_logic_arrangement_project_data(
         current_bar, current_bpm = bar, bpm
     blob += _logic_event_sequence(tempo_records, id1=0, id2=9000, version=version)
 
+    strips_blob, track_strips, decoys = _logic_mixer(mixer, version=version) if mixer else (b"", {}, {})
     for track_id, name in tracks.items():
         encoded = name.encode("utf-8")
-        payload = b"\x00" * 162 + struct.pack("<H", len(encoded)) + encoded + b"\x00" * 16
+        head = bytearray(162)
+        tail = b"\x00" * 16
+        if track_id in track_strips or track_id in decoys:
+            # A channel strip object: type 0x11 at +117, and after the
+            # even-aligned name the index of its strip, plus one. Other
+            # objects (a MIDI click is type 9) keep unrelated data there.
+            head[117 - 32] = 0x11 if track_id in track_strips else 0x09
+            strip_index = track_strips.get(track_id, decoys.get(track_id))
+            tail = (b"\x00" if len(encoded) & 1 else b"") + struct.pack("<H", strip_index + 1) + tail
+        payload = bytes(head) + struct.pack("<H", len(encoded)) + encoded + tail
         blob += _logic_object("Envi", payload, kind=5, class_id=0x14, id1=track_id, version=version)
+    blob += strips_blob
 
     for spec in sequences:
         encoded = spec["name"].encode("utf-8")
@@ -463,6 +593,7 @@ def build_logic_arrangement_project_data(
             tempo=step.get("tempo", tempo),
             version=version,
             tempo_changes=step.get("tempo_changes"),
+            mixer=step.get("mixer"),
         )
         blob += snapshot[24:]  # its Song object and the old object copies
     return blob

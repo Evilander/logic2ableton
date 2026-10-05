@@ -422,3 +422,66 @@ test('converter.ts omits --smpte-start and --timeline when the request leaves th
   assert.equal(args.includes('--keep-unwarped'), false)
   assert.equal(args.includes('--timeline'), false)
 })
+
+test('forwards keep-outputs for logic2ableton', async (t) => {
+  const h = harness(t)
+  await h.convert({ keepOutputs: true })
+  assert.equal(h.calls[0].direction, 'logic2ableton')
+  assert.equal(h.calls[0].keepOutputs, true)
+})
+
+test('omits keep-outputs when false or unset', async (t) => {
+  const h = harness(t)
+  await h.convert({ keepOutputs: false })
+  assert.equal(h.calls[0].keepOutputs, undefined)
+  h.jobs[0].exit(0)
+
+  await h.convert({})
+  assert.equal(h.calls[1].keepOutputs, undefined)
+})
+
+test('drops keep-outputs for directions other than logic2ableton, for both start-conversion and start-preview', async (t) => {
+  const h = harness(t)
+  await h.convert({ direction: 'logic2protools', sourcePath: 'Song.logicx', keepOutputs: true })
+  assert.equal(h.calls[0].keepOutputs, undefined)
+  h.jobs[0].exit(0)
+
+  await h.convert({ direction: 'ableton2logic', sourcePath: 'Set.als', keepOutputs: true })
+  assert.equal(h.calls[1].keepOutputs, undefined)
+  h.jobs[1].exit(0)
+
+  await h.preview({ direction: 'logic2ableton', sourcePath: 'Song.logicx', keepOutputs: true })
+  assert.equal(h.calls[2].keepOutputs, true)
+  h.jobs[2].exit(0)
+
+  await h.preview({ direction: 'protools2ableton', sourcePath: 'Session.ptx', tempo: 120, keepOutputs: true })
+  assert.equal(h.calls[3].keepOutputs, undefined)
+})
+
+test('rejects a non-boolean keep-outputs value', async (t) => {
+  const h = harness(t)
+  await assert.rejects(h.convert({ keepOutputs: 'yes' }), /Keep-outputs must be true or false/)
+  await assert.rejects(h.convert({ keepOutputs: 1 }), /Keep-outputs must be true or false/)
+  assert.equal(h.calls.length, 0)
+})
+
+test('converter.ts spawns --keep-outputs when the request sets it, and omits it when false or unset', () => {
+  const h = converterHarness()
+  h.converter.runConversion(
+    { direction: 'logic2ableton', sourcePath: 'Song.logicx', outputDir: 'out', reportOnly: false, keepOutputs: true },
+    () => {}, () => {}, () => {},
+  )
+  assert.equal(h.spawnCalls[0].args.includes('--keep-outputs'), true)
+
+  h.converter.runConversion(
+    { direction: 'logic2ableton', sourcePath: 'Song.logicx', outputDir: 'out', reportOnly: false, keepOutputs: false },
+    () => {}, () => {}, () => {},
+  )
+  assert.equal(h.spawnCalls[1].args.includes('--keep-outputs'), false)
+
+  h.converter.runConversion(
+    { direction: 'ableton2logic', sourcePath: 'Set.als', outputDir: 'out', reportOnly: false },
+    () => {}, () => {}, () => {},
+  )
+  assert.equal(h.spawnCalls[2].args.includes('--keep-outputs'), false)
+})

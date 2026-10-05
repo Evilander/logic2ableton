@@ -57,7 +57,8 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - `--keep-unwarped` keeps matching tracks (sync tone, pilot tracks, timecode) as unwarped Live clips so they never stretch when the tempo changes
 - Folder-saved Logic projects (a `.logicx` package next to a sibling `Audio Files` folder) are read the same as package-saved ones
 - Multiple `.logicx` inputs in one run, converted and reported one after another
-- Optional mixer overrides from JSON
+- The mixer: every track gets the level, pan and mute its channel strip has in the Logic project, audio and MIDI tracks alike. Where tracks play into a bus that an aux channel listens on (a drum bus, a summing stack), the aux becomes a Live group track with its level, pan and mute and those tracks inside it, so a bus fader still acts on the tracks that play through it. What the converter reads was compared with the mute buttons and the level, pan and bus readouts in the picture of its main window that Logic saves inside each project (six project versions), and two converted sets opened in Live 12 showed the same level, pan, mute and group for all 40 of their tracks and groups. `--mixer` changes the values of the tracks named in a JSON file, and `--no-mixer` leaves every track at 0 dB, centred and unmuted
+- `--keep-outputs` sends tracks that play to another output of the audio interface in Logic (3-4, 5-6, a mono output) to the same output in Live
 - Plugin identification with VST3 suggestions in the report
 
 ### Ableton to Logic
@@ -107,7 +108,9 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - When the arrangement cannot be read and placement falls back to audio timestamps, Logic's tempo changes are reported but not applied; supply them with `--timeline`
 - `--smpte-start` only matters for the timestamp fallback; it must then match the project's own synchronization setting (default `01:00:00:00`), and the report lists any files placed at bar 1 because their timestamp precedes it
 - Automation is not recreated
-- Bus and send routing are not recreated
+- Mixer values are the ones the project was saved with; fader and pan automation is not read, and solo is ignored. Levels were compared with what Logic shows between 0 and -11.6 dB, and the stored levels land on Logic's 0.1 dB steps down to -23.8 dB; quieter settings use the same conversion and were not compared. Live shows pan as 50L to 50R where Logic counts -64 to +63
+- Sends are not recreated, and neither are aux channels fed only by sends (reverb and delay returns), nor anything in an insert slot. A bus that no aux channel listens on, or that several do, is left ungrouped and the report says so. The faders of Logic's output channels and its master fader are not applied, nor are the level and mute of a folder stack or a VCA fader, and a track muted in Logic's CPU-saving mute mode may not be seen as muted. A group is named after its aux channel, which is not always the name the stack shows in Logic
+- Tracks play to Live's main output unless `--keep-outputs` is given. With it, a track whose output the current audio device does not have shows no output channel in Live and stays silent until you choose one
 - Plugin parameters are not recreated
 - In the timestamp fallback, imported audio without embedded timestamps defaults to bar 1
 - Media outside `Media/Audio Files` is not copied automatically
@@ -276,16 +279,22 @@ logic2ableton "/path/to/MySong.logicx" --report-only
 ableton2logic "/path/to/MySet.als" --report-only
 ```
 
-Generate a Logic mixer template:
+Write the mixer read from a Logic project to a JSON file you can edit:
 
 ```bash
 logic2ableton "/path/to/MySong.logicx" --output ./output --generate-mixer-template --report-only
 ```
 
-Apply mixer overrides:
+Convert with the values that file gives; tracks and fields it leaves out keep what Logic has:
 
 ```bash
 logic2ableton "/path/to/MySong.logicx" --output ./output --mixer ./output/mixer_overrides.json
+```
+
+Keep the interface outputs of a playback rig, so a click on outputs 11-12 in Logic is on Ext. Out 11/12 in Live:
+
+```bash
+logic2ableton "/path/to/MySong.logicx" --output ./output --keep-outputs
 ```
 
 Emit JSON progress for app or automation integration:
@@ -333,8 +342,10 @@ summary at the end.
 | `--alternative`, `-a` | Logic alternative index (also on `logic2protools`) |
 | `--template` | Use a specific `DefaultLiveSet.als` (also on `protools2ableton`) |
 | `--vst3-path` | Override the VST3 scan directory |
-| `--mixer` | Apply mixer overrides from JSON |
-| `--generate-mixer-template` | Write a starter `mixer_overrides.json` |
+| `--mixer` | JSON file of level, pan, mute and solo per track; each value given replaces the one read from the Logic project |
+| `--no-mixer` | Leave every track at 0 dB, centred and unmuted, with no groups |
+| `--generate-mixer-template` | Write `mixer_overrides.json` with every track and the values read from the Logic project |
+| `--keep-outputs` | Route tracks that play to another interface output in Logic to the same output in Live (Ext. Out) instead of the main output |
 | `--smpte-start` | SMPTE time bar 1 plays at (default `01:00:00:00`); pass `auto` to infer one whole SMPTE hour from the earliest recording (also on `logic2protools`) |
 | `--keep-unwarped` | Track-name glob, case-insensitive and repeatable; matching tracks are written as unwarped Live clips so they never stretch when the tempo changes |
 | `--timeline` | JSON file with a tempo map and/or markers used in place of the ones read from the Logic project (see [Timeline JSON](#timeline-json) below) |

@@ -22,6 +22,7 @@ export interface ConversionRequest {
   tempo?: number
   smpteStart?: string
   keepUnwarped?: string[]
+  keepOutputs?: boolean
   timelinePath?: string
 }
 
@@ -75,7 +76,7 @@ export function runConversion(
   onError: (error: string) => void,
   onExit: (code: number) => void,
 ): ChildProcess | null {
-  const { direction, sourcePath, outputDir, reportOnly, tempo, smpteStart, keepUnwarped, timelinePath } = request
+  const { direction, sourcePath, outputDir, reportOnly, tempo, smpteStart, keepUnwarped, keepOutputs, timelinePath } = request
   let cmd: string
   let baseArgs: string[]
 
@@ -109,6 +110,9 @@ export function runConversion(
     for (const pattern of keepUnwarped) {
       args.push("--keep-unwarped", pattern)
     }
+  }
+  if (keepOutputs) {
+    args.push("--keep-outputs")
   }
   if (timelinePath !== undefined) {
     args.push("--timeline", timelinePath)

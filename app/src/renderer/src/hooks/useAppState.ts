@@ -31,7 +31,7 @@ export interface ConversionResult {
 // A field-level preview validation failure. `field` is null for errors that
 // aren't tied to one input (e.g. switching destination format), in which
 // case the message is shown as a general notice instead of under a field.
-export type PreviewSettingsField = "tempo" | "smpteStart" | "keepUnwarped" | "timelinePath" | null
+export type PreviewSettingsField = "tempo" | "smpteStart" | "keepUnwarped" | "keepOutputs" | "timelinePath" | null
 
 export interface PreviewSettingsError {
   field: PreviewSettingsField
@@ -62,6 +62,7 @@ export function useAppState() {
   const [tempo, setTempo] = useState(120)
   const [smpteStart, setSmpteStart] = useState("01:00:00:00")
   const [keepUnwarped, setKeepUnwarped] = useState("")
+  const [keepOutputs, setKeepOutputs] = useState(false)
   const [timelinePath, setTimelinePath] = useState<string | null>(null)
   const [view, setView] = useState<AppView>("empty")
   const [sourcePath, setSourcePath] = useState<string | null>(null)
@@ -83,6 +84,7 @@ export function useAppState() {
     setTempo(120)
     setSmpteStart("01:00:00:00")
     setKeepUnwarped("")
+    setKeepOutputs(false)
     setTimelinePath(null)
     setView("empty")
     setSourcePath(null)
@@ -101,6 +103,7 @@ export function useAppState() {
     tempo, setTempo,
     smpteStart, setSmpteStart,
     keepUnwarped, setKeepUnwarped,
+    keepOutputs, setKeepOutputs,
     timelinePath, setTimelinePath,
     view, setView,
     sourcePath, setSourcePath,

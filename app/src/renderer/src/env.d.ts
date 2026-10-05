@@ -41,6 +41,7 @@ interface ConversionRequest {
   tempo?: number
   smpteStart?: string
   keepUnwarped?: string[]
+  keepOutputs?: boolean
   timelinePath?: string
 }
 

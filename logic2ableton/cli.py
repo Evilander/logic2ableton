@@ -24,6 +24,7 @@ from logic2ableton.logic_parser import (
     read_time_base,
 )
 from logic2ableton.logic_transfer import build_logic_transfer_report, generate_logic_transfer
+from logic2ableton.models import TrackMixerState
 from logic2ableton.plugin_matcher import match_plugins
 from logic2ableton.protools_import import (
     DEFAULT_PROTOOLS_TEMPO,
@@ -342,12 +343,35 @@ def _build_forward_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mixer",
         default=None,
-        help="Path to mixer_overrides.json with per-track volume/pan/mute/solo values (applied to each input)",
+        help=(
+            "Path to mixer_overrides.json with per-track volume/pan/mute/solo values that replace "
+            "the ones read from the Logic project for the tracks it names (applied to each input)"
+        ),
     )
     parser.add_argument(
         "--generate-mixer-template",
         action="store_true",
-        help="Generate a mixer_overrides.json template with all track names (written for each input)",
+        help=(
+            "Write a mixer_overrides.json holding every track with the values read from the Logic "
+            "project, to edit and pass back with --mixer (written for each input)"
+        ),
+    )
+    parser.add_argument(
+        "--no-mixer",
+        action="store_true",
+        help=(
+            "Leave every track at 0 dB, centred and unmuted, with no groups, instead of using the "
+            "levels, pans, mutes and buses read from the Logic project (a --mixer file still applies)"
+        ),
+    )
+    parser.add_argument(
+        "--keep-outputs",
+        action="store_true",
+        help=(
+            "Route tracks that play to another output of the audio interface in Logic (3-4, 5-6, "
+            "a mono output) to the same output in Live (Ext. Out) instead of the main output. "
+            "They are silent on a device that lacks the output"
+        ),
     )
     parser.add_argument(
         "--smpte-start",
@@ -568,9 +592,16 @@ def _run_forward(args: argparse.Namespace) -> int:
             unique=args.unique_reports,
         )
 
+    if args.no_mixer:
+        project.mixer_state = None
+        project.mixer_from_project = False
+        project.track_groups = {}
+        project.track_group = {}
+        project.track_outputs = {}
+
     if args.mixer:
         try:
-            project.mixer_state = load_mixer_overrides(Path(args.mixer))
+            overrides = load_mixer_overrides(Path(args.mixer), base=project.mixer_state)
         except Exception as exc:
             return _emit_failure(
                 mode=FORWARD_MODE,
@@ -582,19 +613,35 @@ def _run_forward(args: argparse.Namespace) -> int:
                 unique=args.unique_reports,
                 project_name=project.name,
             )
+        known = set(_mixer_track_names(project))
+        unknown = sorted(set(overrides) - known)
+        overrides = {name: state for name, state in overrides.items() if name in known}
+        project.mixer_state = {**(project.mixer_state or {}), **overrides} or None
+        project.mixer_overrides = sorted(overrides)
+        if unknown:
+            examples = ", ".join(unknown[:5]) + (", ..." if len(unknown) > 5 else "")
+            groups_note = (
+                " (a --mixer file sets tracks, not groups)"
+                if any(name in project.track_groups for name in unknown) else ""
+            )
+            project.compatibility_warnings.append(
+                f"--mixer names {len(unknown)} track(s) this project does not have, so nothing was done "
+                f"with them{groups_note}: {examples}"
+            )
         if not jp:
-            print(f"  Loaded mixer overrides for {len(project.mixer_state)} track(s)")
+            print(f"  Loaded mixer overrides for {len(overrides)} track(s)")
 
     if args.generate_mixer_template:
-        template = {
-            track_name: {
-                "volume_db": 0.0,
-                "pan": 0.0,
-                "is_muted": False,
-                "is_soloed": False,
+        states = project.mixer_state or {}
+        template = {}
+        for track_name in _mixer_track_names(project):
+            state = states.get(track_name) or TrackMixerState()
+            template[track_name] = {
+                "volume_db": round(state.volume_db, 2),
+                "pan": round(state.pan, 3),
+                "is_muted": state.is_muted,
+                "is_soloed": state.is_soloed,
             }
-            for track_name in project.track_names
-        }
         # Overwrite on repeat single runs; number only when several inputs share one output dir.
         if args.unique_reports:
             mixer_path = unique_output_path(output_dir, "mixer_overrides", ".json")
@@ -648,7 +695,11 @@ def _run_forward(args: argparse.Namespace) -> int:
 
     try:
         report = generate_report(
-            project, plugin_matches, keep_unwarped=args.keep_unwarped, smpte_start_explicit=smpte_explicit
+            project,
+            plugin_matches,
+            keep_unwarped=args.keep_unwarped,
+            smpte_start_explicit=smpte_explicit,
+            keep_outputs=args.keep_outputs,
         )
     except Exception as exc:
         return _emit_failure(
@@ -722,6 +773,7 @@ def _run_forward(args: argparse.Namespace) -> int:
             copy_audio=not args.no_copy,
             template_path=template_path,
             keep_unwarped=args.keep_unwarped,
+            keep_outputs=args.keep_outputs,
         )
     except Exception as exc:
         return _emit_failure(
@@ -739,8 +791,12 @@ def _run_forward(args: argparse.Namespace) -> int:
 
     midi_files = _export_logic_midi(project, als_path.parent)
     report = generate_report(
-            project, plugin_matches, keep_unwarped=args.keep_unwarped, smpte_start_explicit=smpte_explicit
-        )
+        project,
+        plugin_matches,
+        keep_unwarped=args.keep_unwarped,
+        smpte_start_explicit=smpte_explicit,
+        keep_outputs=args.keep_outputs,
+    )
     report, saved, warning = _finalize_report(report_path, report, project.compatibility_warnings)
     clip_count, audio_count = _als_audio_counts(als_path)
 
@@ -781,6 +837,13 @@ def _run_forward(args: argparse.Namespace) -> int:
         print("\nDone!")
 
     return 0
+
+
+def _mixer_track_names(project) -> list[str]:
+    """Every track the Live set gets: the audio tracks, then the MIDI tracks."""
+    names = list(project.track_names)
+    names += [track.name for track in project.midi_tracks if track.note_count > 0 and track.name not in names]
+    return names
 
 
 def _run_reverse(args: argparse.Namespace) -> int:

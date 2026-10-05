@@ -37,9 +37,11 @@ from logic2ableton.timeline import TempoMap, beats_per_bar
 
 from logic2ableton.models import (
     AudioFileRef,
+    HardwareOutput,
     LogicMidiNote,
     LogicMidiTrack,
     LogicProject,
+    TrackGroup,
     TrackMixerState,
     samples_to_beats,
 )
@@ -144,6 +146,18 @@ def _clone_track(template_track: ET.Element, allocator: _IdAllocator, name: str,
     track = copy.deepcopy(template_track)
     _reassign_ids(track, allocator)
 
+    # A custom template's track may sit in a group of the template; the clone does not.
+    group_id = track.find("TrackGroupId")
+    if group_id is not None:
+        group_id.set("Value", "-1")
+    routing = track.find("DeviceChain/AudioOutputRouting")
+    target = routing.find("Target") if routing is not None else None
+    if target is not None and target.get("Value") == "AudioOut/GroupTrack":
+        for tag, value in (("Target", "AudioOut/Main"), ("UpperDisplayString", "Master"), ("LowerDisplayString", "")):
+            field = routing.find(tag)
+            if field is not None:
+                field.set("Value", value)
+
     name_elem = track.find("Name")
     if name_elem is not None:
         eff = name_elem.find("EffectiveName")
@@ -160,8 +174,157 @@ def _clone_track(template_track: ET.Element, allocator: _IdAllocator, name: str,
     return track
 
 
+# What an AudioTrack stores for playing clips, which a GroupTrack does not have.
+_CLIP_TRACK_ONLY = ("SavedPlayingSlot", "SavedPlayingOffset", "NeedArrangerRefreeze", "PostProcessFreezeClips", "IsTuned")
+
+
+def _make_group_track(template_audio_track: ET.Element, allocator: _IdAllocator, name: str, color: int) -> ET.Element:
+    """Build a GroupTrack from the template's AudioTrack.
+
+    Live stores a group like an audio track without the parts that play
+    clips: no MainSequencer in the device chain, none of the playing-slot
+    and freeze-clip state, and one empty GroupTrackSlot per scene.
+    """
+    track = _clone_track(template_audio_track, allocator, name, color)
+    track.tag = "GroupTrack"
+    # Sets saved before Live could freeze a group (their tracks still carry
+    # NeedArrangerRefreeze) must leave a group's freeze slots empty, or Live
+    # rejects the set as corrupt; newer sets hold one freeze slot per scene.
+    freezes_groups = track.find("NeedArrangerRefreeze") is None
+    for tag in _CLIP_TRACK_ONLY:
+        child = track.find(tag)
+        if child is not None:
+            track.remove(child)
+    unfolded = track.find("TrackUnfolded")
+    if unfolded is not None:
+        unfolded.set("Value", "true")  # open, so the tracks inside it are in view
+
+    chain = track.find("DeviceChain")
+    scenes = 0
+    if chain is not None:
+        sequencer = chain.find("MainSequencer")
+        if sequencer is not None:
+            scenes = len(sequencer.findall("ClipSlotList/ClipSlot"))
+            chain.remove(sequencer)
+        # A group keeps its devices ahead of the FreezeSequencer.
+        devices = chain.find("DeviceChain")
+        freeze_sequencer = chain.find("FreezeSequencer")
+        if devices is not None and freeze_sequencer is not None:
+            chain.remove(devices)
+            chain.insert(list(chain).index(freeze_sequencer), devices)
+        freeze_slots = chain.find("FreezeSequencer/ClipSlotList")
+        if freeze_slots is not None and not freezes_groups:
+            for slot in list(freeze_slots):
+                freeze_slots.remove(slot)
+        # Whatever devices the template's audio track carries belong on audio tracks.
+        inherited = devices.find("Devices") if devices is not None else None
+        if inherited is not None:
+            for device in list(inherited):
+                inherited.remove(device)
+
+    slots = ET.Element("Slots")
+    for index in range(scenes):
+        slot = ET.SubElement(slots, "GroupTrackSlot", {"Id": str(index)})
+        _val(slot, "LomId", 0)
+    anchor = track.find("Freeze")
+    if anchor is None:
+        anchor = chain
+    if anchor is None:
+        track.append(slots)
+    else:
+        track.insert(list(track).index(anchor), slots)
+    return track
+
+
+def _join_group(track: ET.Element, group_track: ET.Element) -> None:
+    """Make a track (or a group) a member of a group: it plays into the group, not the main output."""
+    group_id = track.find("TrackGroupId")
+    if group_id is not None:
+        group_id.set("Value", group_track.get("Id"))
+    routing = track.find("DeviceChain/AudioOutputRouting")
+    if routing is not None:
+        for tag, value in (("Target", "AudioOut/GroupTrack"), ("UpperDisplayString", "Group"), ("LowerDisplayString", "")):
+            field = routing.find(tag)
+            if field is not None:
+                field.set("Value", value)
+
+
+def _route_to_output(track: ET.Element, output: HardwareOutput) -> None:
+    """Send a track to an output of the audio interface (Live's Ext. Out) instead of Main.
+
+    Live keeps the routing when the current audio device lacks the output, shows no
+    channel for it, and the track stays silent until a device that has it is selected.
+    """
+    routing = track.find("DeviceChain/AudioOutputRouting")
+    if routing is None:
+        return
+    if output.stereo:
+        target = f"AudioOut/External/S{(output.first_channel - 1) // 2}"
+        channel = f"{output.first_channel}/{output.first_channel + 1}"
+    else:
+        target = f"AudioOut/External/M{output.first_channel - 1}"
+        channel = str(output.first_channel)
+    for tag, value in (("Target", target), ("UpperDisplayString", "Ext. Out"), ("LowerDisplayString", channel)):
+        field = routing.find(tag)
+        if field is not None:
+            field.set("Value", value)
+
+
+def _grouped_tracks(
+    made: list[tuple[str, ET.Element]],
+    track_group: dict[str, str],
+    groups: dict[str, TrackGroup],
+    template_audio_track: ET.Element,
+    allocator: _IdAllocator,
+    *,
+    keep_outputs: bool = False,
+) -> list[ET.Element]:
+    """Add the group tracks and order everything the way Live stores it.
+
+    ``made`` holds the (name, track) pairs in their own order. A group track
+    comes first, then everything inside it, nested groups included; a group
+    sits where the first track inside it would have been.
+    """
+    def lineage(name: str | None) -> list[str]:
+        chain: list[str] = []
+        while name in groups and name not in chain:
+            chain.append(name)
+            name = groups[name].parent
+        return chain[::-1]  # outermost group first
+
+    paths = [lineage(track_group.get(name)) for name, _ in made]
+    ordered: list[ET.Element] = []
+    group_tracks: dict[str, ET.Element] = {}
+
+    def place_group(path: list[str]) -> None:
+        name = path[-1]
+        group_track = _make_group_track(template_audio_track, allocator, name, len(group_tracks) % 16)
+        _set_mixer_state(group_track, groups[name].mixer)
+        if len(path) > 1:
+            _join_group(group_track, group_tracks[path[-2]])
+        elif keep_outputs and groups[name].output is not None:
+            _route_to_output(group_track, groups[name].output)
+        group_tracks[name] = group_track
+        ordered.append(group_track)
+        for (_, track), member_path in zip(made, paths):
+            if member_path[:len(path)] != path:
+                continue
+            if len(member_path) == len(path):
+                _join_group(track, group_track)
+                ordered.append(track)
+            elif member_path[len(path)] not in group_tracks:
+                place_group(member_path[:len(path) + 1])
+
+    for (_, track), path in zip(made, paths):
+        if not path:
+            ordered.append(track)
+        elif path[0] not in group_tracks:
+            place_group(path[:1])
+    return ordered
+
+
 def _set_mixer_state(track: ET.Element, mixer_state: TrackMixerState | None) -> None:
-    """Set volume, pan, mute, and solo on an AudioTrack mixer."""
+    """Set volume, pan, mute, and solo on a track's mixer."""
     if mixer_state is None:
         return
 
@@ -857,6 +1020,7 @@ def generate_als(
     template_path: Path | None = None,
     *,
     keep_unwarped: list[str] | None = None,
+    keep_outputs: bool = False,
 ) -> Path:
     """Generate a gzipped XML Ableton Live Set (.als) file.
 
@@ -871,6 +1035,10 @@ def generate_als(
         keep_unwarped: fnmatch patterns, matched case-insensitively against
             the Logic track name, selecting tracks whose audio clips should
             be written unwarped (IsWarped=false, Loop bounds in seconds).
+        keep_outputs: Route each track and group that Logic plays to an
+            interface output other than the main one to the same output
+            (Live's Ext. Out). Off by default: on a device without that
+            output the track is silent.
 
     Returns:
         Path to the created .als file.
@@ -950,6 +1118,7 @@ def generate_als(
         export_refs.append(exported)
         clips_by_track.setdefault(ref.track_name, []).append(exported)
 
+    made: list[tuple[str, ET.Element]] = []
     for i, track_name in enumerate(project.track_names):
         color = i % 16
         track = _clone_track(template_audio_track, allocator, track_name, color)
@@ -973,7 +1142,7 @@ def generate_als(
         if project.mixer_state:
             _set_mixer_state(track, project.mixer_state.get(track_name))
 
-        tracks_elem.append(track)
+        made.append((track_name, track))
 
     for warning in unmatched_keep_unwarped_warnings(project.track_names, keep_unwarped):
         if warning not in project.compatibility_warnings:
@@ -999,7 +1168,18 @@ def generate_als(
                     project.time_sig_denominator,
                     color=color,
                 )
-                tracks_elem.append(track)
+                if project.mixer_state:
+                    _set_mixer_state(track, project.mixer_state.get(midi_track.name))
+                made.append((midi_track.name, track))
+
+    if keep_outputs:
+        for name, track in made:
+            if name in project.track_outputs and name not in project.track_group:
+                _route_to_output(track, project.track_outputs[name])
+    for track in _grouped_tracks(
+        made, project.track_group, project.track_groups, template_audio_track, allocator, keep_outputs=keep_outputs,
+    ):
+        tracks_elem.append(track)
 
     # Re-add return tracks (must come after audio tracks)
     for rt in return_tracks:

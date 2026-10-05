@@ -547,7 +547,7 @@ def test_cli_keep_unwarped_reaches_generate_als(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_generate_als(project, output_dir, copy_audio=True, template_path=None, *, keep_unwarped=None):
+    def fake_generate_als(project, output_dir, copy_audio=True, template_path=None, *, keep_unwarped=None, keep_outputs=False):
         captured["keep_unwarped"] = keep_unwarped
         als_path = output_dir / f"{project.name} Project" / f"{project.name}.als"
         als_path.parent.mkdir(parents=True, exist_ok=True)

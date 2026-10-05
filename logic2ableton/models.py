@@ -42,6 +42,32 @@ class TrackMixerState:
         return max(0.0003162277571, min(1.99526238, linear))
 
 
+@dataclass(frozen=True)
+class HardwareOutput:
+    """An output of the audio interface, as a Logic channel is routed to it."""
+    first_channel: int      # 1-based
+    stereo: bool = True
+
+    @property
+    def label(self) -> str:
+        if self.stereo:
+            return f"{self.first_channel}-{self.first_channel + 1}"
+        return str(self.first_channel)
+
+
+@dataclass
+class TrackGroup:
+    """A Logic bus with the aux channel that listens on it, rebuilt as a Live group track.
+
+    Tracks whose output is the bus are the group's members. ``parent`` is the
+    name of the group this one plays into, when the aux itself feeds a bus.
+    """
+    name: str
+    mixer: TrackMixerState = field(default_factory=TrackMixerState)
+    parent: str | None = None
+    output: HardwareOutput | None = None    # set when it is not the main output
+
+
 @dataclass
 class PluginInstance:
     name: str               # Preset name
@@ -109,6 +135,14 @@ class LogicProject:
     track_names: list[str]  # Ordered list of unique track names
     alternative: int        # Which alternative was parsed
     mixer_state: dict[str, TrackMixerState] | None = None
+    # True when mixer_state was read from the project's own mixer; the names in
+    # mixer_overrides were then replaced from a --mixer file.
+    mixer_from_project: bool = False
+    mixer_overrides: list[str] = field(default_factory=list)
+    track_groups: dict[str, TrackGroup] = field(default_factory=dict)   # by group name
+    track_group: dict[str, str] = field(default_factory=dict)           # track name -> group name
+    # Tracks Logic plays to an interface output other than the main one.
+    track_outputs: dict[str, HardwareOutput] = field(default_factory=dict)
     metadata_track_count: int = 0
     metadata_audio_files: list[str] = field(default_factory=list)
     software_instrument_files: int = 0
