@@ -1484,7 +1484,24 @@ def _run_protools_export(args: argparse.Namespace, mode: str) -> int:
     return 0
 
 
+def _printable_output() -> None:
+    """Never fail on a character the console cannot show.
+
+    A Windows console or pipe defaults to a code page that has no combining
+    marks, and macOS writes "ö" in file and track names as "o" plus one. Printing
+    such a name used to stop the conversion after the report was built.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _printable_output()
     resolved = _resolve_mode(list(argv if argv is not None else sys.argv[1:]))
     if resolved is None:
         return 0

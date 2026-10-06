@@ -21,13 +21,18 @@ and later) and a u32 payload size. The objects read here:
     - 0x12 marker (3 units): marker id at +16, class 0x88 at +23, distance
       to the next marker at +28.
     - 0x20 / 0x24 MIDI / audio region placement (5 units, more when the
-      region has fades): flags at +12 (bit 0 mute, bit 12 loop), track id
-      at +16, lane index at +20, class 0x89 at +23, loop span in ticks at
-      +28 (0x3FFFFFFF when the region does not loop), MSeq id at +32 for
+      region has fades): flags at +12 (bit 0 mute, bit 9 loop; bit 12
+      goes with bit 9 on most looped regions but not all, so it is not the
+      loop flag), track id at +16, lane index at +20, class 0x89 at +23,
+      loop span in ticks at +28 (0x3FFFFFFF when the region does not loop,
+      and 0 on some regions without the loop bit), MSeq id at +32 for
       MIDI regions, class 0x88 (MIDI) or 0xBC (audio) at +39, audio region
       index at +40 and audio file id at +44 for audio regions.
       Per-track automation containers are stored as MIDI placements of an
       MSeq named ``*Automation``.
+    - 0x30 time signature (3 units): denominator as a power of two at +11,
+      numerator at +12, class 0x88 at +23. The first one sits before bar 1
+      (on the earliest bar line at or after tick 0); later ones are changes.
     - 0x60 tempo (2 units): class 0x88 at +23, beats per minute x 10000 at
       +16, and at +24 the time the event falls on in 1/2000 s (one hour is
       added, the default SMPTE start). A tempo holds until the next event:
@@ -36,7 +41,17 @@ and later) and a u32 payload size. The objects read here:
 * ``MSeq`` (a MIDI region's content): u16-prefixed UTF-8 name at +52; from
   the even-aligned end of that name, the content start offset at +4 and the
   content length at +60, both in ticks. The EvSq with the notes follows the
-  next ``Trak`` object.
+  next ``Trak`` object (Logic 10.6 and later; older saves have no ``Trak``).
+  The arrangement itself is the MSeq whose EvSq (id 4) holds the region
+  placements; from the end of its name, the i32 at +224 is where the project
+  starts, in ticks from bar 1 (0 for bar 1, -3840 for bar 0 in 4/4, -2880 for
+  bar 0 in 6/8). A take folder is an arrangement placement pointing at an
+  MSeq whose own EvSq holds its contents, positioned from the folder's start
+  (34560 is the start of the folder). Placement flag bit 4 (0x10) marks a
+  take; the entries without it are what the folder plays: the comp's
+  segments ("Comp A") or the active take. The folder plays them only within
+  its own length (the folder MSeq's content length), once per pass when the
+  folder loops.
 * ``Envi`` (environment object): u16-prefixed name at +194. Region placements
   reference tracks by this object's id. Byte +117 is the object type, 0x11
   for a channel strip; such an object names its strip in the u16 after the
@@ -90,10 +105,11 @@ after the current state, one per history step, each followed by old copies of
 the objects that step changed; decoding stops at the second ``Song``.
 
 Ticks are 960 per quarter note and three tick frames coexist: note ticks are
-region-relative with the content origin at 38400; marker ticks count from
-38400 = bar 1; region placements count from 34560 = the project start, whose
-bar number version-1 saves keep in the song header (u32 at file offset 364,
-in marker ticks). Everything above was reverse-engineered from Logic 10.6.2
+region-relative with the content origin at 38400; marker and tempo ticks
+count from 38400 = bar 1; region placements count from 34560 = the project
+start, which the arrangement MSeq stores (above). The song header keeps the
+playhead at file offset 364 and the cycle at 460/468, all in marker ticks;
+none of them is the project start. Everything above was reverse-engineered from Logic 10.6.2
 and Logic 11 saves and checked against Logic's own MIDI exports, arrangement
 screenshots and audio file lengths; the mixer against the mute buttons, dB
 readouts, pan values, bus names and track stacks in the picture of its
@@ -106,7 +122,7 @@ from __future__ import annotations
 import math
 import re
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 PPQ = 960
 SEQUENCE_ORIGIN_TICKS = 38400   # bar 1 for markers; content origin for notes
@@ -137,8 +153,14 @@ _PLACEMENT_CLASS = 0x89
 _MIDI_REGION_CLASS = 0x88
 _AUDIO_REGION_CLASS = 0xBC
 _FLAG_MUTE = 0x1
-_FLAG_LOOP = 0x1000
-_PROJECT_START_OFFSET = 364
+_FLAG_LOOP = 0x200
+_SIGNATURE_STATUS = 0x30
+_SIGNATURE_CLASS = 0x88
+_SIGNATURE_SIZE = 48
+_ARRANGEMENT_SEQUENCE = 4         # the EvSq (and MSeq) id of the arrangement
+_FLAG_TAKE = 0x10                 # placement flags: a take inside a take folder
+_PROJECT_START_FIELD = 224          # i32 after the arrangement MSeq's name
+_PROJECT_START_LIMIT = 1000 * 3840  # a thousand 4/4 bars either way
 _STRIP_OBJECT_TYPE = 0x11       # Envi +117: the object is a channel strip
 _STRIP_MIN_SIZE = 124           # payload bytes a channel strip needs for the fields read here
 _STRIP_STEREO = 0x04            # AuCO +114
@@ -223,6 +245,13 @@ class LogicTempoEvent:
 
 
 @dataclass
+class LogicSignature:
+    tick: int           # marker frame: 38400 is bar 1
+    numerator: int
+    denominator: int
+
+
+@dataclass
 class LogicPlacement:
     """One region on the arrangement."""
     kind: str           # "midi" or "audio"
@@ -234,6 +263,9 @@ class LogicPlacement:
     sequence_id: int | None     # MSeq id (MIDI)
     audio_file_id: int | None   # AuFl id (audio)
     audio_region_index: int | None
+    container: int = _ARRANGEMENT_SEQUENCE  # id of the EvSq holding it: 4 for the arrangement
+    take_folder: int | None = None  # set when it is what a take folder plays, placed from that folder
+    window: tuple[int, int] | None = None  # placement ticks it may sound between (its folder's pass)
 
     @property
     def muted(self) -> bool:
@@ -241,7 +273,7 @@ class LogicPlacement:
 
     @property
     def looped(self) -> bool:
-        return bool(self.flags & _FLAG_LOOP) and self.loop_span is not None
+        return bool(self.flags & _FLAG_LOOP) and bool(self.loop_span)
 
 
 @dataclass
@@ -339,7 +371,8 @@ class LogicMixer:
 @dataclass
 class LogicArrangement:
     format_version: int = 0
-    project_start_bar: int | None = None
+    project_start_ticks: int | None = None  # from bar 1; None when it could not be read
+    project_start_bar: int | None = None    # the same as a bar number, when it falls on a bar line
     tempo_bpm: float | None = None
     track_names: dict[int, str] = field(default_factory=dict)
     sequences: dict[int, LogicSequence] = field(default_factory=dict)
@@ -350,11 +383,22 @@ class LogicArrangement:
     warnings: list[str] = field(default_factory=list)
     history_steps: int = 0  # undo-history snapshots found after the current state and ignored
     tempo_events: list[LogicTempoEvent] = field(default_factory=list)
+    signatures: list[LogicSignature] = field(default_factory=list)
     mixer: LogicMixer = field(default_factory=LogicMixer)
 
     @property
     def regions(self) -> list[LogicPlacement]:
-        """Placements that are user regions (automation containers excluded)."""
+        """The arrangement's user regions: automation containers and the contents of take folders excluded."""
+        container = self._arrangement_container()
+        return [placement for placement in self._user_placements() if placement.container == container]
+
+    @property
+    def folder_regions(self) -> list[LogicPlacement]:
+        """Entries of take folders as stored, from their folder's start: takes and what plays."""
+        container = self._arrangement_container()
+        return [placement for placement in self._user_placements() if placement.container != container]
+
+    def _user_placements(self) -> list[LogicPlacement]:
         out = []
         for placement in self.placements:
             if placement.kind == "midi":
@@ -364,13 +408,18 @@ class LogicArrangement:
             out.append(placement)
         return out
 
+    def _arrangement_container(self) -> int | None:
+        containers = {placement.container for placement in self.placements}
+        if _ARRANGEMENT_SEQUENCE in containers or not containers:
+            return _ARRANGEMENT_SEQUENCE
+        return None if len(containers) > 1 else next(iter(containers))
+
     def track_name(self, track_id: int) -> str:
         return self.track_names.get(track_id) or f"Track {track_id}"
 
-    def region_beats(self, tick: int, beats_per_bar: float) -> float:
+    def region_beats(self, tick: int) -> float:
         """Arrangement position in beats from bar 1 for a placement tick."""
-        start_bar = self.project_start_bar if self.project_start_bar is not None else 1
-        return (tick - PROJECT_START_TICKS) / PPQ + (start_bar - 1) * beats_per_bar
+        return (tick - PROJECT_START_TICKS + (self.project_start_ticks or 0)) / PPQ
 
     @staticmethod
     def marker_beats(tick: int) -> float:
@@ -654,6 +703,23 @@ def _tempo_events(data: bytes, objects: list[ObjectHeader]) -> list[LogicTempoEv
     return []
 
 
+def _signatures(data: bytes, objects: list[ObjectHeader]) -> list[LogicSignature]:
+    """Logic's time signature list: the first event sequence that holds signature events."""
+    for obj in objects:
+        if obj.tag != "EvSq":
+            continue
+        signatures = []
+        for status, tick, pos, size in iter_records(data, obj):
+            if status != _SIGNATURE_STATUS or size < _SIGNATURE_SIZE or data[pos + 23] != _SIGNATURE_CLASS:
+                continue
+            numerator, power = data[pos + 12], data[pos + 11]
+            if 1 <= numerator <= 64 and power <= 6:
+                signatures.append(LogicSignature(tick=tick, numerator=numerator, denominator=2 ** power))
+        if signatures:
+            return sorted(signatures, key=lambda signature: signature.tick)
+    return []
+
+
 def _placements(data: bytes, objects: list[ObjectHeader]) -> list[LogicPlacement]:
     placements = []
     for obj in objects:
@@ -677,6 +743,7 @@ def _placements(data: bytes, objects: list[ObjectHeader]) -> list[LogicPlacement
                 sequence_id=_u32(data, pos + 32) if is_midi else None,
                 audio_file_id=_u32(data, pos + 44) if not is_midi else None,
                 audio_region_index=_u32(data, pos + 40) if not is_midi else None,
+                container=obj.id1,
             ))
     return placements
 
@@ -707,18 +774,90 @@ def _audio_regions(data: bytes, objects: list[ObjectHeader]) -> dict[tuple[int, 
     return regions
 
 
-def _project_start_bar(data: bytes, version: int, beats_per_bar_ticks: int) -> int | None:
-    """Version-1 saves keep the project start (in marker ticks) in the song header."""
-    if version != 1 or len(data) < _PROJECT_START_OFFSET + 4:
-        return None
-    value = _u32(data, _PROJECT_START_OFFSET)
-    delta = value - SEQUENCE_ORIGIN_TICKS
-    if delta % beats_per_bar_ticks:
-        return None
-    bar = 1 + delta // beats_per_bar_ticks
-    if not -256 <= bar <= 256:
-        return None
-    return bar
+def _project_start_ticks(data: bytes, objects: list[ObjectHeader]) -> int | None:
+    """Where the project starts, in ticks from bar 1, as the arrangement MSeq stores it.
+
+    Region placements count from the project start, so every region lands that
+    far from where 34560 alone would put it. Returns None when the field is
+    missing or holds something no project start could be.
+    """
+    sequence = None
+    for obj in objects:
+        if obj.tag == "MSeq":
+            sequence = obj
+        elif obj.tag == "EvSq" and obj.id1 == _ARRANGEMENT_SEQUENCE and sequence is not None:
+            if not any(status in (_MIDI_REGION_STATUS, _AUDIO_REGION_STATUS) for status, *_ in iter_records(data, obj)):
+                continue
+            end = min(sequence.offset + 32 + sequence.size, len(data))
+            if sequence.offset + 54 > end:
+                return None
+            name_len = _u16(data, sequence.offset + 52)
+            field_at = sequence.offset + 54 + name_len + (name_len & 1) + _PROJECT_START_FIELD
+            if field_at + 4 > end:
+                return None
+            value = struct.unpack_from("<i", data, field_at)[0]
+            if not -SEQUENCE_ORIGIN_TICKS <= value <= _PROJECT_START_LIMIT:
+                return None
+            return value
+    return None
+
+
+def _place_take_folders(arrangement: LogicArrangement) -> None:
+    """Put what each take folder plays on the arrangement, where the folder sits.
+
+    The folder is an arrangement placement pointing at the sequence that holds
+    its contents; those count from the folder's start. Takes stay out.
+    """
+    contents: dict[int, list[LogicPlacement]] = {}
+    for placement in arrangement.folder_regions:
+        contents.setdefault(placement.container, []).append(placement)
+    if not contents:
+        return
+    placed_tracks: set[str] = set()
+    used: set[int] = set()
+    folders = 0
+    for folder in list(arrangement.regions):
+        if folder.kind != "midi" or folder.sequence_id not in contents:
+            continue
+        folders += 1
+        used.add(folder.sequence_id)
+        sequence = arrangement.sequences.get(folder.sequence_id)
+        length = sequence.content_length if sequence is not None else 0
+        span = folder.loop_span if folder.looped and length else length
+        passes = math.ceil(span / length) if length else 1
+        played = [entry for entry in contents[folder.sequence_id] if not entry.flags & _FLAG_TAKE]
+        for repetition in range(passes):
+            start = folder.tick + repetition * length
+            window = (start, folder.tick + min((repetition + 1) * length, span)) if length else None
+            for entry in played:
+                offset = entry.tick - PROJECT_START_TICKS
+                if length and offset >= length:
+                    continue  # past the folder's end: the folder never plays it
+                arrangement.placements.append(replace(
+                    entry,
+                    tick=start + offset,
+                    track_id=folder.track_id,
+                    flags=entry.flags | (folder.flags & _FLAG_MUTE),
+                    loop_span=None,
+                    container=_ARRANGEMENT_SEQUENCE,
+                    take_folder=folder.sequence_id,
+                    window=window,
+                ))
+                placed_tracks.add(arrangement.track_name(folder.track_id))
+    if folders:
+        tracks = sorted(placed_tracks)
+        listed = ", ".join(tracks[:5]) + (", ..." if len(tracks) > 5 else "")
+        arrangement.warnings.append(
+            f"{folders} take folder(s) play their comp or active take here, read from the Logic project "
+            f"on {len(tracks)} track(s): {listed}. Compare these with Logic, or flatten the take folders "
+            "in Logic before converting."
+        )
+    orphans = {container: entries for container, entries in contents.items() if container not in used}
+    if orphans:
+        left = sum(len(entries) for entries in orphans.values())
+        arrangement.warnings.append(
+            f"{left} region(s) inside {len(orphans)} folder(s) that nothing on the arrangement points to were left out."
+        )
 
 
 def decode_project_data(data: bytes, *, beats_per_bar: float = 4.0) -> LogicArrangement:
@@ -745,12 +884,31 @@ def decode_project_data(data: bytes, *, beats_per_bar: float = 4.0) -> LogicArra
     arrangement.markers = _markers(data, objects)
     arrangement.placements = _placements(data, objects)
     arrangement.tempo_events = _tempo_events(data, objects)
+    arrangement.signatures = _signatures(data, objects)
     arrangement.audio_files = _audio_files(data, objects)
     arrangement.audio_regions = _audio_regions(data, objects)
     arrangement.mixer = _mixer(data, objects)
-    arrangement.project_start_bar = _project_start_bar(
-        data, arrangement.format_version, int(round(beats_per_bar * PPQ)) or PPQ * 4,
-    )
+    arrangement.project_start_ticks = _project_start_ticks(data, objects)
+    bar_ticks = int(round(beats_per_bar * PPQ)) or PPQ * 4
+    if arrangement.project_start_ticks is not None and arrangement.project_start_ticks % bar_ticks == 0:
+        arrangement.project_start_bar = 1 + arrangement.project_start_ticks // bar_ticks
+    changes = arrangement.signatures[1:]
+    if changes:
+        listed = ", ".join(
+            f"{signature.numerator}/{signature.denominator} at beat {(signature.tick - SEQUENCE_ORIGIN_TICKS) / PPQ:g}"
+            for signature in changes[:5]
+        ) + (", ..." if len(changes) > 5 else "")
+        arrangement.warnings.append(
+            f"The Logic project changes time signature {len(changes)} time(s) ({listed}, counting beats from bar 1). "
+            "Regions, markers and tempo keep their places, but the Live set keeps the first time signature "
+            "throughout and this report counts bars in it, so bar numbers after a change differ from Logic's."
+        )
+    _place_take_folders(arrangement)
+    if arrangement.project_start_ticks is None and arrangement.regions:
+        arrangement.warnings.append(
+            "Could not read where the Logic project starts; regions are placed as if it starts at bar 1. "
+            "If everything sits a bar or more off its markers, this is why."
+        )
     if len(data) >= 178 and _u32(data, 170) == _u32(data, 174) and 0 < _u32(data, 170) < 10_000_000:
         arrangement.tempo_bpm = _u32(data, 170) / 10_000
     return arrangement

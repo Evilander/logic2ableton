@@ -159,6 +159,7 @@ class LogicProject:
     # True when Logic's tempo track was read (its changes, if any, are in timeline.tempo_events).
     tempo_track_decoded: bool = False
     project_start_bar: int | None = None
+    project_start_beats: float | None = None  # from bar 1, also when the start is not on a bar line
 
     @property
     def total_midi_notes(self) -> int:

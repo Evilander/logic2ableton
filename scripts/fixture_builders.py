@@ -509,8 +509,31 @@ def build_logic_arrangement_project_data(
     history: list[dict] | None = None,
     tempo_changes: list[tuple[float, float]] | None = None,
     mixer: dict | None = None,
+    playhead_bar: float | None = None,
+    start_field: bool = True,
+    meter_beats: float = 4.0,
+    signatures: list[tuple[float, int, int]] | None = None,
+    start_field_value: int | None = None,
+    template_sequence: bool = False,
+    take_folders: list[dict] | None = None,
 ) -> bytes:
     """ProjectData in the object layout logic_project_data decodes.
+
+    ``project_start_bar``: the bar the project starts at, stored where Logic
+    stores it (the arrangement sequence) unless ``start_field`` is False, which
+    leaves the field out as a too-short object would. ``meter_beats``: quarter
+    notes per bar, for the start and the region positions. ``playhead_bar``:
+    where the song header's playhead sits (Logic keeps it at file offset 364);
+    by default the project start, as after pressing Go to Beginning.
+    ``signatures``: (bar, numerator, denominator) time signature events, the
+    first one standing for the project's meter; bars count in ``meter_beats``.
+    ``start_field_value``: raw ticks for the start field instead of the bar.
+    ``template_sequence``: also write the empty "Untitled" arrangement Logic
+    keeps from its template, with an id-4 EvSq that holds no regions.
+    ``take_folders``: {"bar", "track", "id", "muted", "length_beats", "loop_beats",
+    "takes": [{"file", "index", "take": True for a take (flag bit 4), "beat": where it
+    starts in the folder}]}: a take folder on the arrangement and its contents in
+    their own sequence.
 
     ``mixer``: the channel strips, see ``_logic_mixer``. Without it the
     tracks are written as objects that are not channel strips and the
@@ -527,26 +550,27 @@ def build_logic_arrangement_project_data(
 
     ``sequences``: {"id", "name", "notes": [(rel_tick, pitch, velocity, duration)] or
     prebuilt record bytes, "start": content start ticks, "length": content ticks}.
-    ``midi_regions``: {"bar", "track", "sequence", "loop_bars", "muted", "lane"}.
+    ``midi_regions``: {"bar", "track", "sequence", "loop_bars", "muted", "lane",
+    "loop_flags": the flag bits a looped region carries, 0x1200 unless given (Logic
+    writes 0x200 alone on some looped regions)}.
     ``audio_regions``: {"file", "index", "name", "offset", "length"}.
-    ``audio_placements``: {"bar", "track", "file", "index", "muted", "lane", "loop_beats", "fades"}.
+    ``audio_placements``: {"bar", "track", "file", "index", "muted", "lane", "loop_beats",
+    "loop_flags", "fades"}.
     ``markers``: (bar, marker_id, name). Bars are 1-based arrangement bars.
     """
     start_bar = 1 if project_start_bar is None else project_start_bar
+    bar_ticks = int(round(meter_beats * 960))
+    start_ticks = int(round((start_bar - 1) * bar_ticks))
 
     def region_tick(bar: float) -> int:
-        return _LOGIC_PROJECT_START + int(round((bar - start_bar) * _LOGIC_TICKS_PER_BAR))
+        return _LOGIC_PROJECT_START + int(round((bar - start_bar) * bar_ticks))
 
     # The file opens with 24 bytes and then the Song object, whose payload
-    # holds the header fields at fixed file offsets (tempo 170/174, project
-    # start 364).
+    # holds the header fields at fixed file offsets (tempo 170/174, playhead 364).
     song_payload = bytearray(376)
     struct.pack_into("<II", song_payload, 170 - 56, int(round(tempo * 10_000)), int(round(tempo * 10_000)))
-    if project_start_bar is not None:
-        struct.pack_into(
-            "<I", song_payload, 364 - 56,
-            _LOGIC_SEQUENCE_ORIGIN + (project_start_bar - 1) * _LOGIC_TICKS_PER_BAR,
-        )
+    playhead = start_bar if playhead_bar is None else playhead_bar
+    struct.pack_into("<I", song_payload, 364 - 56, _LOGIC_SEQUENCE_ORIGIN + int(round((playhead - 1) * bar_ticks)))
     blob = b"\x00" * 24 + _logic_object(
         "Song", bytes(song_payload), kind=3, class_id=0xFFFFFFFF, id1=0xFFFFFFFF, version=version,
     )
@@ -597,7 +621,7 @@ def build_logic_arrangement_project_data(
 
     placements = b""
     for spec in sorted(midi_regions, key=lambda r: r["bar"]):
-        flags = 0x400 | (0x1000 if spec.get("loop_bars") else 0) | (0x1 if spec.get("muted") else 0)
+        flags = 0x400 | (spec.get("loop_flags", 0x1200) if spec.get("loop_bars") else 0) | (0x1 if spec.get("muted") else 0)
         placements += _logic_placement_record(
             audio=False,
             tick=region_tick(spec["bar"]),
@@ -613,19 +637,59 @@ def build_logic_arrangement_project_data(
             tick=region_tick(spec["bar"]),
             track=spec["track"],
             lane=spec.get("lane", 1),
-            flags=(0x1000 if spec.get("loop_beats") else 0) | (0x1 if spec.get("muted") else 0),
+            flags=(spec.get("loop_flags", 0x1200) if spec.get("loop_beats") else 0) | (0x1 if spec.get("muted") else 0),
             loop_span=int(spec["loop_beats"] * 960) if spec.get("loop_beats") else None,
             audio_index=spec.get("index", 0),
             audio_file=spec["file"],
             fades=bool(spec.get("fades")),
         )
-    blob += _logic_object("MSeq", b"\x00" * 20 + b"\x00\x00" + b"\x00" * 80, kind=2, id1=4, version=version)
+    for folder in take_folders or []:
+        takes = b""
+        for take in folder["takes"]:
+            takes += _logic_placement_record(
+                audio=True, tick=_LOGIC_PROJECT_START + int(round(take.get("beat", 0) * 960)), track=folder["track"],
+                lane=1, flags=0x10 if take.get("take") else 0, loop_span=None,
+                audio_index=take.get("index", 0), audio_file=take["file"],
+            )
+        folder_sequence = bytearray(b"\x00" * 20 + b"\x00\x00" + b"\x00" * 80)
+        struct.pack_into("<I", folder_sequence, 22 + 60, int(round(folder.get("length_beats", 0) * 960)))
+        blob += _logic_object("MSeq", bytes(folder_sequence), kind=2, id1=folder["id"], version=version)
+        blob += _logic_event_sequence(takes, id1=folder["id"], id2=folder["id"] + 1000, version=version)
+        placements += _logic_placement_record(
+            audio=False, tick=region_tick(folder["bar"]), track=folder["track"], lane=1,
+            flags=0x400 | (0x1 if folder.get("muted") else 0) | (0x1200 if folder.get("loop_beats") else 0),
+            loop_span=int(round(folder["loop_beats"] * 960)) if folder.get("loop_beats") else None,
+            sequence=folder["id"],
+        )
+    if template_sequence:
+        untitled = bytearray(250)
+        struct.pack_into("<i", untitled, 224, 26883)
+        blob += _logic_object("MSeq", b"\x00" * 20 + struct.pack("<H", 8) + b"Untitled" + bytes(untitled), kind=2, id1=4, version=version)
+        blob += _logic_event_sequence(b"", id1=4, id2=8004, version=version)
+    # The arrangement's own sequence: an empty name, then the project start at +224.
+    arrangement = bytearray(250 if start_field else 80)
+    if start_field:
+        struct.pack_into("<i", arrangement, 224, start_ticks if start_field_value is None else start_field_value)
+    blob += _logic_object("MSeq", b"\x00" * 20 + b"\x00\x00" + bytes(arrangement), kind=2, id1=4, version=version)
     blob += _logic_event_sequence(placements, id1=4, id2=9004, version=version)
+
+    signature_records = b""
+    for bar, numerator, denominator in signatures or []:
+        tick = _LOGIC_SEQUENCE_ORIGIN + int(round((bar - 1) * bar_ticks))
+        signature_records += (
+            struct.pack("<II", 0x30, tick)
+            + b"\x00\x00\x00" + bytes([denominator.bit_length() - 1, numerator]) + b"\x00\x00\x01"
+            + b"\x30\x00\x00\x00\x00\x00\x00\x88"
+            + b"\x00" * 15 + b"\x88"
+            + b"\x00" * 8
+        )
+    if signature_records:
+        blob += _logic_event_sequence(signature_records, id1=0, id2=9000, version=version)
 
     marker_records = b""
     for bar, marker_id, name in sorted(markers or []):
-        tick = _LOGIC_SEQUENCE_ORIGIN + int(round((bar - 1) * _LOGIC_TICKS_PER_BAR))
-        marker_records += _logic_marker_record(tick, marker_id, _LOGIC_TICKS_PER_BAR)
+        tick = _LOGIC_SEQUENCE_ORIGIN + int(round((bar - 1) * bar_ticks))
+        marker_records += _logic_marker_record(tick, marker_id, bar_ticks)
         blob += _logic_object("TxSq", b"\x00" * 100 + _logic_rtf(name), kind=1, class_id=0x20, id1=marker_id, version=version)
     if marker_records:
         blob += _logic_event_sequence(marker_records, id1=8, id2=9008, version=version)

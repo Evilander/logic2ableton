@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from logic2ableton.report import generate_report
 from logic2ableton.logic_parser import _get_audio_sample_rate, parse_logic_project
 from logic2ableton.logic_project_data import (
     PROJECT_START_TICKS,
@@ -75,6 +76,20 @@ def _two_track_blob(**overrides):
     return build_logic_arrangement_project_data(**spec)
 
 
+def test_a_region_loops_on_the_loop_bit_alone():
+    """Logic sets bit 12 of the flags on most looped regions but not on all of them; a click
+    region in a real show project carried only bit 9 with its loop span and looped for 132
+    bars in Logic. Bit 9 is the loop flag."""
+    blob = _two_track_blob(midi_regions=[
+        {"bar": 3, "track": 0x50, "sequence": 44, "loop_bars": 4, "lane": 2, "loop_flags": 0x200},
+        {"bar": 5, "track": 0x58, "sequence": 80, "lane": 3},
+    ])
+    arrangement = decode_project_data(blob)
+
+    midi = [p for p in arrangement.regions if p.kind == "midi"]
+    assert [(p.looped, p.loop_span, p.flags & 0x1000) for p in midi] == [(True, 4 * BAR, 0), (False, None, 0)]
+
+
 def test_decode_regions_loops_markers_and_tracks():
     arrangement = decode_project_data(_two_track_blob())
 
@@ -93,7 +108,7 @@ def test_decode_regions_loops_markers_and_tracks():
     assert (cue.content_start, cue.content_length) == (960, 2 * BAR)
 
     midi = [p for p in arrangement.regions if p.kind == "midi"]
-    assert [(arrangement.region_beats(p.tick, 4.0), p.track_id, p.sequence_id, p.looped, p.loop_span, p.muted)
+    assert [(arrangement.region_beats(p.tick), p.track_id, p.sequence_id, p.looped, p.loop_span, p.muted)
             for p in midi] == [
         (8.0, 0x50, 44, True, 4 * BAR, False),
         (16.0, 0x58, 80, False, None, False),
@@ -106,7 +121,7 @@ def test_decode_regions_loops_markers_and_tracks():
     ]
 
     audio = [p for p in arrangement.regions if p.kind == "audio"]
-    assert [(arrangement.region_beats(p.tick, 4.0), p.audio_file_id, p.audio_region_index, p.muted) for p in audio] == [
+    assert [(arrangement.region_beats(p.tick), p.audio_file_id, p.audio_region_index, p.muted) for p in audio] == [
         (8.0, 0, 0, False), (8.0, 4, 0, True), (24.0, 0, 1, False),
     ]
     assert arrangement.audio_files == {0: "Stem.wav", 4: "Tone.wav"}
@@ -114,12 +129,140 @@ def test_decode_regions_loops_markers_and_tracks():
     assert (stem_cut.name, stem_cut.content_offset, stem_cut.content_length) == ("Stem.1", 44100, 44100)
 
 
-def test_version_two_header_decodes_with_bar_one_start():
-    arrangement = decode_project_data(_two_track_blob(version=2, project_start_bar=None))
+def test_version_two_saves_keep_the_start_in_the_same_place():
+    arrangement = decode_project_data(_two_track_blob(version=2, project_start_bar=1))
     assert arrangement.format_version == 2
-    assert arrangement.project_start_bar is None
+    assert (arrangement.project_start_ticks, arrangement.project_start_bar) == (0, 1)
     click = next(p for p in arrangement.regions if p.kind == "midi")
-    assert arrangement.region_beats(click.tick, 4.0) == 8.0
+    assert arrangement.region_beats(click.tick) == 8.0
+
+
+@pytest.mark.parametrize("playhead_bar", [-3, 1, 7, 7.3])
+def test_the_playhead_does_not_move_the_regions(playhead_bar):
+    """The song header keeps the playhead where the project start was once assumed to be. A
+    project saved with the playhead parked on another bar line put every region that many bars
+    late; a show project saved at bar 7 tick 178 fell back to bar 1 and was one bar late."""
+    arrangement = decode_project_data(_two_track_blob(playhead_bar=playhead_bar))
+
+    assert arrangement.project_start_bar == -3
+    click = next(p for p in arrangement.regions if p.kind == "midi")
+    assert arrangement.region_beats(click.tick) == 8.0
+
+
+def test_a_project_that_starts_at_bar_zero():
+    arrangement = decode_project_data(_two_track_blob(project_start_bar=0, playhead_bar=7.3))
+
+    assert (arrangement.project_start_ticks, arrangement.project_start_bar) == (-BAR, 0)
+    assert [arrangement.region_beats(p.tick) for p in arrangement.regions if p.kind == "midi"] == [8.0, 16.0, 32.0]
+    assert [arrangement.marker_beats(m.tick) for m in arrangement.markers] == [8.0, 16.0, 32.0]
+
+
+def test_the_start_in_another_meter_is_a_bar_of_that_meter():
+    """In 6/8 bar 0 is three quarter notes before bar 1, not four."""
+    six_eight = 3.0
+    arrangement = decode_project_data(
+        _two_track_blob(project_start_bar=0, meter_beats=six_eight), beats_per_bar=six_eight,
+    )
+
+    assert (arrangement.project_start_ticks, arrangement.project_start_bar) == (-3 * 960, 0)
+    click = next(p for p in arrangement.regions if p.kind == "midi")
+    assert arrangement.region_beats(click.tick) == 2 * six_eight  # bar 3
+
+
+def test_time_signature_changes_are_read_and_reported():
+    """No project seen so far changes meter, but one that does would get Logic's bar numbers wrong
+    in the report and in Live's bar lines; say so rather than mislabel bars silently."""
+    arrangement = decode_project_data(_two_track_blob(signatures=[(-9, 4, 4), (9, 7, 8), (11, 4, 4)]))
+
+    assert [(s.tick, s.numerator, s.denominator) for s in arrangement.signatures] == [
+        (SEQUENCE_ORIGIN_TICKS - 10 * BAR, 4, 4), (SEQUENCE_ORIGIN_TICKS + 8 * BAR, 7, 8), (SEQUENCE_ORIGIN_TICKS + 10 * BAR, 4, 4),
+    ]
+    warning = next(w for w in arrangement.warnings if "changes time signature" in w)
+    assert "2 time(s) (7/8 at beat 32, 4/4 at beat 40" in warning
+
+
+def test_one_time_signature_gives_no_warning():
+    arrangement = decode_project_data(_two_track_blob(signatures=[(-9, 6, 8)]))
+    assert [(s.numerator, s.denominator) for s in arrangement.signatures] == [(6, 8)]
+    assert not any("time signature" in w for w in arrangement.warnings)
+
+
+def test_the_template_arrangement_logic_keeps_is_not_read_as_the_start():
+    """Projects keep an empty "Untitled" arrangement from Logic's template, also with id 4; its
+    start field holds something else. The start comes from the arrangement that has the regions."""
+    arrangement = decode_project_data(_two_track_blob(project_start_bar=0, template_sequence=True))
+    assert arrangement.project_start_ticks == -BAR
+
+
+@pytest.mark.parametrize("value, read", [(-3 * 960 - 7, -3 * 960 - 7), (-SEQUENCE_ORIGIN_TICKS, -SEQUENCE_ORIGIN_TICKS),
+                                         (-SEQUENCE_ORIGIN_TICKS - 1, None), (4_000_000, None)])
+def test_a_start_off_the_grid_is_kept_and_an_impossible_one_is_not(value, read):
+    """With snap off the start marker can sit on any tick; before tick 0 is before anything Logic stores."""
+    arrangement = decode_project_data(_two_track_blob(start_field_value=value))
+    assert arrangement.project_start_ticks == read
+    assert any("Could not read where" in w for w in arrangement.warnings) == (read is None)
+
+
+def test_a_take_folder_plays_its_comp_where_the_folder_sits():
+    """Take folder contents count from the folder's start; the takes carry flag bit 4 and the
+    comp's segments do not. Read as plain regions, every take landed at the project start."""
+    folder = {"bar": 9, "track": 0x60, "id": 300, "takes": [
+        {"file": 0, "take": True}, {"file": 4, "take": True}, {"file": 0, "index": 1}, {"file": 4, "beat": 6},
+    ]}
+    arrangement = decode_project_data(_two_track_blob(take_folders=[folder]))
+
+    assert len(arrangement.folder_regions) == 4
+    placed = [(arrangement.region_beats(p.tick), p.audio_file_id, p.audio_region_index, p.take_folder)
+              for p in arrangement.regions if p.kind == "audio" and p.take_folder]
+    # bar 9 is 32 beats after bar 1; the second segment starts six beats into the folder
+    assert placed == [(32.0, 0, 1, 300), (38.0, 4, 0, 300)]
+    warning = next(w for w in arrangement.warnings if "take folder" in w)
+    assert warning.startswith("1 take folder(s) play their comp or active take here")
+    assert "on 1 track(s): Stems." in warning
+
+
+def _folder_clips(project):
+    return [(clip.start_beats, clip.content_offset_samples, clip.content_duration_samples)
+            for clip in project.audio_files if clip.start_beats >= 32]
+
+
+def test_a_take_folder_plays_only_within_its_length(tmp_path):
+    """Comp segments can reach past the folder on either side; Logic plays only the folder's own
+    length, so they are trimmed to it and one that starts past the end is left out."""
+    beat = 17_640  # samples per beat at 150 BPM
+    folder = {"bar": 9, "track": 0x60, "id": 300, "length_beats": 8, "takes": [
+        {"file": 0, "take": True},
+        {"file": 0, "index": 1, "beat": -1},  # 2.5 beats from one beat before the folder
+        {"file": 0, "index": 0, "beat": 6},   # 5 beats from beat 6 of 8
+        {"file": 4, "beat": 9},               # past the folder's end
+    ]}
+    project = parse_logic_project(_synthetic_project(tmp_path, _two_track_blob(take_folders=[folder])))
+
+    assert _folder_clips(project) == [(32.0, 44_100 + beat, 44_100 - beat), (38.0, 0, 2 * beat)]
+
+
+def test_a_looped_take_folder_plays_once_per_pass(tmp_path):
+    folder = {"bar": 9, "track": 0x60, "id": 300, "length_beats": 4, "loop_beats": 10,
+              "takes": [{"file": 4, "take": True, "index": 0}, {"file": 4}]}
+    project = parse_logic_project(_synthetic_project(tmp_path, _two_track_blob(take_folders=[folder])))
+
+    # Tone is 1.25 beats; passes start every 4 beats and the last one is cut at beat 10 of the loop.
+    assert _folder_clips(project) == [(32.0, 0, 22_050), (36.0, 0, 22_050), (40.0, 0, 22_050)]
+
+
+def test_a_muted_take_folder_stays_muted():
+    folder = {"bar": 9, "track": 0x60, "id": 300, "muted": True, "takes": [{"file": 0, "take": True}, {"file": 4}]}
+    arrangement = decode_project_data(_two_track_blob(take_folders=[folder]))
+    assert [p.muted for p in arrangement.regions if p.take_folder] == [True]
+
+
+def test_a_start_that_cannot_be_read_falls_back_to_bar_one_and_says_so():
+    arrangement = decode_project_data(_two_track_blob(project_start_bar=1, start_field=False))
+
+    assert arrangement.project_start_ticks is None
+    assert any("Could not read where the Logic project starts" in warning for warning in arrangement.warnings)
+    click = next(p for p in arrangement.regions if p.kind == "midi")
+    assert arrangement.region_beats(click.tick) == 8.0
 
 
 def test_record_walk_steps_over_unknown_events_at_their_real_size():
@@ -221,6 +364,20 @@ def _synthetic_project(tmp_path: Path, blob: bytes) -> Path:
     write_test_wav(audio_dir / "Stem.wav", frames=176_400)
     write_test_wav(audio_dir / "Tone.wav", frames=44_100)
     return logicx
+
+
+def test_the_report_says_when_the_project_start_could_not_be_read(tmp_path):
+    project = parse_logic_project(_synthetic_project(tmp_path, _two_track_blob(project_start_bar=1, start_field=False)))
+    assert project.arrangement_decoded
+    assert any("Could not read where the Logic project starts" in warning for warning in project.compatibility_warnings)
+
+
+@pytest.mark.parametrize("start_bar, beats, label", [(-3, -16.0, "bar -3"), (6.75, 23.0, "bar 6 beat 4")])
+def test_the_report_says_where_the_project_starts(tmp_path, start_bar, beats, label):
+    project = parse_logic_project(_synthetic_project(tmp_path, _two_track_blob(project_start_bar=start_bar)))
+    assert project.project_start_beats == beats
+    report = generate_report(project, [])
+    assert f"Region positions: read from the Logic arrangement (project starts at {label};" in report
 
 
 def test_parse_logic_project_places_regions_from_the_arrangement(tmp_path):
@@ -362,12 +519,11 @@ def test_real_projects_match_recorded_expectations():
                 # converter makes for each must cover that many ticks: the check that
                 # the tempo map is read right and lengths are measured through it.
                 tempo_map = TempoMap(project.tempo, project.timeline.tempo_events if project.timeline else [])
-                bar_beats = 4.0 * project.time_sig_numerator / project.time_sig_denominator
                 matched = 0
                 for placement in arrangement.regions:
                     if placement.kind != "audio" or placement.loop_span is None:
                         continue
-                    start = arrangement.region_beats(placement.tick, bar_beats)
+                    start = arrangement.region_beats(placement.tick)
                     region = arrangement.audio_regions[(placement.audio_file_id, placement.audio_region_index)]
                     clip = next(
                         c for c in project.audio_files

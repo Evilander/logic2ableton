@@ -3,7 +3,9 @@ import gzip
 import subprocess
 import sys
 import json
+import os
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import pytest
 
@@ -830,3 +832,21 @@ def test_cli_smpte_start_qualifier_tells_explicit_from_default(tmp_path, capsys)
 
     assert main([str(logicx), "--output", str(output_dir), "--report-only", "--smpte-start", "01:00:00:00"]) == 0
     assert "SMPTE start: 01:00:00:00 (from --smpte-start)" in capsys.readouterr().out
+
+
+def test_cli_finishes_on_a_console_that_cannot_show_a_name(tmp_path):
+    """macOS stores "ö" as "o" plus a combining mark, which a Windows code page cannot print; the
+    report used to crash the run there, before the Live set was written."""
+    blob = build_logic_arrangement_project_data(
+        tracks={1: "Cue Eichhörnchen"},
+        sequences=[{"id": 44, "name": "Click", "length": 3840, "notes": [(0, 60, 100, 240)]}],
+        midi_regions=[{"bar": 1, "track": 1, "sequence": 44, "lane": 1}],
+    )
+    source = build_synthetic_logicx(tmp_path / "Eichhörnchentag", project_data=blob)
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    result = subprocess.run(
+        [sys.executable, "-m", "logic2ableton.cli", str(source), "--output", str(tmp_path / "out")],
+        capture_output=True, env=env, cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert result.returncode == 0, result.stderr.decode("cp1252", errors="replace")[-600:]
+    assert list((tmp_path / "out").rglob("*.als"))

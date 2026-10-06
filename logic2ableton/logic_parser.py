@@ -1444,7 +1444,7 @@ def _arrangement_midi_tracks(
                 muted.append(f"{track_name}: {sequence.name or 'region'}")
                 continue
             notes.sort(key=lambda note: (note.start_beats, note.pitch))
-            start_beats = arrangement.region_beats(placement.tick, bar_beats)
+            start_beats = arrangement.region_beats(placement.tick)
             if start_beats < 0:
                 warnings.append(
                     f"MIDI region '{sequence.name or track_name}' on '{track_name}' starts before bar 1 "
@@ -1472,6 +1472,27 @@ def _arrangement_midi_tracks(
         examples = ", ".join(muted[:5]) + (", ..." if len(muted) > 5 else "")
         warnings.append(f"Skipped {len(muted)} muted MIDI region(s) as Logic would not play them: {examples}")
     return tracks
+
+
+def _within_window(
+    passes: list[tuple[float, int, int | None]], start: float, end: float, clock: "_BeatClock",
+) -> list[tuple[float, int, int | None]]:
+    """Cut each (start beats, source offset, source length) pass to the beats from ``start`` to ``end``."""
+    kept = []
+    for pass_start, offset, length in passes:
+        if pass_start < start:
+            trimmed = round(clock.samples_between(pass_start, start))
+            offset += trimmed
+            if length is not None:
+                length -= trimmed
+            pass_start = start
+        if pass_start >= end - 0.5 / PPQ:
+            continue
+        room = round(clock.samples_between(pass_start, end))
+        length = room if length is None else min(length, room)
+        if length > 0:
+            kept.append((pass_start, offset, length))
+    return kept
 
 
 def _arrangement_audio_refs(
@@ -1527,7 +1548,7 @@ def _arrangement_audio_refs(
             continue
         clock = _BeatClock(tempo_map, _get_audio_sample_rate(source.file_path), lead_in)
         samples_per_beat = clock.samples_per_beat
-        start_beats = arrangement.region_beats(placement.tick, bar_beats)
+        start_beats = arrangement.region_beats(placement.tick)
         content_offset = region.content_offset if region else 0
         content_length = region.content_length if region else None
 
@@ -1572,6 +1593,11 @@ def _arrangement_audio_refs(
                     position += pass_beats
             if len(passes) > 1:
                 looped.append(f"{track_name}: {label} x{len(passes)}")
+        if placement.window is not None:
+            # A take folder plays its contents only within its own length.
+            passes = _within_window(
+                passes, arrangement.region_beats(placement.window[0]), arrangement.region_beats(placement.window[1]), clock,
+            )
 
         for pass_start, pass_offset, pass_length in passes:
             if pass_start < 0:
@@ -1749,6 +1775,7 @@ def parse_logic_project(
         # The project's own arrangement says where every region sits, how it
         # loops and which track owns it, so audio timestamps and the SMPTE
         # start are not needed for placement.
+        midi_warnings.extend(arrangement.warnings)
         tempo_warnings: list[str] = []
         project_tempo, tempo_changes, lead_in = _decoded_tempo(arrangement, meta["tempo"], bar_beats, tempo_warnings)
         if not supplied_tempo:
@@ -1851,6 +1878,10 @@ def parse_logic_project(
         arrangement_decoded=arrangement_decoded,
         tempo_track_decoded=arrangement_decoded and bool(arrangement.tempo_events),
         project_start_bar=arrangement.project_start_bar if arrangement_decoded else None,
+        project_start_beats=(
+            arrangement.project_start_ticks / PPQ
+            if arrangement_decoded and arrangement.project_start_ticks is not None else None
+        ),
         mixer_state=mixer_state or None,
         mixer_from_project=bool(mixer_state),
         track_groups=track_groups,

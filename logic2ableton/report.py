@@ -148,9 +148,13 @@ def generate_report(
         f"Sample Rate: {project.sample_rate}"
     )
     if project.arrangement_decoded:
-        start_bar = project.project_start_bar if project.project_start_bar is not None else 1
+        if project.project_start_beats is None:
+            start = "bar 1"
+        else:
+            bar, beat = _bar_beat(project.project_start_beats, project.time_sig_numerator, project.time_sig_denominator)
+            start = f"bar {bar}" if beat == 1 else f"bar {bar} beat {beat:g}"
         lines.append(
-            f"Region positions: read from the Logic arrangement (project starts at bar {start_bar}; "
+            f"Region positions: read from the Logic arrangement (project starts at {start}; "
             "audio timestamps and the SMPTE start are not used)"
         )
     else:
