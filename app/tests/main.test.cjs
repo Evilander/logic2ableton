@@ -40,7 +40,7 @@ function flagValues(args, flag) {
   return values
 }
 
-function harness(t) {
+function harness(t, options = {}) {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'logic2ableton-ipc-'))
   const handlers = new Map()
   const jobs = []
@@ -48,6 +48,8 @@ function harness(t) {
   const opened = []
   const appHandlers = new Map()
   const timers = new Map()
+  const treeKills = []
+  const windows = []
   let quitCalls = 0
   let destroyed = false
   let failStart = false
@@ -55,6 +57,22 @@ function harness(t) {
     app: {
       whenReady: () => ({ then() {} }), on: (name, callback) => appHandlers.set(name, callback),
       getPath: () => scratch, quit: () => { quitCalls += 1 },
+      requestSingleInstanceLock: () => options.ownsInstance !== false,
+      isReady: () => true,
+    },
+    BrowserWindow: class extends EventEmitter {
+      constructor() {
+        super()
+        this.destroyed = false
+        this.webContents = { setWindowOpenHandler() {}, on() {} }
+        windows.push(this)
+      }
+      loadFile() {}
+      isDestroyed() { return this.destroyed }
+      isMinimized() { assert.equal(this.destroyed, false); return false }
+      show() { assert.equal(this.destroyed, false) }
+      focus() { assert.equal(this.destroyed, false) }
+      close() { this.destroyed = true; this.emit('closed') }
     },
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     shell: {
@@ -69,6 +87,7 @@ function harness(t) {
       calls.push(request)
       if (failStart) { failStart = false; error('missing converter'); onExit(1); return null }
       const child = Object.assign(new EventEmitter(), {
+        pid: 12345,
         killed: false, exitCode: null, signalCode: null, signals: [],
         kill(signal = 'SIGTERM') { this.killed = true; this.signals.push(signal); return true },
       })
@@ -84,14 +103,16 @@ function harness(t) {
     },
   }
   vm.runInNewContext(compiled, {
-    exports: {}, __dirname: scratch, process,
+    exports: {}, __dirname: scratch, process: { ...process, platform: options.platform || 'linux' },
     setTimeout: (callback, delay) => {
       const timer = { unref() {} }
       timers.set(timer, { callback, delay })
       return timer
     },
     clearTimeout: (timer) => timers.delete(timer),
-    require: (name) => name === 'electron' ? electron : name === './converter' ? converter : require(name),
+    require: (name) => name === 'electron' ? electron : name === './converter' ? converter
+      : name === 'node:child_process' ? { execFile: (file, args, options, callback) => treeKills.push({ file, args, options, callback }) }
+      : require(name),
   })
   const event = { sender: { isDestroyed: () => destroyed, send: (channel, data) => events.push({ channel, data }) } }
   t.after(() => {
@@ -99,7 +120,7 @@ function harness(t) {
     fs.rmSync(scratch, { recursive: true, force: true })
   })
   return {
-    jobs, events, opened, scratch, calls,
+    jobs, events, opened, scratch, calls, treeKills, windows,
     preview: (overrides = {}) => handlers.get('start-preview')(
       event, { direction: 'protools2ableton', sourcePath: 'Session.ptx', outputDir: '', reportOnly: true, tempo: 120, ...overrides },
     ),
@@ -124,6 +145,8 @@ function harness(t) {
       return prevented
     },
     quitCalls: () => quitCalls,
+    closeAllWindows: () => appHandlers.get('window-all-closed')(),
+    secondInstance: () => appHandlers.get('second-instance')(),
   }
 }
 
@@ -269,8 +292,115 @@ test('quit and repeated quit requests wait for converter termination', async (t)
   assert.equal(h.requestQuit(), true)
   assert.equal(h.quitCalls(), 0)
   h.jobs[0].exit(1)
-  await Promise.resolve()
+  await new Promise(setImmediate)
   assert.equal(h.quitCalls(), 1)
+})
+
+test('Windows cancellation waits for process-tree termination after the bootloader exits', async (t) => {
+  const h = harness(t, { platform: 'win32' })
+  await h.preview()
+  let done = false
+  const stopping = h.cancel().then(() => { done = true })
+  assert.equal(path.basename(h.treeKills[0].file), 'taskkill.exe')
+  assert.deepEqual(Array.from(h.treeKills[0].args), ['/PID', '12345', '/T', '/F'])
+  assert.equal(h.treeKills[0].options.windowsHide, true)
+  h.jobs[0].exit(1)
+  await new Promise(setImmediate)
+  assert.equal(done, false)
+  await assert.rejects(h.preview(), /already in progress/)
+  h.treeKills[0].callback(null)
+  await stopping
+  await h.preview()
+})
+
+test('Windows cancellation accepts a converter that already finished on its own', async (t) => {
+  const h = harness(t, { platform: 'win32' })
+  await h.preview()
+  const stopping = h.cancel()
+  h.jobs[0].exit(0)
+  h.treeKills[0].callback(Object.assign(new Error('The process "12345" not found.'), { code: 128 }))
+  await stopping
+  await h.preview()
+})
+
+test('Windows tree termination failure keeps the job reserved but still lets the app quit', async (t) => {
+  const h = harness(t, { platform: 'win32' })
+  await h.preview()
+  const stopping = h.cancel()
+  h.jobs[0].exit(1)
+  h.treeKills[0].callback(Object.assign(new Error('access denied'), { code: 1 }))
+  await assert.rejects(stopping, /process tree/)
+  await assert.rejects(h.preview(), /already in progress/)
+  await assert.rejects(h.cancel(), /worker may still be running/)
+  assert.equal(h.treeKills.length, 1)
+  assert.equal(h.requestQuit(), true)
+  await new Promise(setImmediate)
+  assert.equal(h.quitCalls(), 1)
+  assert.equal(h.requestQuit(), false)
+})
+
+test('a second application instance quits before opening shared history', (t) => {
+  const h = harness(t, { ownsInstance: false })
+  assert.equal(h.quitCalls(), 1)
+})
+
+test('closing the last macOS window enters the guarded quit lifecycle', (t) => {
+  const h = harness(t, { platform: 'darwin' })
+  h.closeAllWindows()
+  assert.equal(h.quitCalls(), 1)
+})
+
+test('a second instance restores a window after the previous window was destroyed', (t) => {
+  const h = harness(t)
+  h.secondInstance()
+  h.windows[0].close()
+  h.secondInstance()
+  assert.equal(h.windows.length, 2)
+  assert.equal(h.windows[1].isDestroyed(), false)
+  h.secondInstance()
+  assert.equal(h.windows.length, 2)
+})
+
+test('a second instance does not open a window while the app is quitting', async (t) => {
+  const h = harness(t)
+  h.secondInstance()
+  await h.preview()
+  assert.equal(h.requestQuit(), true)
+  h.windows[0].close()
+  h.secondInstance()
+  assert.equal(h.windows.length, 1)
+})
+
+test('corrupt history is kept beside a new history that later conversions save to', async (t) => {
+  const h = harness(t)
+  const file = path.join(h.scratch, 'conversion-history.json')
+  fs.writeFileSync(file, '{broken')
+  const record = { id: 'a', direction: 'logic2ableton', projectName: 'Song', inputPath: 'Song.logicx',
+    outputPath: 'Song.als', date: new Date().toISOString(), status: 'success', report: '' }
+  await assert.rejects(h.getHistory(), /kept as conversion-history\.unreadable-\d+\.json and a new history was started/)
+  const kept = fs.readdirSync(h.scratch).filter(name => name.startsWith('conversion-history.unreadable-'))
+  assert.equal(kept.length, 1)
+  assert.equal(fs.readFileSync(path.join(h.scratch, kept[0]), 'utf8'), '{broken')
+  assert.deepEqual(Array.from(await h.addHistory(record), entry => entry.id), ['a'])
+  assert.deepEqual(Array.from(await h.getHistory(), entry => entry.id), ['a'])
+})
+
+test('a history that is not a list is kept aside when a save finds it first', async (t) => {
+  const h = harness(t)
+  fs.writeFileSync(path.join(h.scratch, 'conversion-history.json'), '{"records": []}')
+  const record = { id: 'b', direction: 'logic2ableton', projectName: 'Song', inputPath: 'Song.logicx',
+    outputPath: 'Song.als', date: new Date().toISOString(), status: 'success', report: '' }
+  assert.deepEqual(Array.from(await h.addHistory(record), entry => entry.id), ['b'])
+  assert.equal(fs.readdirSync(h.scratch).filter(name => name.startsWith('conversion-history.unreadable-')).length, 1)
+})
+
+test('an invalid history output does not hide valid records', async (t) => {
+  const h = harness(t)
+  const valid = { id: 'good', direction: 'logic2ableton', projectName: 'Song', inputPath: 'Song.logicx',
+    outputPath: 'Song.als', date: new Date().toISOString(), status: 'success', report: '' }
+  fs.writeFileSync(path.join(h.scratch, 'conversion-history.json'), JSON.stringify([valid, { ...valid, id: 'bad', outputPath: ' ' }]))
+  const history = await h.getHistory()
+  assert.deepEqual(Array.from(history, record => record.id), ['good'])
 })
 
 test('forwards smpte start, keep-unwarped, and timeline for logic2ableton', async (t) => {

@@ -14,6 +14,7 @@ import {
 import type { PreviewData, PreviewSettingsError } from "../hooks/useAppState"
 import DAWMark from "./DAWMark"
 import SignalPath from "./SignalPath"
+import { useHeadingFocus } from "../hooks/useHeadingFocus"
 
 interface ProjectPreviewProps {
   direction: ConversionDirection
@@ -66,6 +67,7 @@ export default function ProjectPreview({
   onConvert,
   loading,
 }: ProjectPreviewProps) {
+  const headingRef = useHeadingFocus()
   const [tempoDraft, setTempoDraft] = useState(String(tempo))
   const [smpteDraft, setSmpteDraft] = useState(smpteStart)
   const [keepUnwarpedDraft, setKeepUnwarpedDraft] = useState(keepUnwarped)
@@ -143,7 +145,7 @@ export default function ProjectPreview({
         <header className="flex items-end justify-between gap-6">
           <div className="min-w-0">
             <p className="mb-1 text-[11px] uppercase tracking-[0.16em] text-text-tertiary">Session preview</p>
-            <h1 className="truncate text-xl font-semibold tracking-[-0.02em]">{projectName}</h1>
+            <h1 ref={headingRef} tabIndex={-1} className="truncate text-xl font-semibold tracking-[-0.02em]">{projectName}</h1>
             <p className="mt-1 truncate font-mono text-[11px] text-text-secondary">{basename(sourcePath)}</p>
           </div>
           <span className="shrink-0 rounded-full border border-border bg-surface px-3 py-1.5 text-[11px] text-text-secondary">
@@ -162,10 +164,10 @@ export default function ProjectPreview({
 
           <div className={`mt-5 grid gap-4 ${showTempoField || showSmpteField ? "grid-cols-[1fr_220px]" : "grid-cols-1"}`}>
             <div>
-              <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
+              <div id="destination-label" className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
                 Destination
               </div>
-              <div className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-bg p-1.5" role="radiogroup">
+              <div className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-bg p-1.5" role="radiogroup" aria-labelledby="destination-label">
                 {destinationsForSource(source).map((format) => {
                   const optionDirection = directionForRoute(source, format)
                   const selected = destination === format
@@ -175,6 +177,17 @@ export default function ProjectPreview({
                       type="button"
                       role="radio"
                       aria-checked={selected}
+                      tabIndex={selected ? 0 : -1}
+                      onKeyDown={(event) => {
+                        if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(event.key)) return
+                        event.preventDefault()
+                        const options = destinationsForSource(source)
+                        const offset = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1
+                        const index = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
+                          : (options.indexOf(format) + offset + options.length) % options.length
+                        onDirectionChange(directionForRoute(source, options[index]))
+                        event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[index]?.focus()
+                      }}
                       onClick={() => onDirectionChange(optionDirection)}
                       className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors ${
                         selected

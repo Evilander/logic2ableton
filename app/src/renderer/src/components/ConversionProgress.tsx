@@ -3,6 +3,7 @@ import { motion } from "motion/react"
 import type { ConversionDirection } from "../conversion"
 import { artifactLabel, FORMAT_META, sourceForDirection } from "../conversion"
 import SignalPath from "./SignalPath"
+import { useHeadingFocus } from "../hooks/useHeadingFocus"
 
 interface ConversionProgressProps {
   direction: ConversionDirection
@@ -33,6 +34,7 @@ export default function ConversionProgress({
   onCancel,
   cancelling,
 }: ConversionProgressProps) {
+  const headingRef = useHeadingFocus()
   const activeIndex = activeStageIndex(stage, progress)
   const source = sourceForDirection(direction)
   const outputLabel = artifactLabel(direction)
@@ -47,7 +49,7 @@ export default function ConversionProgress({
       >
         <header className="text-center">
           <p className="text-[11px] uppercase tracking-[0.16em] text-text-tertiary">Signal in transit</p>
-          <h1 className="mt-2 text-xl font-semibold tracking-[-0.02em]">Building your {outputLabel}</h1>
+          <h1 ref={headingRef} tabIndex={-1} className="mt-2 text-xl font-semibold tracking-[-0.02em]">Building your {outputLabel}</h1>
           <p className="mt-1 text-[13px] text-text-secondary">
             Reading the {FORMAT_META[source].shortName} session and patching its arrangement across.
           </p>
@@ -83,7 +85,10 @@ export default function ConversionProgress({
             })}
           </div>
 
-          <div className="mt-7 flex items-center justify-between gap-4 border-t border-border pt-4">
+          <div role="progressbar" aria-label="Conversion progress" aria-valuemin={0} aria-valuemax={100}
+            aria-valuenow={Math.round(Math.min(1, Math.max(0, progress)) * 100)}
+            aria-valuetext={message || "Preparing converter"}
+            className="mt-7 flex items-center justify-between gap-4 border-t border-border pt-4">
             <span className="truncate text-[13px] text-text-secondary">{message || "Preparing converter…"}</span>
             <span className="shrink-0 font-mono text-[13px] text-gold">{Math.round(progress * 100)}%</span>
           </div>

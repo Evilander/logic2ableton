@@ -73,6 +73,7 @@ export default function App() {
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [cancelled, setCancelled] = useState(false)
+  const [historyError, setHistoryError] = useState<string | null>(null)
   const previewCleanupRef = useRef<(() => void) | null>(null)
   const conversionCleanupRef = useRef<(() => void) | null>(null)
   const previewRequestRef = useRef(0)
@@ -98,8 +99,10 @@ export default function App() {
   const persistHistory = async (record: ConversionRecord) => {
     try {
       state.setHistory(await window.api.addHistory(record))
-    } catch {
+      setHistoryError(null)
+    } catch (error) {
       state.setHistory((current) => [record, ...current].slice(0, 100))
+      setHistoryError(error instanceof Error ? error.message : "Conversion history could not be saved.")
     }
   }
 
@@ -111,7 +114,12 @@ export default function App() {
   }
 
   useEffect(() => {
-    void window.api.getHistory().then(state.setHistory)
+    void window.api.getHistory().then((history) => {
+      state.setHistory(history)
+      setHistoryError(null)
+    }).catch((error) => {
+      setHistoryError(error instanceof Error ? error.message : "Conversion history could not be read.")
+    })
   }, [])
 
   useEffect(() => {
@@ -605,16 +613,23 @@ export default function App() {
 
       <main className="flex flex-1 flex-col overflow-hidden">
         <div className="h-8 shrink-0" style={{ WebkitAppRegion: "drag" } as CSSProperties} />
+        {historyError && <p role="alert" className="shrink-0 px-8 pb-2 text-[12px] text-error">{historyError}</p>}
+        <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+          {state.view === "converting" ? `Conversion in progress: ${state.progressStage || "preparing"}.`
+            : state.view === "complete" ? "Conversion complete. Your output is ready."
+            : state.view === "error" ? cancelled ? "Conversion cancelled." : "Conversion failed."
+            : ""}
+        </div>
 
         <AnimatePresence mode="wait">
           {state.view === "empty" && (
-            <motion.div key="empty" {...viewMotion} className="flex flex-1">
+            <motion.div key="empty" {...viewMotion} className="flex min-h-0 flex-1">
               <DropZone onProjectSelected={handleProjectSelected} />
             </motion.div>
           )}
 
           {state.view === "preview" && (
-            <motion.div key="preview" {...viewMotion} className="flex flex-1">
+            <motion.div key="preview" {...viewMotion} className="flex min-h-0 flex-1">
               <ProjectPreview
                 direction={state.direction}
                 sourcePath={state.sourcePath!}
@@ -641,7 +656,7 @@ export default function App() {
           )}
 
           {state.view === "converting" && (
-            <motion.div key="converting" {...viewMotion} className="flex flex-1">
+            <motion.div key="converting" {...viewMotion} className="flex min-h-0 flex-1">
               <ConversionProgress
                 direction={state.direction}
                 stage={state.progressStage}
@@ -655,7 +670,7 @@ export default function App() {
           )}
 
           {(state.view === "complete" || state.view === "error") && (
-            <motion.div key={state.view} {...viewMotion} className="flex flex-1">
+            <motion.div key={`${state.view}:${selectedHistoryId ?? state.result?.artifactPath ?? ""}`} {...viewMotion} className="flex min-h-0 flex-1">
               <ConversionComplete
                 direction={state.direction}
                 result={state.result}

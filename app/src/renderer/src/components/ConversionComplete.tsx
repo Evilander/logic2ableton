@@ -12,6 +12,7 @@ import type { ConversionDirection } from "../conversion"
 import { artifactLabel, routeLabel } from "../conversion"
 import type { ConversionResult } from "../hooks/useAppState"
 import SignalPath from "./SignalPath"
+import { useHeadingFocus } from "../hooks/useHeadingFocus"
 
 interface ConversionCompleteProps {
   direction: ConversionDirection
@@ -32,6 +33,7 @@ export default function ConversionComplete({
   cancelled = false,
   onConvertAnother,
 }: ConversionCompleteProps) {
+  const headingRef = useHeadingFocus()
   const [showReport, setShowReport] = useState(false)
   const [showErrorReport, setShowErrorReport] = useState(false)
   const [openError, setOpenError] = useState<string | null>(null)
@@ -51,7 +53,7 @@ export default function ConversionComplete({
             <div className="mt-6 flex items-center gap-3">
               <XCircle size={24} weight="fill" className={cancelled ? "text-text-secondary" : "text-error"} />
               <div>
-                <h1 className="text-[15px] font-semibold">{cancelled ? "Conversion cancelled" : "Conversion failed"}</h1>
+                <h1 ref={headingRef} tabIndex={-1} className="text-[15px] font-semibold">{cancelled ? "Conversion cancelled" : "Conversion failed"}</h1>
                 <p className="text-[11px] text-text-tertiary">{routeLabel(routeDirection)}</p>
               </div>
             </div>
@@ -131,7 +133,7 @@ export default function ConversionComplete({
           <div className="mt-6 flex items-center gap-3 border-t border-border pt-5">
             <CheckCircle size={25} weight="fill" className="text-gold" />
             <div>
-              <h1 className="text-[15px] font-semibold">{outputLabel} ready</h1>
+              <h1 ref={headingRef} tabIndex={-1} className="text-[15px] font-semibold">{outputLabel} ready</h1>
               <p className="text-[11px] text-text-tertiary">{routeLabel(result.direction)}</p>
             </div>
           </div>

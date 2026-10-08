@@ -1,8 +1,8 @@
-import type { ChildProcess } from "node:child_process"
+import { execFile, type ChildProcess } from "node:child_process"
 import type { IpcMainInvokeEvent } from "electron"
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron"
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
-import { dirname, extname, join, normalize } from "node:path"
+import { basename, dirname, extname, join, normalize } from "node:path"
 import type { ConversionDirection, ConversionRequest, ProgressEvent } from "./converter"
 import { CONVERSION_DIRECTIONS, runConversion } from "./converter"
 
@@ -42,6 +42,8 @@ interface ActiveJob {
   cancelled: boolean
   done: Promise<void>
   finish: () => void
+  stopping?: Promise<void>
+  treeStopUnverified?: boolean
 }
 
 let activeJob: ActiveJob | null = null
@@ -62,6 +64,11 @@ function createWindow(): void {
       nodeIntegration: false,
       sandbox: true,
     },
+  })
+
+  const window = mainWindow
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = null
   })
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
@@ -200,22 +207,68 @@ function assertApprovedPath(filePath: string, opening = false): string {
   return normalized
 }
 
+function terminateProcessTree(child: ChildProcess): Promise<void> {
+  if (process.platform !== "win32") {
+    child.kill()
+    return Promise.resolve()
+  }
+  if (!child.pid) return Promise.reject(new Error("The converter has no process identifier"))
+  // The packaged converter is a PyInstaller bootloader that runs the conversion
+  // in a child process. Killing only the bootloader leaves that worker running,
+  // so taskkill /T stops the tree while the bootloader can still name it.
+  // taskkill ships with Windows and, unlike PowerShell, cannot be constrained.
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows"
+  const taskkill = join(systemRoot, "System32", "taskkill.exe")
+  return new Promise((resolve, reject) => {
+    execFile(taskkill, ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 8000 }, (error) => {
+      // 128: no such process. The bootloader exits only after its worker, so a
+      // converter that finished on its own has nothing left to stop.
+      if (!error || error.code === 128) resolve()
+      else reject(new Error(`Could not stop the converter process tree: ${error.message}`))
+    })
+  })
+}
+
 async function stopActiveJob(): Promise<void> {
   const current = activeJob
   if (!current) return
+  if (current.stopping) return current.stopping
+  current.stopping = stopJob(current)
+  try {
+    await current.stopping
+  } catch (error) {
+    if (current.child?.exitCode === null && current.child.signalCode === null) current.cancelled = false
+    throw error
+  } finally {
+    current.stopping = undefined
+  }
+}
+
+async function stopJob(current: ActiveJob): Promise<void> {
   current.cancelled = true
   const child = current.child
-  if (!child || child.exitCode !== null || child.signalCode !== null) current.finish()
-  else child.once("exit", current.finish)
-  if (current.child && !current.child.killed) current.child.kill()
+  let termination = Promise.resolve()
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    if (current.treeStopUnverified) {
+      throw new Error("The converter parent exited before its process tree could be stopped. Its worker may still be running; another conversion cannot start safely.")
+    }
+    current.finish()
+  }
+  else {
+    child.once("exit", current.finish)
+    current.treeStopUnverified = process.platform === "win32"
+    termination = terminateProcessTree(child).then(() => { current.treeStopUnverified = false })
+  }
   const forceKill = setTimeout(() => {
-    try { current.child?.kill("SIGKILL") } catch { /* The deadline reports a failed cancellation. */ }
+    if (process.platform !== "win32") {
+      try { current.child?.kill("SIGKILL") } catch { /* The deadline reports a failed cancellation. */ }
+    }
   }, 5000)
   forceKill.unref()
   let deadline: ReturnType<typeof setTimeout> | undefined
   try {
     await Promise.race([
-      current.done,
+      Promise.all([current.done, termination]),
       new Promise<never>((_, reject) => {
         deadline = setTimeout(() => reject(new Error("The converter did not stop. Try canceling again.")), 10000)
         deadline.unref()
@@ -250,7 +303,7 @@ function startJob(
     if (!job.cancelled && !event.sender.isDestroyed()) event.sender.send(channel, data)
   }
   const complete = () => {
-    if (activeJob === job) activeJob = null
+    if (activeJob === job && !job.cancelled) activeJob = null
     job.finish()
   }
   try {
@@ -301,6 +354,7 @@ function isStoredConversionRecord(value: unknown): value is StoredConversionReco
     && typeof record.outputPath === "string"
     && typeof record.date === "string"
     && (record.status === "success" || record.status === "failed")
+    && (record.status !== "success" || record.outputPath.trim().length > 0)
     && typeof record.report === "string"
     && (record.compatibilityWarnings === undefined
       || (Array.isArray(record.compatibilityWarnings)
@@ -319,21 +373,35 @@ function normalizeRecord(record: StoredConversionRecord): ConversionRecord {
   }
 }
 
+class HistoryRestarted extends Error {}
+
 function readHistory(): ConversionRecord[] {
   const historyPath = getHistoryPath()
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(readFileSync(historyPath, "utf-8"))
-    if (!Array.isArray(parsed)) return []
-    const history = parsed.filter(isStoredConversionRecord).map(normalizeRecord).slice(0, HISTORY_LIMIT)
-    for (const record of history) {
-      if (record.status === "success") {
-        approvePath(record.outputPath)
-      }
+    parsed = JSON.parse(readFileSync(historyPath, "utf-8"))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    if (!(error instanceof SyntaxError)) {
+      throw new Error("Conversion history could not be read. The existing file has been preserved.")
     }
-    return history
-  } catch {
-    return []
   }
+  if (!Array.isArray(parsed)) {
+    // Keep the damaged file for the user and start a new history beside it,
+    // so one bad file does not stop every later conversion from being saved.
+    const kept = historyPath.replace(/\.json$/, `.unreadable-${Date.now()}.json`)
+    try {
+      renameSync(historyPath, kept)
+    } catch {
+      throw new Error("Conversion history could not be read. The existing file has been preserved.")
+    }
+    throw new HistoryRestarted(`Conversion history could not be read. It was kept as ${basename(kept)} and a new history was started.`)
+  }
+  const history = parsed.filter(isStoredConversionRecord).map(normalizeRecord).slice(0, HISTORY_LIMIT)
+  for (const record of history) {
+    if (record.status === "success") approvePath(record.outputPath)
+  }
+  return history
 }
 
 function writeHistory(history: ConversionRecord[]): void {
@@ -351,7 +419,22 @@ function writeHistory(history: ConversionRecord[]): void {
   }
 }
 
+const ownsInstance = app.requestSingleInstanceLock()
+if (!ownsInstance) app.quit()
+
+app.on("second-instance", () => {
+  if (quitRequested) return
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (app.isReady()) createWindow()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+})
+
 app.whenReady().then(() => {
+  if (!ownsInstance) return
   createWindow()
 
   app.on("activate", () => {
@@ -360,23 +443,25 @@ app.whenReady().then(() => {
 })
 
 let quitRequested = false
+let converterStopped = false
 app.on("before-quit", (event) => {
   const current = activeJob
-  if (!current) return
+  if (!current || converterStopped) return
   event.preventDefault()
   if (quitRequested) return
   quitRequested = true
-  // Wait for actual process termination, including when a cancellation times
-  // out, so a second quit request cannot orphan a running conversion.
-  void current.done.then(() => {
-    if (activeJob === current) activeJob = null
+  // Stop the converter before quitting. If it cannot be stopped, quit anyway:
+  // keeping the window open would not stop a stray worker either.
+  void stopActiveJob().catch(() => {}).finally(() => {
+    converterStopped = true
     app.quit()
   })
-  void stopActiveJob().catch(() => {})
 })
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit()
+  // The renderer owns completion/history state, so a converter cannot safely
+  // outlive its last window. before-quit waits for cancellation on every OS.
+  app.quit()
 })
 
 ipcMain.handle("select-source", async (_, kind: "file" | "folder") => {
@@ -496,7 +581,13 @@ ipcMain.handle("add-history", async (_, record: unknown) => {
   if (record.status === "success") {
     approvePath(record.outputPath)
   }
-  const history = [record, ...readHistory()].slice(0, HISTORY_LIMIT)
+  let previous: ConversionRecord[] = []
+  try {
+    previous = readHistory()
+  } catch (error) {
+    if (!(error instanceof HistoryRestarted)) throw error
+  }
+  const history = [record, ...previous].slice(0, HISTORY_LIMIT)
   writeHistory(history)
   return history
 })
