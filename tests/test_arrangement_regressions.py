@@ -14,6 +14,7 @@ from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.logic_project_data import decode_project_data
 from logic2ableton.protools_parser import PT_TICKS_PER_QUARTER, _deobfuscate, parse_protools_session
 from logic2ableton.protools_transfer import generate_protools_transfer_from_logic
+from logic2ableton.smf import MIDI_TICKS_PER_QUARTER, build_midi_note_file
 from logic2ableton.timeline import TempoEvent, Timeline
 from scripts.fixture_builders import (
     _PT_ZERO_TICKS,
@@ -27,6 +28,61 @@ from scripts.fixture_builders import (
 )
 
 RATE = 44_100
+
+
+def _read_smf_notes(data):
+    """Read note boundaries independently of the MIDI writer, including note-offs."""
+    assert data[:4] == b"MThd" and data[14:18] == b"MTrk"
+    position = 22
+    tick = 0
+    held = {}
+    notes = []
+
+    def variable_length():
+        nonlocal position
+        value = 0
+        for _ in range(4):
+            byte = data[position]
+            position += 1
+            value = (value << 7) | (byte & 127)
+            if byte < 128:
+                return value
+        raise AssertionError("Invalid MIDI variable-length quantity")
+
+    while position < len(data):
+        tick += variable_length()
+        status = data[position]
+        position += 1
+        if status == 255:
+            position += 1
+            length = variable_length()
+            position += length
+            continue
+        pitch, velocity = data[position:position + 2]
+        position += 2
+        if status & 240 == 144 and velocity:
+            held[pitch] = tick
+        else:
+            assert status & 240 in (128, 144)
+            start = held.pop(pitch)
+            notes.append((pitch, start / MIDI_TICKS_PER_QUARTER, (tick - start) / MIDI_TICKS_PER_QUARTER))
+    assert held == {}
+    return sorted(notes, key=lambda note: (note[1], note[0]))
+
+
+def test_looped_logic_midi_tail_matches_native_ableton_and_smf(tmp_path):
+    data = build_logic_arrangement_project_data(
+        tracks={1: "Keys"},
+        sequences=[{"id": 44, "name": "Loop", "length": 3840, "notes": [(2880, 60, 100, 2880)]}],
+        midi_regions=[{"bar": 1, "track": 1, "sequence": 44, "loop_bars": 3}],
+    )
+    project = parse_logic_project(build_synthetic_logicx(tmp_path / "source", project_data=data))
+    als = generate_als(project, tmp_path / "out", template_path=_BUNDLED_TEMPLATE)
+    native_notes = parse_ableton_project(als).midi_tracks[0].notes
+    smf = build_midi_note_file(project.midi_tracks[0], tempo=120, numerator=4, denominator=4)
+    native = [(note.pitch, note.start_beats, note.duration_beats) for note in native_notes]
+    assert native == _read_smf_notes(smf) == [(60, 3.0, 1.0), (60, 7.0, 1.0), (60, 11.0, 1.0)]
+    assert any("original note-tail playback has not been verified" in warning for warning in project.compatibility_warnings)
 
 
 def _three_level_wav(path: Path) -> Path:

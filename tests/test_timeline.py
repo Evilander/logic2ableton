@@ -95,6 +95,20 @@ def test_load_timeline_accepts_beat_at_bar_length(tmp_path):
     assert timeline_result.tempo_events[0].beat == 3.0
 
 
+@pytest.mark.parametrize("numerator,denominator,beat,expected", [(4, 4, 4.5, 3.5), (1, 8, 1, 0), (1, 8, 1.25, 0.25)])
+def test_fractional_position_inside_last_beat_of_bar(tmp_path, numerator, denominator, beat, expected):
+    path = _write(tmp_path, {"markers": [{"bar": 1, "beat": beat, "name": "Position"}]})
+    result = load_timeline(path, numerator=numerator, denominator=denominator, base_tempo=120)
+    assert result.markers[0].beat == expected
+
+
+@pytest.mark.parametrize("numerator,denominator,beat", [(4, 4, 5), (1, 8, 1.5)])
+def test_bar_beat_form_rejects_position_at_next_bar(tmp_path, numerator, denominator, beat):
+    path = _write(tmp_path, {"markers": [{"bar": 1, "beat": beat, "name": "Position"}]})
+    with pytest.raises(ValueError, match="outside the bar"):
+        load_timeline(path, numerator=numerator, denominator=denominator, base_tempo=120)
+
+
 def test_load_timeline_bpm_type_error_message_distinct_from_sign_error(tmp_path):
     path = _write(tmp_path, {"tempo": [{"bar": 1, "bpm": "90"}]})
     with pytest.raises(ValueError, match="non-numeric 'bpm'"):

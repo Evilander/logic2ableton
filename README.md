@@ -95,6 +95,8 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 
 ## Current Limits
 
+A session file over 1 GiB (a Live set counts at its decompressed size), or one whose loops would unroll into more than 2 million notes or clip repetitions, stops with a message instead of converting. Media that a session reaches through a symlink or junction inside its folder is not read; copy that media into the project folder first.
+
 ### Logic to Ableton
 
 - MIDI notes transfer as native MIDI tracks (and `.mid` exports), but the software instruments, their settings, and MIDI effects are not recreated — reload instruments in Ableton
@@ -128,6 +130,7 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Non-PCM sources that cannot be rendered to timestamped WAV in-process are copied as references and flagged in the report/manifest
 - Media references outside the Ableton project folder are blocked. Use Live's **Collect All and Save** before transferring a set that relies on external files
 - PCM and float audio are rendered in chunks. Individual rendered WAVs are limited to the RIFF format's 4 GiB size limit
+- Float audio stays float, written as 32-bit float WAV (64-bit sources too), so levels above full scale survive. A track stem whose clips overlap, or that mixes float and integer files, is also 32-bit float; 32-bit integer sources on such a stem keep 24 bits. Some older Logic versions do not import float WAV files
 - The transfer package covers audio and MIDI; use the stems and MIDI files first, then clip exports and the manifest if you need finer reconstruction
 
 ### Pro Tools lanes
@@ -136,6 +139,7 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 - Plugins, inserts, sends, automation, clip gain, and fades are not transferred; crossfade renders are skipped
 - Elastic Audio state is not reconstructed; clips reference their source audio directly
 - The source session's `Audio Files/` folder must sit next to the `.ptx` for media to be copied
+- Split-mono sources remain on separate left/right tracks. Live tracks are hard-panned; rendered transfer WAVs put each mono source in its original stereo channel. Interleaved stereo sources remain on one track
 - MIDI regions anchor to their first note (a leading-silence offset inside a region is not preserved)
 
 If a project lands imperfectly, the first thing to inspect is the generated report. It is the primary support artifact for this project.
@@ -439,7 +443,7 @@ output/
 ## What "Production Ready" Means Here
 
 - Repeated validation across parser tests, package builds, standalone converter builds, and desktop packaging
-- Windows desktop smoke coverage in CI before tagged release packaging
+- Standalone converter smoke coverage for all six routes in CI before tagged release packaging
 - Reports emitted on both success and failure paths so support starts with evidence instead of guesswork
 - Desktop app safety rails around approved files, active jobs, and artifact opening
 - Ableton to Logic now ships multiple reconstruction layers instead of a single manifest-only package

@@ -9,13 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Iterable
 
-from logic2ableton.audio import BLOCK_FRAMES, write_pcm_wav
+from logic2ableton.audio import BLOCK_FRAMES, export_format, samples_as_float, write_pcm_wav
 
 from logic2ableton.logic_transfer import (
     DecodedAudio,
     _beats_to_frames,
     _clip_export_name,
     _clip_export_stem,
+    _clip_render_channels,
     _midi_track_name,
     _read_decoded_audio,
     _iter_clip_pcm,
@@ -49,10 +50,12 @@ class ProToolsTransferResult:
 def _write_pt_wav_with_bext(
     destination: Path, *, sample_rate: int, channels: int, sample_width: int,
     frames: bytes | Iterable[bytes], time_reference_samples: int,
+    encoding: str = "pcm",
 ) -> None:
     write_pcm_wav(
         destination, sample_rate=sample_rate, channels=channels, sample_width=sample_width,
         frames=frames, time_reference_samples=time_reference_samples, originator_reference="protools_transfer",
+        encoding=encoding,
     )
 
 
@@ -87,15 +90,17 @@ def _render_protools_clip_export(
 
     destination = _stem_with_extension(destination_stem, ".wav")
     rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache)
+    width, encoding = export_format(decoded)
 
     time_reference = _beats_to_frames(clip.start_beats, tempo, decoded.frame_rate)
     _write_pt_wav_with_bext(
         destination,
         sample_rate=decoded.frame_rate,
-        channels=decoded.channels,
-        sample_width=decoded.sample_width,
+        channels=_clip_render_channels(clip, decoded),
+        sample_width=width,
         frames=rendered,
         time_reference_samples=time_reference,
+        encoding=encoding,
     )
     return ("timestamped-warp-approximation" if clip.is_warped else "timestamped-wav"), time_reference, destination
 
@@ -141,18 +146,22 @@ def _render_protools_logic_audio_export(
     available = decoded.frame_count - start
     count = available if ref.content_duration_samples is None else max(0, min(available, ref.content_duration_samples))
 
+    width, encoding = export_format(decoded)
+
     def window() -> Iterable[bytes]:
         for position in range(start, start + count, BLOCK_FRAMES):
-            yield decoded.read_frames(position, min(BLOCK_FRAMES, start + count - position))
+            frames = decoded.read_frames(position, min(BLOCK_FRAMES, start + count - position))
+            yield samples_as_float(frames, decoded.sample_width, "float", width) if encoding == "float" else frames
 
     destination = _stem_with_extension(destination_stem, ".wav")
     _write_pt_wav_with_bext(
         destination,
         sample_rate=decoded.frame_rate,
         channels=decoded.channels,
-        sample_width=decoded.sample_width,
+        sample_width=width,
         frames=window(),
         time_reference_samples=ref.start_position_samples,
+        encoding=encoding,
     )
     return "timestamped-wav", ref.start_position_samples, destination
 
@@ -195,6 +204,8 @@ def _export_ableton_audio(
                 if export_mode == "copied-source":
                     project.compatibility_warnings.append(
                         f"Clip '{clip.clip_name}' was copied without PCM rendering; recreate its trim and placement manually."
+                        + (f" Pan this mono source fully {('left', 'right')[clip.output_channel]}."
+                           if clip.output_channel is not None else "")
                     )
 
             manifest_clips.append(
@@ -205,6 +216,7 @@ def _export_ableton_audio(
                     "start_beats": round(clip.start_beats, 6),
                     "duration_beats": round(clip.duration_beats, 6),
                     "source_in_seconds": clip.source_in_seconds,
+                    "output_channel": clip.output_channel,
                     "is_warped": clip.is_warped,
                     "export_mode": export_mode,
                     "time_reference_samples": time_reference_samples,

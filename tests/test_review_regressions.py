@@ -178,10 +178,12 @@ def test_float_wav_duration_and_rendered_content(tmp_path):
     assert float(clip.find("CurrentEnd").get("Value")) == 20
     assert int(clip.find("SampleRef/DefaultSampleRate").get("Value")) == rate
     transfer = generate_protools_transfer(parse_ableton_project(result), tmp_path / "transfers")
-    with wave.open(str(next((transfer.package_path / "Audio Files").rglob("*.wav")))) as handle:
-        assert handle.getnframes() == rate * 10
-        assert handle.getsampwidth() == 4
-        assert handle.readframes(1) == struct.pack("<i", 536870912)
+    exported = next((transfer.package_path / "Audio Files").rglob("*.wav"))
+    info = read_audio_info(exported)
+    assert info.frame_count == rate * 10
+    assert info.sample_width == 4
+    assert info.encoding == "float"
+    assert DecodedAudio(exported, info).read_frames(0, 1) == struct.pack("<f", 0.25)
 
 
 def test_unknown_duration_is_reported_instead_of_four_beat_clip(tmp_path):
@@ -422,11 +424,13 @@ def test_logic_comp_wav_with_counted_pad_byte_preserves_all_complete_frames(tmp_
     assert DecodedAudio(source, info).frames == b"\x01\0\0" * 101
 
 
-def test_float64_audio_saturates_without_arithmetic_overflow(tmp_path):
+def test_float64_audio_retains_headroom_without_arithmetic_overflow(tmp_path):
     source = tmp_path / "float64.wav"
     fmt = struct.pack("<HHIIHH", 3, 1, 48000, 48000 * 8, 8, 64)
     samples = struct.pack("<ddd", 1e300, -1e300, 0.25)
     payload = b"WAVEfmt " + struct.pack("<I", 16) + fmt + b"data" + struct.pack("<I", len(samples)) + samples
     source.write_bytes(b"RIFF" + struct.pack("<I", len(payload)) + payload)
     decoded = DecodedAudio(source, read_audio_info(source))
-    assert struct.unpack("<iii", decoded.frames) == (2147483647, -2147483648, 536870912)
+    assert decoded.sample_width == 8
+    assert decoded.encoding == "float"
+    assert struct.unpack("<ddd", decoded.frames) == (1e300, -1e300, 0.25)

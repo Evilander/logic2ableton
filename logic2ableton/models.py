@@ -185,6 +185,7 @@ class AbletonAudioClip:
     is_disabled: bool = False
     source_issue: str | None = None
     source_in_seconds: float | None = None  # Source-file coordinate, independent of project tempo
+    output_channel: int | None = None  # Split-mono source: 0 left, 1 right in stereo exports
 
     @property
     def duration_beats(self) -> float:

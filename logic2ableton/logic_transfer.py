@@ -5,11 +5,15 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Iterable, Iterator
 
-from logic2ableton.audio import BLOCK_FRAMES, DecodedAudio, read_audio_info, write_pcm_wav
+from logic2ableton.audio import (
+    BLOCK_FRAMES, FLOAT_EXPORT_WIDTH, DecodedAudio, export_format, pack_float, place_mono_channel, read_audio_info,
+    samples_as_float, write_pcm_wav,
+)
 
 from logic2ableton.models import AbletonAudioClip, AbletonMidiTrack, AbletonProject, AbletonTrack
 from logic2ableton.paths import create_output_directory, safe_name as _safe_name
@@ -106,6 +110,7 @@ def _clip_rows(project: AbletonProject) -> list[dict[str, object]]:
                     "duration_beats": round(clip.duration_beats, 6),
                     "source_in_beats": round(clip.source_in_beats, 6),
                     "source_in_seconds": clip.source_in_seconds,
+                    "output_channel": clip.output_channel,
                     "is_warped": clip.is_warped,
                     "source_issue": clip.source_issue or "",
                     "relative_source_path": clip.relative_source_path or "",
@@ -163,10 +168,16 @@ def _encode_sample(value: int, sample_width: int) -> bytes:
     return int(value).to_bytes(sample_width, "little", signed=True)
 
 
-def _mix_pcm_frames(base: bytes, overlay: bytes, sample_width: int) -> bytes:
+def _mix_pcm_frames(base: bytes, overlay: bytes, sample_width: int, encoding: str = "pcm") -> bytes:
     if len(base) != len(overlay):
         raise ValueError("PCM mixes must have equal byte lengths")
 
+    if encoding == "float":
+        code = f"<{len(base) // sample_width}{'f' if sample_width == 4 else 'd'}"
+        return pack_float(
+            (left + right for left, right in zip(struct.unpack(code, base), struct.unpack(code, overlay), strict=True)),
+            sample_width,
+        )
     minimum, maximum = _sample_limits(sample_width)
     mixed = bytearray(len(base))
     for offset in range(0, len(base), sample_width):
@@ -187,6 +198,7 @@ def _render_clip_pcm(
     cache: dict[Path, DecodedAudio | None],
     start_frame: int = 0,
     frame_count: int | None = None,
+    out_encoding: str = "pcm",
 ) -> bytes | None:
     if clip.source_path is None or not clip.source_path.exists():
         return None
@@ -201,14 +213,29 @@ def _render_clip_pcm(
         else _beats_to_frames(clip.source_in_beats, tempo, decoded.frame_rate)
     )
     target_frame_count = max(1, _beats_to_frames(clip.duration_beats, tempo, decoded.frame_rate))
-    if (decoded.frame_rate, decoded.channels, decoded.sample_width) != (out_rate, out_channels, out_width):
+    channels = _clip_render_channels(clip, decoded)
+    if (decoded.frame_rate, channels) != (out_rate, out_channels):
+        return None
+    if out_encoding != "float" and (decoded.encoding, decoded.sample_width) != (out_encoding, out_width):
         return None
 
     target_frame_count = max(0, target_frame_count - start_frame)
     if frame_count is not None:
         target_frame_count = min(target_frame_count, frame_count)
     raw_frames = _slice_frames(decoded, source_start_frame + start_frame, target_frame_count)
+    if out_encoding == "float":
+        raw_frames = samples_as_float(raw_frames, decoded.sample_width, decoded.encoding, out_width)
+    if clip.output_channel is not None:
+        raw_frames = place_mono_channel(raw_frames, out_width, clip.output_channel)
     return _fit_to_frame_count(raw_frames, out_width, out_channels, target_frame_count)
+
+
+def _clip_render_channels(clip: AbletonAudioClip, decoded: DecodedAudio) -> int:
+    if clip.output_channel is None:
+        return decoded.channels
+    if decoded.channels != 1 or clip.output_channel not in (0, 1):
+        raise ValueError(f"Invalid split-mono source: {clip.clip_name}")
+    return 2
 
 
 def _iter_clip_pcm(
@@ -216,11 +243,13 @@ def _iter_clip_pcm(
     cache: dict[Path, DecodedAudio | None],
 ) -> Iterator[bytes]:
     count = max(1, _beats_to_frames(clip.duration_beats, tempo, decoded.frame_rate))
+    width, encoding = export_format(decoded)
     for start in range(0, count, BLOCK_FRAMES):
         block = _render_clip_pcm(
-            clip, tempo=tempo, out_rate=decoded.frame_rate, out_channels=decoded.channels,
-            out_width=decoded.sample_width, cache=cache, start_frame=start,
+            clip, tempo=tempo, out_rate=decoded.frame_rate, out_channels=_clip_render_channels(clip, decoded),
+            out_width=width, cache=cache, start_frame=start,
             frame_count=min(BLOCK_FRAMES, count - start),
+            out_encoding=encoding,
         )
         if block is None:
             raise ValueError(f"Source audio became unavailable: {clip.clip_name}")
@@ -230,10 +259,12 @@ def _iter_clip_pcm(
 def _write_wav_with_bext(
     destination: Path, *, sample_rate: int, channels: int, sample_width: int,
     frames: bytes | Iterable[bytes], time_reference_samples: int,
+    encoding: str = "pcm",
 ) -> None:
     write_pcm_wav(
         destination, sample_rate=sample_rate, channels=channels, sample_width=sample_width,
         frames=frames, time_reference_samples=time_reference_samples, originator_reference="ableton2logic",
+        encoding=encoding,
     )
 
 
@@ -261,20 +292,37 @@ def _build_midi_note_file(track: AbletonMidiTrack, *, tempo: float, numerator: i
     return build_midi_note_file(track, tempo=tempo, numerator=numerator, denominator=denominator)
 
 
-def _track_render_format(track: AbletonTrack, cache: dict[Path, DecodedAudio | None]) -> tuple[int, int, int] | None:
+def _track_render_format(
+    track: AbletonTrack, cache: dict[Path, DecodedAudio | None], *, tempo: float,
+) -> tuple[int, int, int, str] | None:
     decodable = [
-        _read_decoded_audio(clip.source_path, cache)
+        (clip, _read_decoded_audio(clip.source_path, cache))
         for clip in track.clips
         if clip.source_path is not None and clip.source_path.exists()
     ]
-    available = [audio for audio in decodable if audio is not None]
+    available = [(clip, audio) for clip, audio in decodable if audio is not None]
     if not available:
         return None
 
-    formats = {(audio.frame_rate, audio.channels, audio.sample_width) for audio in available}
+    clocks = {(audio.frame_rate, _clip_render_channels(clip, audio)) for clip, audio in available}
+    if len(clocks) != 1:
+        return None
+    rate, channels = next(iter(clocks))
+    formats = {export_format(audio) for _, audio in available}
+    # Overlap is judged in frames, as the stem places clips: butted clips whose
+    # beat positions differ by rounding do not mix.
+    end = -1
+    overlaps = False
+    for clip, _ in sorted(available, key=lambda item: item[0].start_beats):
+        overlaps |= _beats_to_frames(clip.start_beats, tempo, rate) < end
+        end = max(end, _beats_to_frames(clip.end_beats, tempo, rate))
+    if overlaps or (len(formats) > 1 and any(encoding == "float" for _, encoding in formats)):
+        # A float mix keeps its headroom; 32-bit integer sources keep 24 bits.
+        return rate, channels, FLOAT_EXPORT_WIDTH, "float"
     if len(formats) != 1:
         return None
-    return next(iter(formats))
+    width, encoding = next(iter(formats))
+    return rate, channels, width, encoding
 
 
 def _render_track_stem(
@@ -285,11 +333,11 @@ def _render_track_stem(
     project_length_beats: float,
     cache: dict[Path, DecodedAudio | None],
 ) -> tuple[str, int]:
-    format_info = _track_render_format(track, cache)
+    format_info = _track_render_format(track, cache, tempo=tempo)
     if format_info is None:
         return "reference-only", 0
 
-    sample_rate, channels, sample_width = format_info
+    sample_rate, channels, sample_width, encoding = format_info
     total_frames = max(1, _beats_to_frames(project_length_beats, tempo, sample_rate))
     frame_width = channels * sample_width
     available = [clip for clip in track.clips if clip.source_path is not None
@@ -316,13 +364,14 @@ def _render_track_stem(
                     clip, tempo=tempo, out_rate=sample_rate, out_channels=channels,
                     out_width=sample_width, cache=cache,
                     start_frame=start - clip_start, frame_count=end - start,
+                    out_encoding=encoding,
                 )
                 if rendered is None:
                     raise ValueError(f"Source audio became unavailable: {clip.clip_name}")
                 left, right = (start - block_start) * frame_width, (end - block_start) * frame_width
                 rendered = _fit_to_frame_count(rendered, sample_width, channels, end - start)
                 if any(start < previous_end and end > previous_start for previous_start, previous_end in occupied):
-                    mixed[left:right] = _mix_pcm_frames(bytes(mixed[left:right]), rendered, sample_width)
+                    mixed[left:right] = _mix_pcm_frames(bytes(mixed[left:right]), rendered, sample_width, encoding)
                 else:
                     mixed[left:right] = rendered
                 occupied.append((start, end))
@@ -331,6 +380,7 @@ def _render_track_stem(
     _write_wav_with_bext(
         destination, sample_rate=sample_rate, channels=channels, sample_width=sample_width,
         frames=blocks(), time_reference_samples=0,
+        encoding=encoding,
     )
     mode = "approximate-warp" if any(clip.is_warped for clip, _, _ in placements) else "timeline-stem"
     return mode, len(placements)
@@ -364,15 +414,17 @@ def _render_clip_export(
 
     destination = _stem_with_extension(destination_stem, ".wav")
     rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache)
+    width, encoding = export_format(decoded)
 
     time_reference = _beats_to_frames(clip.start_beats, tempo, decoded.frame_rate)
     _write_wav_with_bext(
         destination,
         sample_rate=decoded.frame_rate,
-        channels=decoded.channels,
-        sample_width=decoded.sample_width,
+        channels=_clip_render_channels(clip, decoded),
+        sample_width=width,
         frames=rendered,
         time_reference_samples=time_reference,
+        encoding=encoding,
     )
     return ("timestamped-warp-approximation" if clip.is_warped else "timestamped-wav"), time_reference, destination
 
@@ -573,6 +625,8 @@ def generate_logic_transfer(
                 if export_mode == "copied-source":
                     project.compatibility_warnings.append(
                         f"Clip '{clip.clip_name}' was copied without PCM rendering; recreate its trim and placement manually."
+                        + (f" Pan this mono source fully {('left', 'right')[clip.output_channel]}."
+                           if clip.output_channel is not None else "")
                     )
 
             manifest_clips.append(
@@ -585,6 +639,7 @@ def generate_logic_transfer(
                     "duration_beats": round(clip.duration_beats, 6),
                     "source_in_beats": round(clip.source_in_beats, 6),
                     "source_in_seconds": clip.source_in_seconds,
+                    "output_channel": clip.output_channel,
                     "is_warped": clip.is_warped,
                     "export_mode": export_mode,
                     "time_reference_samples": time_reference_samples,

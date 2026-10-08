@@ -23,6 +23,8 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from logic2ableton.limits import ExpansionBudget, read_session_bytes
+
 _BITCODE = b"0010111100101011"
 _ZMARK = 0x5A
 
@@ -375,6 +377,7 @@ def _parse_track_placements(
 
 
 def _parse_midi(reader: _SessionReader, blocks: list[_Block]) -> list[ProToolsMidiTrack]:
+    budget = ExpansionBudget("Pro Tools MIDI")
     # 1) Raw event chunks anchored by the MdNLB marker inside 0x2000 blocks.
     chunks: list[list[tuple[int, int, int, int]]] = []  # (pos_ticks, note, len_ticks, velocity)
     data = reader.data
@@ -450,9 +453,11 @@ def _parse_midi(reader: _SessionReader, blocks: list[_Block]) -> list[ProToolsMi
                     events = midi_regions.get(region_index)
                     if events is None:
                         continue
+                    budget.reserve_work(len(events))
                     for pos, note, length, velocity in events:
                         if not (0 <= note <= 127) or length <= 0:
                             continue
+                        budget.add_items()
                         track.notes.append(
                             ProToolsMidiNote(
                                 pitch=note,
@@ -470,7 +475,8 @@ def _parse_midi(reader: _SessionReader, blocks: list[_Block]) -> list[ProToolsMi
 def _parse_protools_session(ptx_path: Path) -> ProToolsSession:
     """Parse a Pro Tools session file into a ProToolsSession model."""
     ptx_path = Path(ptx_path)
-    raw = ptx_path.read_bytes()
+    with ptx_path.open("rb") as handle:
+        raw = read_session_bytes(handle, "Pro Tools session")
     if not raw or raw[0] != 0x03 or raw[1:17] != _BITCODE:
         raise ProToolsParseError(
             f"'{ptx_path.name}' does not look like a Pro Tools session (bad signature)."

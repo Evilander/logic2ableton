@@ -81,9 +81,10 @@ def _resolve_beat(entry: dict, *, bar_length_beats: float, label: str) -> float:
             raise ValueError(f"{label} has an invalid 'beat' (must be a number >= 1): {entry}")
         if math.isnan(beat_in_bar) or math.isinf(beat_in_bar):
             raise ValueError(f"{label} has a non-finite 'beat': {entry}")
-        if beat_in_bar < 1 or beat_in_bar > bar_length_beats:
+        if not 0 <= beat_in_bar - 1 < bar_length_beats:
             raise ValueError(
-                f"{label} has a 'beat' outside the bar's length (1 to {bar_length_beats}): {entry}"
+                f"{label} has a 'beat' outside the bar's length "
+                f"(at least 1 and less than {bar_length_beats + 1}): {entry}"
             )
         return (bar - 1) * bar_length_beats + (beat_in_bar - 1)
 

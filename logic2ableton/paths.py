@@ -2,8 +2,60 @@
 
 from __future__ import annotations
 
+import os
 import re
-from pathlib import Path
+import stat
+from pathlib import Path, PureWindowsPath
+
+# Windows reparse tags with this bit name another path: symlinks, junctions and
+# mount points. OneDrive placeholders and compressed or deduplicated files
+# carry reparse tags without it and are ordinary files to read.
+_NAME_SURROGATE = 0x20000000
+
+
+def contained_source_path(directory: Path, filename: str) -> Path | None:
+    """Reject external references before resolving any untrusted filesystem path.
+
+    Symlinks, junctions and mount points below the selected root are rejected:
+    resolving one could contact a remote share before containment is checked.
+    The user-selected root itself may be a symlink or a network directory.
+    """
+    if not filename or "\x00" in filename:
+        return None
+    normalized = filename.replace("\\", "/")
+    # Windows device paths and foreign drive letters must not become relative
+    # filenames when a session saved on Windows is opened on another platform.
+    windows = PureWindowsPath(filename)
+    if normalized.startswith(("//?/", "//./")) or (os.name != "nt" and windows.drive):
+        return None
+    root = Path(os.path.abspath(directory))
+    candidate = Path(os.path.abspath(root / normalized))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        # A selected symlink/junction root can have absolute media references
+        # using its canonical spelling. Only the trusted root is resolved.
+        root = root.resolve()
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            return None
+    else:
+        root = root.resolve()
+    candidate = root.joinpath(*relative.parts)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            info = current.lstat()
+        except OSError:
+            # Missing, or a name this system cannot hold ("kick?.wav" from a Mac
+            # session opened on Windows): nothing below it can be reached, and
+            # the caller reports the file as missing.
+            break
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0) & _NAME_SURROGATE:
+            return None
+    return candidate
 
 
 def safe_name(value: str, fallback: str = "project", *, max_bytes: int = 120) -> str:

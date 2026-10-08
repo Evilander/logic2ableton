@@ -124,6 +124,8 @@ import re
 import struct
 from dataclasses import dataclass, field, replace
 
+from logic2ableton.limits import ExpansionBudget, check_session_size
+
 PPQ = 960
 SEQUENCE_ORIGIN_TICKS = 38400   # bar 1 for markers; content origin for notes
 PROJECT_START_TICKS = 34560     # region placements count from here
@@ -816,6 +818,7 @@ def _place_take_folders(arrangement: LogicArrangement) -> None:
     placed_tracks: set[str] = set()
     used: set[int] = set()
     folders = 0
+    budget = ExpansionBudget("Logic take folders")
     for folder in list(arrangement.regions):
         if folder.kind != "midi" or folder.sequence_id not in contents:
             continue
@@ -826,6 +829,10 @@ def _place_take_folders(arrangement: LogicArrangement) -> None:
         span = folder.loop_span if folder.looped and length else length
         passes = math.ceil(span / length) if length else 1
         played = [entry for entry in contents[folder.sequence_id] if not entry.flags & _FLAG_TAKE]
+        if not played:
+            continue
+        budget.reserve_work(passes * len(played))
+        budget.add_items(passes * len(played))
         for repetition in range(passes):
             start = folder.tick + repetition * length
             window = (start, folder.tick + min((repetition + 1) * length, span)) if length else None
@@ -862,6 +869,7 @@ def _place_take_folders(arrangement: LogicArrangement) -> None:
 
 def decode_project_data(data: bytes, *, beats_per_bar: float = 4.0) -> LogicArrangement:
     """Decode tracks, regions, notes, markers and audio regions from ProjectData."""
+    check_session_size(len(data), "Logic ProjectData")
     arrangement = LogicArrangement()
     if not data:
         return arrangement

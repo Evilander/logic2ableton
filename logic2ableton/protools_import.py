@@ -1,8 +1,8 @@
 """Map parsed Pro Tools sessions onto the transfer models both lanes consume.
 
-Pro Tools stores stereo tracks as per-channel lanes that share one track name
-and reference the same interleaved source file (region names carry .L/.R
-suffixes). The mappers merge those lanes back into single tracks.
+Pro Tools stores stereo tracks as per-channel lanes that share one track name.
+Lanes referencing an interleaved source are merged; split-mono sources remain
+separate left/right tracks with explicit channel placement.
 
 Audio timeline positions are samples, so the sample->beat conversion needs a
 tempo. Session tempo is not recoverable from .ptx yet; callers pass one (CLI
@@ -18,7 +18,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from logic2ableton.audio import AUDIO_SUFFIXES
+from logic2ableton.audio import AUDIO_SUFFIXES, read_audio_info
+from logic2ableton.paths import contained_source_path
 
 from logic2ableton.models import (
     AbletonAudioClip,
@@ -31,6 +32,7 @@ from logic2ableton.models import (
     LogicMidiNote,
     LogicMidiTrack,
     LogicProject,
+    TrackMixerState,
 )
 from logic2ableton.protools_parser import ProToolsRegion, ProToolsSession, ProToolsTrack
 
@@ -43,24 +45,56 @@ def _strip_channel_suffix(name: str) -> str:
     return _CHANNEL_SUFFIX.sub("", name)
 
 
-def _merge_stereo_lanes(tracks: list[ProToolsTrack]) -> list[ProToolsTrack]:
-    """Collapse per-channel lanes that share a track name into one track.
+def _merge_stereo_lanes(
+    tracks: list[ProToolsTrack], *, source_channels: dict[str, int] | None = None,
+    output_channels: dict[str, int] | None = None,
+    reserved_names: set[str] | None = None,
+) -> list[ProToolsTrack]:
+    """Merge interleaved lanes and retain the channel of split-mono sources.
 
     Regions are deduplicated by placement (start/offset/length/source) with
     channel suffixes stripped from their names.
     """
-    merged: dict[str, ProToolsTrack] = {}
-    order: list[str] = []
+    merged: dict[tuple[str, int | None], ProToolsTrack] = {}
+    order: list[tuple[str, int | None]] = []
+    source_channels = source_channels or {}
+    used_names: set[str] = set()
+    reserved_names = {track.name for track in tracks} | (reserved_names or set())
+    file_sides: dict[tuple[str, str], set[str]] = {}
+    track_sides: dict[str, set[str]] = {}
     for track in tracks:
-        if track.name not in merged:
-            merged[track.name] = ProToolsTrack(name=track.name, index=len(order))
-            order.append(track.name)
-        target = merged[track.name]
-        seen = {
-            (r.start_samples, r.offset_samples, r.length_samples, r.filename)
-            for r in target.regions
-        }
         for region in track.regions:
+            suffix = _CHANNEL_SUFFIX.search(region.name) or _CHANNEL_SUFFIX.search(Path(region.filename).stem)
+            if suffix is not None:
+                file_sides.setdefault((track.name, region.filename), set()).add(suffix.group(1))
+                track_sides.setdefault(track.name, set()).add(suffix.group(1))
+    seen_by_track: dict[tuple[str, int | None], set[tuple]] = {}
+    for track in tracks:
+        for region in track.regions:
+            suffix = _CHANNEL_SUFFIX.search(region.name) or _CHANNEL_SUFFIX.search(Path(region.filename).stem)
+            side = suffix.group(1) if suffix is not None else None
+            channels = source_channels.get(region.filename)
+            mono = channels == 1 or (channels is None and len(file_sides.get((track.name, region.filename), ())) == 1)
+            # A mono track that plays one half of a split pair (Vox.L.wav) is
+            # still a centred mono track; only a track whose lanes play both
+            # halves is a split stereo track.
+            paired = {"L", "R"} <= track_sides.get(track.name, set())
+            channel = (0 if side == "L" else 1) if side in ("L", "R") and mono and paired else None
+            track_key = (track.name, channel)
+            if track_key not in merged:
+                name = track.name if channel is None else f"{track.name}.{('L', 'R')[channel]}"
+                base = name
+                number = 2
+                while name in used_names or (channel is not None and name in reserved_names):
+                    name = f"{base} ({number})"
+                    number += 1
+                used_names.add(name)
+                merged[track_key] = ProToolsTrack(name=name, index=len(order))
+                order.append(track_key)
+                if channel is not None and output_channels is not None:
+                    output_channels[name] = channel
+            target = merged[track_key]
+            seen = seen_by_track.setdefault(track_key, set())
             key = (region.start_samples, region.offset_samples, region.length_samples, region.filename)
             if key in seen:
                 continue
@@ -76,7 +110,7 @@ def _merge_stereo_lanes(tracks: list[ProToolsTrack]) -> list[ProToolsTrack]:
                     filename=region.filename,
                 )
             )
-    return [merged[name] for name in order]
+    return [merged[key] for key in order]
 
 
 def _resolve_audio_dir(session: ProToolsSession) -> Path:
@@ -84,8 +118,8 @@ def _resolve_audio_dir(session: ProToolsSession) -> Path:
 
 
 def _source_audio_path(directory: Path, filename: str, warnings: list[str]) -> Path | None:
-    candidate = (directory / filename.replace("\\", "/")).resolve()
-    if not candidate.is_relative_to(directory.resolve()):
+    candidate = contained_source_path(directory, filename)
+    if candidate is None:
         warning = f"Blocked source audio reference outside the session folder: {filename}"
     elif candidate.suffix.lower() not in AUDIO_SUFFIXES:
         warning = f"Unsupported source audio format '{candidate.suffix or '(none)'}', clip skipped: {filename}"
@@ -116,6 +150,8 @@ class ProToolsMediaPreflight:
     resolved_files: dict[str, Path] = field(default_factory=dict)
     missing_files: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    tracks: list[ProToolsTrack] = field(default_factory=list)
+    output_channels: dict[str, int] = field(default_factory=dict)
 
     @property
     def found_files(self) -> list[str]:
@@ -136,7 +172,8 @@ def resolve_protools_media(session: ProToolsSession) -> ProToolsMediaPreflight:
     referenced: set[str] = set()
     resolved: dict[str, Path] = {}
     missing: list[str] = []
-    for track in _merge_stereo_lanes(session.tracks):
+    source_channels: dict[str, int] = {}
+    for track in session.tracks:
         for region in track.regions:
             if not region.filename or region.filename in referenced:
                 continue
@@ -147,6 +184,22 @@ def resolve_protools_media(session: ProToolsSession) -> ProToolsMediaPreflight:
             resolved[region.filename] = file_path
             if not file_path.is_file():
                 missing.append(region.filename)
+            else:
+                try:
+                    source_channels[region.filename] = read_audio_info(file_path).channels
+                except (OSError, ValueError):
+                    pass
+
+    output_channels: dict[str, int] = {}
+    tracks = _merge_stereo_lanes(
+        session.tracks, source_channels=source_channels, output_channels=output_channels,
+        reserved_names={track.name for track in session.midi_tracks},
+    )
+    if output_channels:
+        warnings.append(
+            "Split-mono sources are preserved on separate left/right tracks: "
+            "Live tracks are hard-panned; rendered WAVs place each source in its original stereo channel."
+        )
 
     unique_missing = sorted(set(missing))
     if unique_missing:
@@ -161,6 +214,8 @@ def resolve_protools_media(session: ProToolsSession) -> ProToolsMediaPreflight:
         resolved_files=resolved,
         missing_files=unique_missing,
         warnings=warnings,
+        tracks=tracks,
+        output_channels=output_channels,
     )
 
 
@@ -176,7 +231,7 @@ def protools_to_logic_project(
     warnings = list(session.compatibility_warnings)
     warnings.append(_tempo_warning(tempo_value))
 
-    tracks = _merge_stereo_lanes(session.tracks)
+    tracks = media.tracks
     audio_refs: list[AudioFileRef] = []
     track_names: list[str] = []
     for track in tracks:
@@ -235,6 +290,8 @@ def protools_to_logic_project(
         track_names=track_names,
         alternative=0,
         midi_tracks=midi_tracks,
+        mixer_state={name: TrackMixerState(pan=-1.0 if channel == 0 else 1.0)
+                     for name, channel in media.output_channels.items()} or None,
         compatibility_warnings=warnings,
     )
 
@@ -259,7 +316,7 @@ def protools_to_ableton_project(
     def to_beats(samples: int) -> float:
         return samples * tempo_value / (session.sample_rate * 60)
 
-    tracks = _merge_stereo_lanes(session.tracks)
+    tracks = media.tracks
     audio_tracks: list[AbletonTrack] = []
     for track in tracks:
         clips: list[AbletonAudioClip] = []
@@ -282,6 +339,7 @@ def protools_to_ableton_project(
                     source_in_beats=to_beats(region.offset_samples),
                     is_warped=False,
                     source_issue=source_issue,
+                    output_channel=media.output_channels.get(track.name),
                 )
             )
         if clips:
@@ -341,7 +399,7 @@ def build_protools_import_report(
     )
     lines.append("")
 
-    merged = [t for t in _merge_stereo_lanes(session.tracks) if t.regions]
+    merged = [t for t in media.tracks if t.regions]
     lines.append(f"AUDIO TRACKS ({len(merged)}):")
     for i, track in enumerate(merged, 1):
         lines.append(f"  {i}. {track.name} - {len(track.regions)} clip(s)")

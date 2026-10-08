@@ -9,6 +9,8 @@ from pathlib import Path
 
 from logic2ableton.audio import AUDIO_SUFFIXES
 from logic2ableton.ableton_metadata import decode_meter, has_global_changes, read_global_parameter
+from logic2ableton.limits import ExpansionBudget, read_session_bytes
+from logic2ableton.paths import contained_source_path
 
 from logic2ableton.models import (
     AbletonAudioClip,
@@ -22,11 +24,15 @@ from logic2ableton.models import (
 
 
 def _read_set_root(als_path: Path) -> ET.Element:
-    try:
-        with gzip.open(als_path, "rb") as handle:
-            return ET.fromstring(handle.read())
-    except OSError:
-        return ET.parse(als_path).getroot()
+    with als_path.open("rb") as source:
+        compressed = source.read(2) == b"\x1f\x8b"
+        source.seek(0)
+        if compressed:
+            with gzip.GzipFile(fileobj=source) as handle:
+                data = read_session_bytes(handle, "Decompressed Live Set")
+        else:
+            data = read_session_bytes(source, "Live Set")
+    return ET.fromstring(data)
 
 
 def _value(element: ET.Element | None, default: str = "") -> str:
@@ -71,8 +77,13 @@ def _bool_value(element: ET.Element | None, default: bool = False) -> bool:
 
 
 def _live_set(root: ET.Element) -> ET.Element:
-    live_set = root.find("LiveSet")
-    return live_set if live_set is not None else root
+    if root.tag == "LiveSet":
+        return root
+    if root.tag == "Ableton":
+        live_set = root.find("LiveSet")
+        if live_set is not None:
+            return live_set
+    raise ValueError("The file does not contain an Ableton Live Set")
 
 
 def _project_name(als_path: Path, live_set: ET.Element) -> str:
@@ -102,14 +113,14 @@ def _resolve_source_path(als_path: Path, file_ref: ET.Element | None) -> tuple[P
 
     absolute_path = _value(file_ref.find("Path"))
     relative_path = _value(file_ref.find("RelativePath"))
-    project_root = als_path.parent.resolve()
+    project_root = als_path.parent
     absolute_candidate: Path | None = None
     relative_candidate: Path | None = None
     saw_blocked_candidate = False
 
     if absolute_path:
-        absolute_candidate = Path(absolute_path).expanduser().resolve()
-        if not _is_within_project(project_root, absolute_candidate):
+        absolute_candidate = contained_source_path(project_root, absolute_path)
+        if absolute_candidate is None:
             saw_blocked_candidate = True
             absolute_candidate = None
 
@@ -117,8 +128,8 @@ def _resolve_source_path(als_path: Path, file_ref: ET.Element | None) -> tuple[P
         normalized = relative_path.replace("\\", "/")
         if normalized.startswith("./"):
             normalized = normalized[2:]
-        relative_candidate = (als_path.parent / normalized).resolve()
-        if not _is_within_project(project_root, relative_candidate):
+        relative_candidate = contained_source_path(project_root, normalized)
+        if relative_candidate is None:
             saw_blocked_candidate = True
             relative_candidate = None
 
@@ -249,6 +260,7 @@ def _render_clip_notes(
     loop_end: float,
     start_relative: float,
     loop_on: bool,
+    budget: ExpansionBudget | None = None,
 ) -> list[AbletonMidiNote]:
     """Place clip-content notes on the arrangement the way Live plays them.
 
@@ -260,8 +272,13 @@ def _render_clip_notes(
     brace never sound; otherwise a note already sounding at the start marker
     plays from the clip start for its remaining length.
     """
+    if not events:
+        return []
+    budget = budget or ExpansionBudget("Ableton MIDI")
     clip_length = clip_end - clip_start
     loop_length = loop_end - loop_start
+    if not math.isfinite(clip_length) or not math.isfinite(loop_length):
+        raise ValueError("Non-finite MIDI clip or loop length in Live Set")
     if clip_length <= _BEAT_EPSILON or loop_length <= _BEAT_EPSILON:
         return []
     play_start = loop_start + start_relative
@@ -269,6 +286,9 @@ def _render_clip_notes(
         play_start = loop_start
     if loop_on:
         events = [event for event in events if loop_start <= event[1] < loop_end]
+    if not events:
+        return []
+    budget.reserve_work((clip_length / loop_length + 2) * len(events))
 
     notes: list[AbletonMidiNote] = []
     elapsed = 0.0
@@ -288,6 +308,7 @@ def _render_clip_notes(
             played = min(note_end, window_end) - onset
             if played <= _BEAT_EPSILON:
                 continue
+            budget.add_items()
             notes.append(
                 AbletonMidiNote(
                     pitch=pitch,
@@ -302,7 +323,11 @@ def _render_clip_notes(
     return notes
 
 
-def _parse_midi_clip(clip: ET.Element, track_name: str, tempo: float) -> AbletonMidiClip | None:
+def _parse_midi_clip(
+    clip: ET.Element, track_name: str, tempo: float, budget: ExpansionBudget | None = None,
+) -> AbletonMidiClip | None:
+    if _bool_value(clip.find("Disabled")):
+        return None
     start_beats = _float_value(clip.find("CurrentStart"), _float_attr(clip, "Time", 0.0))
     end_beats = _float_value(clip.find("CurrentEnd"), start_beats)
 
@@ -334,6 +359,7 @@ def _parse_midi_clip(clip: ET.Element, track_name: str, tempo: float) -> Ableton
         loop_end=_float_value(clip.find("Loop/LoopEnd"), max(end_beats, start_beats) - start_beats),
         start_relative=_float_value(clip.find("Loop/StartRelative"), 0.0),
         loop_on=is_looping,
+        budget=budget,
     )
     notes = [note for note in notes if note.start_beats >= 0]
     notes.sort(key=lambda note: (note.start_beats, note.pitch))
@@ -350,11 +376,12 @@ def _parse_midi_clip(clip: ET.Element, track_name: str, tempo: float) -> Ableton
 
 def _parse_midi_tracks(live_set: ET.Element, tempo: float) -> list[AbletonMidiTrack]:
     tracks: list[AbletonMidiTrack] = []
+    budget = ExpansionBudget("Ableton MIDI")
     for track in live_set.findall(".//Tracks/MidiTrack"):
         track_name = _value(track.find("Name/EffectiveName"), "MIDI Track")
         clips: list[AbletonMidiClip] = []
         for clip in track.findall(".//ArrangerAutomation/Events/MidiClip"):
-            parsed = _parse_midi_clip(clip, track_name, tempo)
+            parsed = _parse_midi_clip(clip, track_name, tempo, budget)
             if parsed is not None and not parsed.is_disabled:
                 clips.append(parsed)
         tracks.append(AbletonMidiTrack(name=track_name, clips=clips))

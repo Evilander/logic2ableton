@@ -9,6 +9,7 @@ import bisect
 from dataclasses import replace
 
 from logic2ableton.audio import read_audio_info
+from logic2ableton.limits import ExpansionBudget, read_session_bytes
 from logic2ableton.logic_project_data import (
     PPQ,
     SEQUENCE_ORIGIN_TICKS,
@@ -44,7 +45,7 @@ def parse_project_info(logicx_path: Path) -> dict:
     """Parse Resources/ProjectInformation.plist."""
     plist_path = logicx_path / "Resources" / "ProjectInformation.plist"
     with open(plist_path, "rb") as f:
-        data = plistlib.load(f)
+        data = plistlib.loads(read_session_bytes(f, "Logic project information"))
     return {
         "name": data.get("VariantNames", {}).get("0", logicx_path.stem),
         "last_saved_from": data.get("LastSavedFrom", ""),
@@ -58,7 +59,7 @@ def parse_metadata(logicx_path: Path, alternative: int = 0) -> dict:
     """Parse Alternatives/{N}/MetaData.plist."""
     plist_path = logicx_path / "Alternatives" / f"{alternative:03d}" / "MetaData.plist"
     with open(plist_path, "rb") as f:
-        data = plistlib.load(f)
+        data = plistlib.loads(read_session_bytes(f, "Logic project metadata"))
     # Software-instrument file references signal MIDI/instrument tracks; reverb
     # impulse responses are an audio-effect resource, not a MIDI-track indicator.
     instrument_keys = ("SamplerInstrumentsFiles", "QuicksamplerFiles", "AlchemyFiles", "UltrabeatFiles")
@@ -141,7 +142,7 @@ def _read_project_data(logicx_path: Path, alternative: int = 0) -> bytes:
     if not project_data_path.exists():
         return b""
     with open(project_data_path, "rb") as f:
-        return f.read()
+        return read_session_bytes(f, "Logic ProjectData")
 
 
 def extract_plugins(logicx_path: Path, alternative: int = 0, *, _data: bytes | None = None) -> list[PluginInstance]:
@@ -1063,23 +1064,33 @@ class _BeatClock:
         return self._beats_at(self._seconds_at(start_beats) + samples / self._rate) - start_beats
 
 
-def _unroll_regions(regions: list[LogicMidiRegion]) -> list[LogicMidiNote]:
+def _unroll_regions(
+    regions: list[LogicMidiRegion], budget: ExpansionBudget | None = None,
+) -> list[LogicMidiNote]:
     """Flatten regions to absolute notes, repeating looped content across its span."""
     notes: list[LogicMidiNote] = []
+    budget = budget or ExpansionBudget("Logic MIDI")
     for region in regions:
+        if region.is_muted or not region.notes or region.length_beats <= 0:
+            continue
         end = region.end_beats
         repeats = 1
         if region.is_looping and region.length_beats > 0:
+            budget.reserve_work((region.loop_span_beats / region.length_beats + 1) * len(region.notes))
             repeats = math.ceil(region.loop_span_beats / region.length_beats)
+        else:
+            budget.reserve_work(len(region.notes))
         for index in range(repeats):
             base = region.start_beats + index * region.length_beats
+            pass_end = min(end, base + region.length_beats)
             for note in region.notes:
                 start = base + note.start_beats
-                if start >= end or start < 0:
+                if note.start_beats < 0 or start >= pass_end or start < 0:
                     continue
-                duration = min(note.duration_beats, end - start)
+                duration = min(note.duration_beats, pass_end - start)
                 if duration <= 0:
                     continue
+                budget.add_items()
                 notes.append(LogicMidiNote(
                     pitch=note.pitch, start_beats=start, duration_beats=duration, velocity=note.velocity,
                 ))
@@ -1102,13 +1113,16 @@ def _without_stacked_notes(notes: list[LogicMidiNote]) -> list[LogicMidiNote]:
     return sorted((note for group in by_pitch.values() for note in group), key=lambda note: (note.start_beats, note.pitch))
 
 
-def _merge_overlapping_midi(regions: list[LogicMidiRegion]) -> tuple[list[LogicMidiRegion], list[str]]:
+def _merge_overlapping_midi(
+    regions: list[LogicMidiRegion], budget: ExpansionBudget | None = None,
+) -> tuple[list[LogicMidiRegion], list[str]]:
     """Join MIDI regions that overlap on one track into a single region.
 
     Logic plays overlapping MIDI regions together. A Live track plays one clip
     at a time, so each overlapping group becomes one clip with every note the
     group plays (loops unrolled). Returns the regions and the merged groups' names.
     """
+    budget = budget or ExpansionBudget("Logic MIDI merge")
     half_tick = 0.5 / PPQ
     groups: list[list[LogicMidiRegion]] = []
     group_end = 0.0
@@ -1129,7 +1143,7 @@ def _merge_overlapping_midi(regions: list[LogicMidiRegion]) -> tuple[list[LogicM
         start = group[0].start_beats
         end = max(region.end_beats for region in group)
         notes = _without_stacked_notes([
-            replace(note, start_beats=note.start_beats - start) for note in _unroll_regions(group)
+            replace(note, start_beats=note.start_beats - start) for note in _unroll_regions(group, budget)
         ])
         out.append(LogicMidiRegion(name=group[0].name, start_beats=start, length_beats=end - start, notes=notes))
         merged_names.append(" + ".join(region.name for region in group))
@@ -1416,6 +1430,10 @@ def _arrangement_midi_tracks(
     tracks: list[LogicMidiTrack] = []
     muted: list[str] = []
     merged: list[str] = []
+    content_budget = ExpansionBudget("Logic MIDI region content")
+    merge_budget = ExpansionBudget("Logic MIDI merge")
+    budget = ExpansionBudget("Logic MIDI")
+    clipped_tails: list[str] = []
     for track_id, placements in sorted(
         by_track.items(), key=lambda item: (min(p.lane for p in item[1]), min(p.tick for p in item[1]))
     ):
@@ -1427,11 +1445,18 @@ def _arrangement_midi_tracks(
                 continue
             window_start = sequence.content_start
             window_end = window_start + sequence.content_length
+            if placement.muted:
+                # Name only muted regions that would have played something.
+                if any(window_start <= note.tick - SEQUENCE_ORIGIN_TICKS < window_end for note in sequence.notes):
+                    muted.append(f"{track_name}: {sequence.name or 'region'}")
+                continue
+            content_budget.reserve_work(len(sequence.notes))
             notes = []
             for note in sequence.notes:
                 relative = note.tick - SEQUENCE_ORIGIN_TICKS
                 if not (window_start <= relative < window_end):
                     continue
+                content_budget.add_items()
                 notes.append(LogicMidiNote(
                     pitch=note.pitch,
                     start_beats=(relative - window_start) / PPQ,
@@ -1440,9 +1465,10 @@ def _arrangement_midi_tracks(
                 ))
             if not notes:
                 continue
-            if placement.muted:
-                muted.append(f"{track_name}: {sequence.name or 'region'}")
-                continue
+            if placement.looped and any(
+                note.start_beats + note.duration_beats > sequence.content_length / PPQ for note in notes
+            ):
+                clipped_tails.append(f"{track_name}: {sequence.name or 'region'}")
             notes.sort(key=lambda note: (note.start_beats, note.pitch))
             start_beats = arrangement.region_beats(placement.tick)
             if start_beats < 0:
@@ -1459,9 +1485,16 @@ def _arrangement_midi_tracks(
                 loop_span_beats=placement.loop_span / PPQ if placement.looped else None,
             ))
         if regions:
-            regions, merged_names = _merge_overlapping_midi(regions)
+            regions, merged_names = _merge_overlapping_midi(regions, merge_budget)
             merged.extend(f"{track_name}: {names}" for names in merged_names)
-            tracks.append(LogicMidiTrack(name=track_name, notes=_unroll_regions(regions), regions=regions))
+            tracks.append(LogicMidiTrack(name=track_name, notes=_unroll_regions(regions, budget), regions=regions))
+    if clipped_tails:
+        examples = ", ".join(clipped_tails[:5]) + (", ..." if len(clipped_tails) > 5 else "")
+        warnings.append(
+            f"{len(clipped_tails)} looped MIDI region(s) have notes crossing the loop boundary. "
+            f"Note tails are cut at each repetition in both the Live set and MIDI exports: {examples}. "
+            "Compare these with Logic; its original note-tail playback has not been verified."
+        )
     if merged:
         examples = ", ".join(merged[:5]) + (", ..." if len(merged) > 5 else "")
         warnings.append(
@@ -1527,6 +1560,7 @@ def _arrangement_audio_refs(
     placed: set[str] = set()
     undescribed = 0
     empty: list[str] = []
+    budget = ExpansionBudget("Logic audio regions")
     for placement in sorted(arrangement.regions, key=lambda p: (p.tick, p.lane)):
         if placement.kind != "audio":
             continue
@@ -1553,6 +1587,7 @@ def _arrangement_audio_refs(
         content_length = region.content_length if region else None
 
         # (start beats, source offset, source length) for each pass the region plays.
+        budget.add_items()
         passes: list[tuple[float, int, int | None]] = [(start_beats, content_offset, content_length)]
         if placement.looped and content_length:
             # Logic repeats the region end to end across the loop span and cuts
@@ -1561,8 +1596,14 @@ def _arrangement_audio_refs(
             # two, not another pass.
             span_beats = placement.loop_span / PPQ
             length_beats = clock.length_beats(start_beats, content_length)
+            if not math.isfinite(length_beats) or length_beats <= 0:
+                raise ValueError(f"Invalid audio loop length in region '{label}'")
             half_tick = 0.5 / PPQ
             if span_beats > length_beats * (1 + 1e-9) and not tempo_map.events and not lead_in:
+                repetitions = (span_beats - half_tick) / length_beats
+                budget.reserve_work(repetitions + 1)
+                # The initial pass above is replaced, not added to these passes.
+                budget.add_items(max(0, math.ceil(repetitions) - 1))
                 passes = []
                 repetition = 0
                 while repetition * length_beats < span_beats - half_tick:
@@ -1583,12 +1624,17 @@ def _arrangement_audio_refs(
                 position = start_beats
                 while position < span_end - half_tick:
                     pass_beats = clock.length_beats(position, content_length)
+                    if not math.isfinite(pass_beats) or position + pass_beats <= position:
+                        raise ValueError(f"Invalid audio loop length in region '{label}'")
                     length = (
                         content_length if position + pass_beats <= span_end + half_tick
                         else round(clock.samples_between(position, span_end))
                     )
                     if length <= 0:
                         break
+                    budget.reserve_work(1)
+                    if passes:
+                        budget.add_items()
                     passes.append((position, content_offset, length))
                     position += pass_beats
             if len(passes) > 1:
